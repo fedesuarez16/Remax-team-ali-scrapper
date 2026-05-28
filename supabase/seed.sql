@@ -1,0 +1,4 @@
+-- SEED CONVENTION
+-- All seed data MUST respect RLS — use service_role context or insert via
+-- SQL functions that bypass RLS (only in local dev seeds, never in prod).
+-- Domain seeds (test properties, leads) are added per-epic in EP-01+.

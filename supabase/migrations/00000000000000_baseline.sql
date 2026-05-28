@@ -1,0 +1,11 @@
+-- BASELINE CONVENTION (no domain tables yet — EP-01 adds them).
+-- RULE: every future table MUST enable RLS at creation and default-deny.
+-- Template for any new table:
+--
+--   create table public.<name> (...);
+--   alter table public.<name> enable row level security;
+--   -- then add explicit policies using auth.uid(); NO policy => no access.
+--
+-- The trusted Python backend uses the service_role key and bypasses RLS.
+-- User-facing access (Next.js) goes through RLS as the authenticated user.
+-- profiles table + auth.users FK trigger are added in EP-01, not here.
