@@ -6,8 +6,9 @@ const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 export type Property = {
   titulo: string | null; direccion: string; precio: number | null; moneda: 'USD' | 'ARS'
   tipo_operacion: string; tipo_propiedad: string; ambientes: number | null
-  m2_total: number | null; amenities: string[]; imagenes: string[]; fuente: string
-  url_origen: string | null; confianza_extraccion: number
+  m2_total: number | null; antiguedad: number | null; amenities: string[]
+  imagenes: string[]; fuente: string; url_origen: string | null
+  confianza_extraccion: number
 }
 export type SourceStatus = 'pending' | 'running' | 'done' | 'error'
 export type ProgressMap = Record<string, { status: SourceStatus; count: number; message: string }>
