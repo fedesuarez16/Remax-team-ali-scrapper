@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     SUPABASE_JWT_SECRET: str = ""
     DATABASE_URL: str = ""               # asyncpg dsn (app pool)
     CHECKPOINTER_DSN: str = ""            # psycopg dsn; falls back to DATABASE_URL
-    REDIS_URL: str = "redis://redis:6379"
+    REDIS_URL: str = "redis://localhost:6379"
     ANTHROPIC_API_KEY: str = ""
     APIFY_API_TOKEN: str = ""
     APIFY_USE_MOCK: bool = True

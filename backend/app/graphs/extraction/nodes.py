@@ -132,29 +132,30 @@ def deduplicate_properties(state: ScrapingState) -> dict:
 
 
 async def save_to_db(state: dict, config: RunnableConfig) -> dict:
-    pool = config['configurable']['db_pool']
+    pool = config['configurable'].get('db_pool')
     job_id = state.get('job_id')
     props = state.get('normalized_properties', [])
-    async with pool.acquire() as conn:
-        for p in props:
+    if pool is not None:
+        async with pool.acquire() as conn:
+            for p in props:
+                await conn.execute(
+                    '''insert into public.properties
+                       (titulo, direccion, direccion_norm, precio, moneda, tipo_operacion,
+                        tipo_propiedad, ambientes, m2_total, m2_cubiertos, antiguedad,
+                        amenities, imagenes, fuente, url_origen, scraping_job_id,
+                        confianza_extraccion)
+                       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+                       on conflict (direccion, precio, tipo_operacion) do nothing''',
+                    p.titulo, p.direccion, p.direccion_norm, p.precio, p.moneda,
+                    p.tipo_operacion, p.tipo_propiedad, p.ambientes, p.m2_total,
+                    p.m2_cubiertos, p.antiguedad, p.amenities, p.imagenes, p.fuente,
+                    p.url_origen, job_id, p.confianza_extraccion,
+                )
             await conn.execute(
-                '''insert into public.properties
-                   (titulo, direccion, direccion_norm, precio, moneda, tipo_operacion,
-                    tipo_propiedad, ambientes, m2_total, m2_cubiertos, antiguedad,
-                    amenities, imagenes, fuente, url_origen, scraping_job_id,
-                    confianza_extraccion)
-                   values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-                   on conflict (direccion, precio, tipo_operacion) do nothing''',
-                p.titulo, p.direccion, p.direccion_norm, p.precio, p.moneda,
-                p.tipo_operacion, p.tipo_propiedad, p.ambientes, p.m2_total,
-                p.m2_cubiertos, p.antiguedad, p.amenities, p.imagenes, p.fuente,
-                p.url_origen, job_id, p.confianza_extraccion,
+                '''update public.scraping_jobs
+                   set estado='done', prop_count=$2, completado_at=now() where id=$1''',
+                job_id, len(props),
             )
-        await conn.execute(
-            '''update public.scraping_jobs
-               set estado='done', prop_count=$2, completado_at=now() where id=$1''',
-            job_id, len(props),
-        )
     # emit property_batch + done over SSE
     await adispatch_custom_event('property_batch', {
         'event': 'property_batch', 'source': 'all', 'count': len(props),

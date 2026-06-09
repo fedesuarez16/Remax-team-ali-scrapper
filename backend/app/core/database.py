@@ -6,16 +6,17 @@ from app.core.config import settings
 
 
 async def create_db_pool() -> Any:
+    if not settings.DATABASE_URL:
+        return None
     pool = await asyncpg.create_pool(dsn=settings.DATABASE_URL, min_size=1, max_size=10)
-    if pool is None:
-        raise RuntimeError("Failed to create asyncpg pool")
     return pool
 
 
-async def create_checkpointer() -> AsyncPostgresSaver:
+async def create_checkpointer() -> AsyncPostgresSaver | None:
     dsn = settings.CHECKPOINTER_DSN or settings.DATABASE_URL
-    # AsyncPostgresSaver is an async context manager; we enter it and keep it open.
+    if not dsn:
+        return None
     cm = AsyncPostgresSaver.from_conn_string(dsn)
     saver = await cm.__aenter__()
-    await saver.setup()  # creates checkpoint tables on first run (idempotent)
+    await saver.setup()
     return saver

@@ -3,8 +3,6 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from arq import create_pool
-from arq.connections import RedisSettings
 
 from app.core.config import settings
 from app.core.database import create_db_pool, create_checkpointer
@@ -15,11 +13,11 @@ from app.api.v1.router import api_router
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.db_pool = await create_db_pool()
     app.state.checkpointer = await create_checkpointer()
-    app.state.arq = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
     yield
-    await app.state.arq.aclose()
-    await app.state.checkpointer.__aexit__(None, None, None)
-    await app.state.db_pool.close()
+    if app.state.checkpointer is not None:
+        await app.state.checkpointer.__aexit__(None, None, None)
+    if app.state.db_pool is not None:
+        await app.state.db_pool.close()
 
 
 app = FastAPI(title="multi-agent-realstate API", lifespan=lifespan)
