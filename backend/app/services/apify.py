@@ -16,10 +16,11 @@ SOURCES = ('zonaprop', 'mercadolibre', 'googlemaps', 'instagram')
 
 # ── Actor IDs ─────────────────────────────────────────────────────────────────
 _ACTORS: dict[str, str] = {
-    'zonaprop':     'crawlerbros~zonaprop-scraper',
+    'zonaprop':    'crawlerbros~zonaprop-scraper',
     'mercadolibre': 'easyapi~mercadolibre-search-results-scraper',
-    'googlemaps':   'compass~crawler-google-places',
-    'instagram':    'apify~instagram-post-scraper',
+    'googlemaps':  'compass~crawler-google-places',
+    'instagram':   'apify~instagram-post-scraper',
+    'website':     'apify~website-content-crawler',
 }
 
 _APIFY_BASE = 'https://api.apify.com/v2'
@@ -155,6 +156,15 @@ class BaseApifyService(ABC):
         filters: ScrapingFilters,
         on_progress: ProgressCb,
     ) -> list[RawProperty]:
+        ...
+
+    @abstractmethod
+    async def scrape_website(
+        self,
+        url: str,
+        on_progress: ProgressCb,
+    ) -> list[dict[str, str]]:
+        """Returns list of {url, text} dicts — one per crawled page."""
         ...
 
     @abstractmethod
@@ -307,6 +317,25 @@ class ApifyService(BaseApifyService):
         await on_progress('googlemaps', 'done', len(agencies))
         return agencies
 
+    async def scrape_website(self, url: str, on_progress: ProgressCb) -> list[dict[str, str]]:
+        label = url.replace('https://', '').replace('http://', '').split('/')[0]
+        await on_progress(f'web:{label}', 'running', 0)
+        input_data = {
+            'startUrls': [{'url': url}],
+            'maxCrawlDepth': 1,
+            'maxCrawlPages': 15,
+            'htmlTransformer': 'readableText',
+            'removeCookieWarnings': True,
+        }
+        raw_items = await self._run_actor('website', _ACTORS['website'], input_data)
+        pages = [
+            {'url': item.get('url', url), 'text': item.get('text') or item.get('markdown', '')}
+            for item in raw_items
+            if item.get('text') or item.get('markdown')
+        ]
+        await on_progress(f'web:{label}', 'done', len(pages))
+        return pages
+
     async def scrape_instagram_profile(self, handle: str, on_progress: ProgressCb) -> list[RawProperty]:
         await on_progress(f'instagram:{handle}', 'running', 0)
         input_data = {
@@ -376,6 +405,23 @@ class MockApifyService(BaseApifyService):
         ]
         await on_progress('googlemaps', 'done', len(agencies))
         return agencies
+
+    async def scrape_website(self, url: str, on_progress: ProgressCb) -> list[dict[str, str]]:
+        label = url.replace('https://', '').replace('http://', '').split('/')[0]
+        await on_progress(f'web:{label}', 'running', 0)
+        await asyncio.sleep(1.0)
+        zona = random.choice(_BARRIOS)
+        pages = []
+        for i in range(random.randint(3, 6)):
+            props_text = '\n'.join([
+                f'Departamento {random.randint(1,4)} ambientes en {zona} - '
+                f'USD {random.randint(80, 350) * 1000} - '
+                f'{random.randint(35, 150)}m² - {random.choice(_CALLES)} {random.randint(100, 4000)}'
+                for _ in range(random.randint(2, 5))
+            ])
+            pages.append({'url': f'{url}propiedades/pagina-{i+1}', 'text': props_text})
+        await on_progress(f'web:{label}', 'done', len(pages))
+        return pages
 
     async def scrape_instagram_profile(self, handle: str, on_progress: ProgressCb) -> list[RawProperty]:
         await on_progress(f'instagram:{handle}', 'running', 0)

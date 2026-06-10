@@ -53,7 +53,7 @@ export function AgencySelector({ agencies, message, onConfirm, disabled }: Props
 
       {withoutInstagram.length > 0 && (
         <div className="space-y-1.5">
-          <p className="text-xs font-medium text-zinc-500">Sin Instagram — se buscará en su sitio web</p>
+          <p className="text-xs font-medium text-zinc-500">Se buscará en su sitio web</p>
           {withoutInstagram.map((a) => (
             <AgencyRow key={a.id} agency={a} checked={selected.has(a.id)}
               onChange={() => toggle(a.id)} disabled={disabled} />

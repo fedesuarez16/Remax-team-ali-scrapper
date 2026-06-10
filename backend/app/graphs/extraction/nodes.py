@@ -10,10 +10,7 @@ from langgraph.types import Send, interrupt
 from app.core.config import settings
 from app.models.property import NormalizedProperty, ScrapingFilters
 from app.graphs.extraction.state import ScrapingState
-from app.graphs.extraction.tools import (
-    EXTRACT_FILTERS_TOOL, SYSTEM_PROMPT,
-    INSTAGRAM_EXTRACT_TOOL, INSTAGRAM_SYSTEM_PROMPT,
-)
+from app.graphs.extraction.tools import EXTRACT_FILTERS_TOOL, SYSTEM_PROMPT
 from app.services.apify import PORTAL_SOURCES, get_apify_service
 
 MODEL = 'claude-haiku-4-5-20251001'
@@ -204,7 +201,7 @@ async def review_agencies(state: ScrapingState, config: RunnableConfig) -> dict[
     await adispatch_custom_event('agencies_review', {
         'event': 'agencies_review',
         'agencies': [a.model_dump() for a in agencies],
-        'message': f'Encontré {len(agencies)} inmobiliarias. Seleccioná las que querés incluir para buscar en Instagram.',
+        'message': f'Encontré {len(agencies)} inmobiliarias locales. Seleccioná las que querés incluir para buscar propiedades en sus sitios web.',
     }, config=config)
 
     # INTERRUPT — graph pauses here, resumes when user sends selected_agency_ids
@@ -221,71 +218,105 @@ def route_after_review(state: ScrapingState) -> str | list[Any]:
     # Build a map of agency id → agency
     agency_map = {a.id: a for a in agencies}
     selected_agencies = [agency_map[aid] for aid in selected if aid in agency_map]
-    handles = [a.instagram_handle for a in selected_agencies if a.instagram_handle]
-
-    if not handles:
-        return 'no_instagram'
-
-    filters = state.get('filters')
+    # Fan-out: one website scraper per selected agency that has a website
     job_id = state.get('job_id')
+    agency_map = {a.id: a for a in agencies}
+    selected_agencies = [agency_map[aid] for aid in selected if aid in agency_map]
+    websites = [(a.nombre, a.sitio_web) for a in selected_agencies if a.sitio_web]
+
+    if not websites:
+        return 'no_websites'
+
     return [
-        Send('run_instagram_for_agency', {
-            'handle': handle,
-            'filters': filters,
-            'job_id': job_id,
-        })
-        for handle in handles
+        Send('run_website_scraper', {'nombre': nombre, 'url': url, 'job_id': job_id})
+        for nombre, url in websites
     ]
 
 
-# ── Phase 2: Instagram scraping + LLM extraction ──────────────────────────────
+# ── Phase 2: Website scraping + LLM extraction ───────────────────────────────
 
-async def run_instagram_for_agency(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
-    handle: str = state['handle']
+async def run_website_scraper(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+    url: str = state['url']
+    nombre: str = state.get('nombre', url)
     service = get_apify_service()
+    label = url.replace('https://', '').replace('http://', '').split('/')[0]
 
     async def on_progress(src: str, status: str, count: int) -> None:
         await adispatch_custom_event('progress', {
-            'event': 'progress', 'source': f'instagram:{handle}',
+            'event': 'progress', 'source': f'web:{label}',
             'status': status, 'count': count,
             'message': {
-                'running': f'Leyendo posts de @{handle}...',
-                'done': f'{count} posts de @{handle}',
-                'error': f'Error en @{handle}',
+                'running': f'Buscando propiedades en {nombre}...',
+                'done': f'{count} páginas escaneadas en {nombre}',
+                'error': f'Error en {nombre}',
             }.get(status, ''),
         }, config=config)
 
     try:
-        raw_posts = await service.scrape_instagram_profile(handle, on_progress)
+        pages = await service.scrape_website(url, on_progress)
     except Exception as exc:
         await adispatch_custom_event('error', {
-            'event': 'error', 'source': f'instagram:{handle}',
+            'event': 'error', 'source': f'web:{label}',
             'message': str(exc), 'recoverable': True,
         }, config=config)
-        return {'collected_properties': [], 'errors': [f'instagram:{handle}: {exc}']}
-    return {'collected_properties': raw_posts}
+        return {'website_pages': [], 'errors': [f'{url}: {exc}']}
+    return {'website_pages': pages}
 
 
-async def extract_instagram_llm(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
-    """Call Claude Haiku on each Instagram post caption to extract structured data."""
-    instagram_raws = [
-        r for r in state.get('collected_properties', [])
-        if r.fuente == 'instagram'
-    ]
+_WEBSITE_EXTRACT_TOOL = {
+    'name': 'extract_properties_from_webpage',
+    'description': 'Extrae todas las propiedades inmobiliarias listadas en el texto de una página web de una inmobiliaria argentina.',
+    'input_schema': {
+        'type': 'object',
+        'properties': {
+            'propiedades': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'titulo': {'type': ['string', 'null']},
+                        'precio': {'type': ['number', 'null']},
+                        'moneda': {'type': ['string', 'null'], 'enum': ['USD', 'ARS', None]},
+                        'tipo_operacion': {'type': ['string', 'null'], 'enum': ['venta', 'alquiler', None]},
+                        'tipo_propiedad': {'type': ['string', 'null'], 'enum': ['departamento', 'casa', 'ph', 'local', 'oficina', 'terreno', 'otro', None]},
+                        'ambientes': {'type': ['integer', 'null']},
+                        'm2': {'type': ['number', 'null']},
+                        'direccion': {'type': ['string', 'null']},
+                        'descripcion': {'type': ['string', 'null']},
+                    },
+                },
+            },
+        },
+        'required': ['propiedades'],
+    },
+}
 
+_WEBSITE_SYSTEM_PROMPT = (
+    'Sos un extractor de propiedades inmobiliarias de páginas web argentinas. '
+    'Dado el texto de una página, extraés TODAS las propiedades que aparezcan listadas. '
+    'Si no hay propiedades en la página, devolvé propiedades=[]. '
+    'Extraé datos de precios, ambientes, m², tipo y dirección cuando estén disponibles.'
+)
+
+
+async def extract_website_properties_llm(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
+    pages: list[dict[str, str]] = state.get('website_pages', [])
     results: list[NormalizedProperty] = []
-    for post in instagram_raws:
-        caption = post.titulo or ''
-        if not caption:
+
+    for page in pages:
+        text = page.get('text', '')
+        if not text or len(text) < 100:
             continue
+        # Truncate very long pages — Claude context limit
+        text = text[:6000]
         try:
             msg = await _client.messages.create(  # type: ignore[call-overload]
                 model=MODEL,
-                max_tokens=512,
-                system=INSTAGRAM_SYSTEM_PROMPT,
-                tools=[INSTAGRAM_EXTRACT_TOOL],  # type: ignore[list-item]
-                tool_choice={'type': 'tool', 'name': 'extract_property_from_instagram'},
-                messages=[{'role': 'user', 'content': f'Caption: {caption}'}],
+                max_tokens=1024,
+                system=_WEBSITE_SYSTEM_PROMPT,
+                tools=[_WEBSITE_EXTRACT_TOOL],  # type: ignore[list-item]
+                tool_choice={'type': 'tool', 'name': 'extract_properties_from_webpage'},
+                messages=[{'role': 'user', 'content': f'Página: {page.get("url", "")}\n\n{text}'}],
             )
         except Exception:
             continue
@@ -294,39 +325,32 @@ async def extract_instagram_llm(state: ScrapingState, config: RunnableConfig) ->
         if not tool_use:
             continue
 
-        data = tool_use.input
-        if not data.get('es_propiedad'):
-            continue
+        for prop in (tool_use.input.get('propiedades') or []):
+            filled = sum(1 for f in ['precio', 'tipo_operacion', 'tipo_propiedad', 'ambientes', 'm2', 'direccion']
+                         if prop.get(f) is not None)
+            confianza = min(1.0, filled / 6)
+            results.append(NormalizedProperty(
+                titulo=prop.get('titulo') or prop.get('descripcion', ''),
+                direccion=prop.get('direccion') or '',
+                direccion_norm=_normalize_address(prop.get('direccion') or ''),
+                precio=prop.get('precio'),
+                moneda=prop.get('moneda') or 'USD',  # type: ignore[arg-type]
+                tipo_operacion=prop.get('tipo_operacion') or 'venta',  # type: ignore[arg-type]
+                tipo_propiedad=prop.get('tipo_propiedad') or 'otro',  # type: ignore[arg-type]
+                ambientes=prop.get('ambientes'),
+                m2_total=prop.get('m2'),
+                fuente='googlemaps',
+                url_origen=page.get('url'),
+                confianza_extraccion=confianza,
+            ))
 
-        # Calculate confianza based on filled fields
-        filled = sum(1 for f in ['precio', 'tipo_operacion', 'tipo_propiedad', 'ambientes', 'm2', 'direccion_zona']
-                     if data.get(f) is not None)
-        confianza = min(1.0, filled / 6)
-
-        results.append(NormalizedProperty(
-            titulo=data.get('descripcion') or caption[:100],
-            direccion=data.get('direccion_zona') or post.direccion or '',
-            direccion_norm=_normalize_address(data.get('direccion_zona') or ''),
-            precio=data.get('precio'),
-            moneda=data.get('moneda') or 'USD',  # type: ignore[arg-type]
-            tipo_operacion=data.get('tipo_operacion') or 'venta',  # type: ignore[arg-type]
-            tipo_propiedad=data.get('tipo_propiedad') or 'otro',  # type: ignore[arg-type]
-            ambientes=data.get('ambientes'),
-            m2_total=data.get('m2'),
-            amenities=data.get('amenities') or [],
-            imagenes=post.imagenes,
-            fuente='instagram',
-            url_origen=post.url_origen,
-            confianza_extraccion=confianza,
-        ))
-
-    return {'instagram_properties': results}
+    return {'website_properties': results}
 
 
-async def save_instagram_properties(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+async def save_website_properties(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     pool = config['configurable'].get('db_pool')
     job_id = state.get('job_id')
-    props: list[NormalizedProperty] = state.get('instagram_properties', [])
+    props: list[NormalizedProperty] = state.get('website_properties', [])
 
     if pool is not None:
         async with pool.acquire() as conn:
@@ -348,22 +372,21 @@ async def save_instagram_properties(state: dict[str, Any], config: RunnableConfi
 
     if props:
         await adispatch_custom_event('property_batch', {
-            'event': 'property_batch', 'source': 'instagram', 'count': len(props),
+            'event': 'property_batch', 'source': 'local', 'count': len(props),
             'properties': [p.model_dump() for p in props],
         }, config=config)
 
     await adispatch_custom_event('done', {
         'event': 'done', 'job_id': job_id, 'total_count': total,
-        'sources': [*list(PORTAL_SOURCES), 'instagram'],
+        'sources': [*list(PORTAL_SOURCES), 'local'],
     }, config=config)
     return {}
 
 
-async def no_instagram(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
-    """Terminal node when no Instagram handles were selected or found."""
+async def no_websites(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
     await adispatch_custom_event('agent_message', {
         'event': 'agent_message',
-        'message': 'Ninguna inmobiliaria seleccionada tiene Instagram detectado. Para buscar en Instagram necesitás ingresar los handles manualmente o usar inmobiliarias con perfil público.',
+        'message': 'Las inmobiliarias seleccionadas no tienen sitio web registrado.',
     }, config=config)
     await adispatch_custom_event('done', {
         'event': 'done',

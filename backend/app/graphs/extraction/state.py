@@ -20,6 +20,7 @@ class ScrapingState(TypedDict, total=False):
     # Phase 1 — agency discovery (fan-in reducer)
     agencies: Annotated[list[Agency], operator.add]
 
-    # Phase 2 — Instagram (set after interrupt resume)
+    # Phase 2 — Website scraping (set after interrupt resume)
     selected_agency_ids: list[str]
-    instagram_properties: list[NormalizedProperty]
+    website_pages: Annotated[list[dict], operator.add]   # raw {url, text} per page
+    website_properties: list[NormalizedProperty]
