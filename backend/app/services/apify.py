@@ -158,6 +158,14 @@ class BaseApifyService(ABC):
         ...
 
     @abstractmethod
+    async def scrape_instagram_profile(
+        self,
+        handle: str,
+        on_progress: ProgressCb,
+    ) -> list[RawProperty]:
+        ...
+
+    @abstractmethod
     async def scrape_agencies(
         self,
         zona: str,
@@ -299,6 +307,19 @@ class ApifyService(BaseApifyService):
         await on_progress('googlemaps', 'done', len(agencies))
         return agencies
 
+    async def scrape_instagram_profile(self, handle: str, on_progress: ProgressCb) -> list[RawProperty]:
+        await on_progress(f'instagram:{handle}', 'running', 0)
+        input_data = {
+            'username': [handle],
+            'resultsLimit': 30,
+            'onlyPostsNewerThan': '3 months',
+            'dataDetailLevel': 'basicData',
+        }
+        raw_items = await self._run_actor('instagram', _ACTORS['instagram'], input_data)
+        results = [p for item in raw_items if (p := _norm_instagram(item)) is not None]
+        await on_progress(f'instagram:{handle}', 'done', len(results))
+        return results
+
 
 # ── Mock implementation ────────────────────────────────────────────────────────
 
@@ -355,6 +376,15 @@ class MockApifyService(BaseApifyService):
         ]
         await on_progress('googlemaps', 'done', len(agencies))
         return agencies
+
+    async def scrape_instagram_profile(self, handle: str, on_progress: ProgressCb) -> list[RawProperty]:
+        await on_progress(f'instagram:{handle}', 'running', 0)
+        await asyncio.sleep(1.0)
+        total = random.randint(4, 8)
+        filters = ScrapingFilters(zona=random.choice(_BARRIOS))
+        posts = [self._fake_property('instagram', filters) for _ in range(total)]
+        await on_progress(f'instagram:{handle}', 'done', total)
+        return posts
 
     def _fake_property(self, source: str, f: ScrapingFilters) -> RawProperty:
         zona = f.zona or random.choice(_BARRIOS)

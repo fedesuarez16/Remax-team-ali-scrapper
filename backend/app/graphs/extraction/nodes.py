@@ -242,7 +242,6 @@ def route_after_review(state: ScrapingState) -> str | list[Any]:
 
 async def run_instagram_for_agency(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     handle: str = state['handle']
-    filters: ScrapingFilters = state['filters']
     service = get_apify_service()
 
     async def on_progress(src: str, status: str, count: int) -> None:
@@ -257,8 +256,7 @@ async def run_instagram_for_agency(state: dict[str, Any], config: RunnableConfig
         }, config=config)
 
     try:
-        # Use scrape_source with 'instagram' source
-        raw_posts = await service.scrape_source('instagram', filters, on_progress)
+        raw_posts = await service.scrape_instagram_profile(handle, on_progress)
     except Exception as exc:
         await adispatch_custom_event('error', {
             'event': 'error', 'source': f'instagram:{handle}',
