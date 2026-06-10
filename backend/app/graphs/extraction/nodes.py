@@ -361,6 +361,10 @@ async def save_instagram_properties(state: dict[str, Any], config: RunnableConfi
 
 async def no_instagram(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
     """Terminal node when no Instagram handles were selected or found."""
+    await adispatch_custom_event('agent_message', {
+        'event': 'agent_message',
+        'message': 'Ninguna inmobiliaria seleccionada tiene Instagram detectado. Para buscar en Instagram necesitás ingresar los handles manualmente o usar inmobiliarias con perfil público.',
+    }, config=config)
     await adispatch_custom_event('done', {
         'event': 'done',
         'job_id': state.get('job_id'),

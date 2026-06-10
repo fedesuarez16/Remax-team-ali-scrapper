@@ -117,10 +117,6 @@ export function useSSEStream() {
   const resumeScraping = useCallback(async (jobId: string, selectedAgencyIds: string[]) => {
     setIsStreaming(true)
 
-    const pid = crypto.randomUUID()
-    progressMsgId.current = pid
-    setMessages((p) => [...p, { id: pid, type: 'progress', progress: {} }])
-
     // POST /resume returns a StreamingResponse — consume it with fetch
     let resp: Response
     try {
@@ -137,13 +133,14 @@ export function useSSEStream() {
     let buf = ''
 
     const processLine = (line: string) => {
-      if (line.startsWith('event:')) return  // store event name if needed
       if (!line.startsWith('data:')) return
       try {
         const d = JSON.parse(line.slice(5).trim())
         if (d.event === 'progress') upsertProgress(d.source, d.status, d.count, d.message)
         else if (d.event === 'property_batch')
           setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'properties', properties: d.properties }])
+        else if (d.event === 'agent_message')
+          setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'agent', text: d.message }])
         else if (d.event === 'done') setIsStreaming(false)
         else if (d.event === 'error')
           setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'agent', text: `Error: ${d.message}` }])
