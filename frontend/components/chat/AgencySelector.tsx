@@ -76,7 +76,7 @@ export function AgencySelector({ agencies, message, onConfirm, disabled }: Props
         <button
           onClick={handleConfirm}
           disabled={disabled || selectedCount === 0 || isLoading}
-          className="flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex items-center gap-2 rounded-xl bg-foreground px-4 py-2 text-sm font-medium text-background transition hover:bg-foreground/85 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {isLoading ? (
             <>
@@ -97,24 +97,24 @@ function AgencyRow({ agency: a, checked, onChange, disabled }: {
 }) {
   return (
     <label className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 transition
-      ${checked ? 'border-violet-500/30 bg-violet-500/10' : 'border-border hover:border-border hover:bg-muted/50'}
+      ${checked ? 'border-foreground/40 bg-muted' : 'border-border hover:border-foreground/20 hover:bg-muted/50'}
       ${disabled ? 'cursor-not-allowed opacity-50' : ''}`}
     >
       <input type="checkbox" checked={checked} onChange={onChange}
-        disabled={disabled} className="mt-0.5 accent-violet-500" />
+        disabled={disabled} className="mt-0.5 accent-foreground" />
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-foreground truncate">{a.nombre}</span>
           {a.calificacion && (
-            <span className="flex shrink-0 items-center gap-0.5 text-xs text-amber-500">
-              <Star className="size-3 fill-amber-500" />
+            <span className="flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground">
+              <Star className="size-3 fill-current" />
               {a.calificacion.toFixed(1)}
             </span>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
           {a.instagram_handle && (
-            <span className="flex items-center gap-1 text-xs text-violet-600">
+            <span className="flex items-center gap-1 text-xs text-foreground">
               @{a.instagram_handle}
             </span>
           )}

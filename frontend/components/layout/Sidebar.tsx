@@ -50,8 +50,8 @@ export default function Sidebar() {
 
       {/* Brand header */}
       <div className="flex items-center gap-3 border-b border-sidebar-border px-4 py-4">
-        <div className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 shadow shadow-violet-500/20">
-          <Building2 className="size-4 text-white" />
+        <div className="flex size-8 items-center justify-center rounded-lg bg-foreground">
+          <Building2 className="size-4 text-background" />
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold">PropSearch AI</p>
@@ -63,7 +63,7 @@ export default function Sidebar() {
       <div className="px-3 pt-3">
         <Link
           href="/chat"
-          className="flex w-full items-center gap-2 rounded-xl bg-violet-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-violet-500"
+          className="flex w-full items-center gap-2 rounded-xl bg-foreground px-3 py-2 text-sm font-medium text-background transition hover:bg-foreground/85"
         >
           <Plus className="size-4" />
           Nueva búsqueda
@@ -124,7 +124,7 @@ export default function Sidebar() {
             value={agency.nombre}
             onChange={(e) => handleAgencyChange('nombre', e.target.value)}
             onBlur={() => handleAgencyBlur('nombre')}
-            className="w-full rounded-lg border border-sidebar-border bg-sidebar-accent/50 px-2.5 py-1.5 text-xs text-sidebar-foreground placeholder:text-sidebar-foreground/40 focus:outline-none focus:ring-1 focus:ring-violet-500/40"
+            className="w-full rounded-lg border border-sidebar-border bg-sidebar-accent/50 px-2.5 py-1.5 text-xs text-sidebar-foreground placeholder:text-sidebar-foreground/40 focus:outline-none focus:ring-1 focus:ring-foreground/20 focus:border-foreground/30"
           />
           <input
             type="tel"
@@ -132,7 +132,7 @@ export default function Sidebar() {
             value={agency.telefono}
             onChange={(e) => handleAgencyChange('telefono', e.target.value)}
             onBlur={() => handleAgencyBlur('telefono')}
-            className="w-full rounded-lg border border-sidebar-border bg-sidebar-accent/50 px-2.5 py-1.5 text-xs text-sidebar-foreground placeholder:text-sidebar-foreground/40 focus:outline-none focus:ring-1 focus:ring-violet-500/40"
+            className="w-full rounded-lg border border-sidebar-border bg-sidebar-accent/50 px-2.5 py-1.5 text-xs text-sidebar-foreground placeholder:text-sidebar-foreground/40 focus:outline-none focus:ring-1 focus:ring-foreground/20 focus:border-foreground/30"
           />
           <input
             type="tel"
@@ -140,7 +140,7 @@ export default function Sidebar() {
             value={agency.whatsapp}
             onChange={(e) => handleAgencyChange('whatsapp', e.target.value)}
             onBlur={() => handleAgencyBlur('whatsapp')}
-            className="w-full rounded-lg border border-sidebar-border bg-sidebar-accent/50 px-2.5 py-1.5 text-xs text-sidebar-foreground placeholder:text-sidebar-foreground/40 focus:outline-none focus:ring-1 focus:ring-violet-500/40"
+            className="w-full rounded-lg border border-sidebar-border bg-sidebar-accent/50 px-2.5 py-1.5 text-xs text-sidebar-foreground placeholder:text-sidebar-foreground/40 focus:outline-none focus:ring-1 focus:ring-foreground/20 focus:border-foreground/30"
           />
         </div>
       </div>

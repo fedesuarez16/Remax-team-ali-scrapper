@@ -23,7 +23,6 @@ function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const searchParams = useSearchParams()
 
-  // Prefill from ?q= param
   useEffect(() => {
     const q = searchParams.get('q')
     if (q) {
@@ -58,16 +57,16 @@ function ChatPage() {
 
       {/* Header */}
       <header className="flex items-center gap-3 border-b border-border px-6 py-4">
-        <div className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 shadow-lg shadow-violet-500/20">
-          <Building2 className="size-4 text-white" />
+        <div className="flex size-8 items-center justify-center rounded-lg bg-foreground">
+          <Building2 className="size-4 text-background" />
         </div>
         <div>
           <h1 className="text-sm font-semibold text-foreground">PropSearch AI</h1>
           <p className="text-xs text-muted-foreground">Buscador inteligente de propiedades</p>
         </div>
-        <div className="ml-auto flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1">
-          <span className="size-1.5 rounded-full bg-emerald-500" />
-          <span className="text-xs font-medium text-emerald-600">Online</span>
+        <div className="ml-auto flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1">
+          <span className="size-1.5 rounded-full bg-foreground" />
+          <span className="text-xs font-medium text-foreground">Online</span>
         </div>
       </header>
 
@@ -76,10 +75,10 @@ function ChatPage() {
         {isEmpty ? (
           <div className="flex h-full flex-col items-center justify-center gap-8 px-4">
             <div className="text-center">
-              <div className="mx-auto mb-4 flex size-16 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500/20 to-indigo-600/20 ring-1 ring-border">
-                <Sparkles className="size-7 text-violet-500" />
+              <div className="mx-auto mb-4 flex size-16 items-center justify-center rounded-2xl bg-muted ring-1 ring-border">
+                <Sparkles className="size-7 text-foreground" />
               </div>
-              <h2 className="text-2xl font-semibold text-foreground">¿Qué propiedad buscás?</h2>
+              <h2 className="text-2xl font-semibold tracking-tight text-foreground">¿Qué propiedad buscás?</h2>
               <p className="mt-2 text-sm text-muted-foreground">
                 Describí en lenguaje natural y busco en todos los portales.
               </p>
@@ -89,9 +88,9 @@ function ChatPage() {
                 <button
                   key={s}
                   onClick={() => { setInput(s); textareaRef.current?.focus() }}
-                  className="flex items-center gap-2 rounded-xl border border-border bg-muted/50 px-4 py-3 text-left text-sm text-muted-foreground transition hover:border-border hover:bg-muted hover:text-foreground"
+                  className="flex items-center gap-2 rounded-xl border border-border bg-card px-4 py-3 text-left text-sm text-muted-foreground transition hover:border-foreground/20 hover:bg-muted hover:text-foreground"
                 >
-                  <MapPin className="size-3.5 shrink-0 text-violet-500" />
+                  <MapPin className="size-3.5 shrink-0 text-muted-foreground" />
                   {s}
                 </button>
               ))}
@@ -102,7 +101,7 @@ function ChatPage() {
             {messages.map((m) => {
               if (m.type === 'user') return (
                 <div key={m.id} className="flex justify-end">
-                  <div className="max-w-[75%] rounded-2xl rounded-tr-sm bg-violet-600 px-4 py-2.5 text-sm text-white shadow-lg shadow-violet-500/10">
+                  <div className="max-w-[75%] rounded-2xl rounded-tr-sm bg-foreground px-4 py-2.5 text-sm text-background">
                     {m.text}
                   </div>
                 </div>
@@ -110,8 +109,8 @@ function ChatPage() {
 
               if (m.type === 'agent') return (
                 <div key={m.id} className="flex items-start gap-3">
-                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 shadow shadow-violet-500/20">
-                    <Sparkles className="size-3.5 text-white" />
+                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-foreground">
+                    <Sparkles className="size-3.5 text-background" />
                   </div>
                   <div className="max-w-[75%] rounded-2xl rounded-tl-sm bg-card px-4 py-2.5 text-sm text-foreground ring-1 ring-border">
                     {m.text}
@@ -121,8 +120,8 @@ function ChatPage() {
 
               if (m.type === 'progress') return (
                 <div key={m.id} className="flex items-start gap-3">
-                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 shadow shadow-violet-500/20">
-                    <Sparkles className="size-3.5 text-white" />
+                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-foreground">
+                    <Sparkles className="size-3.5 text-background" />
                   </div>
                   <ProgressBubble progress={m.progress} />
                 </div>
@@ -130,8 +129,8 @@ function ChatPage() {
 
               if (m.type === 'agencies') return (
                 <div key={m.id} className="flex items-start gap-3">
-                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 shadow shadow-violet-500/20">
-                    <Sparkles className="size-3.5 text-white" />
+                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-foreground">
+                    <Sparkles className="size-3.5 text-background" />
                   </div>
                   <AgencySelector
                     agencies={m.agencies}
@@ -166,7 +165,7 @@ function ChatPage() {
           'mx-auto flex w-full max-w-3xl items-end gap-3 rounded-2xl border bg-card px-4 py-3 transition-all',
           isStreaming
             ? 'border-border opacity-60'
-            : 'border-border focus-within:border-violet-500/40 focus-within:ring-2 focus-within:ring-violet-500/40'
+            : 'border-border focus-within:border-foreground/30 focus-within:ring-2 focus-within:ring-foreground/10'
         )}>
           <textarea
             ref={textareaRef}
@@ -185,7 +184,7 @@ function ChatPage() {
             className={cn(
               'flex size-8 shrink-0 items-center justify-center rounded-xl transition-all',
               input.trim() && !isStreaming
-                ? 'bg-violet-600 text-white shadow-lg shadow-violet-500/20 hover:bg-violet-500'
+                ? 'bg-foreground text-background hover:bg-foreground/85'
                 : 'bg-muted text-muted-foreground cursor-not-allowed'
             )}
           >

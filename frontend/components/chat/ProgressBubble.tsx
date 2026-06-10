@@ -8,15 +8,15 @@ const LABEL: Record<string, string> = {
 }
 
 function StatusIcon({ status }: { status: SourceStatus }) {
-  if (status === 'running') return <Loader2 className="size-3.5 animate-spin text-violet-500" />
+  if (status === 'running') return <Loader2 className="size-3.5 animate-spin text-foreground" />
   if (status === 'done') return (
-    <div className="flex size-3.5 items-center justify-center rounded-full bg-emerald-500/20">
-      <Check className="size-2.5 text-emerald-600" strokeWidth={3} />
+    <div className="flex size-3.5 items-center justify-center rounded-full bg-foreground">
+      <Check className="size-2.5 text-background" strokeWidth={3} />
     </div>
   )
   if (status === 'error') return (
-    <div className="flex size-3.5 items-center justify-center rounded-full bg-red-500/20">
-      <X className="size-2.5 text-red-500" strokeWidth={3} />
+    <div className="flex size-3.5 items-center justify-center rounded-full bg-muted-foreground/20">
+      <X className="size-2.5 text-foreground" strokeWidth={3} />
     </div>
   )
   return <Circle className="size-3.5 text-muted-foreground/40" />
@@ -29,7 +29,7 @@ function StatusBar({ progress }: { progress: ProgressMap }) {
   return (
     <div className="h-0.5 w-full overflow-hidden rounded-full bg-border">
       <div
-        className="h-full rounded-full bg-gradient-to-r from-violet-500 to-indigo-500 transition-all duration-500"
+        className="h-full rounded-full bg-foreground transition-all duration-500"
         style={{ width: `${pct}%` }}
       />
     </div>
@@ -56,8 +56,8 @@ export function ProgressBubble({ progress }: { progress: ProgressMap }) {
             <StatusIcon status={s.status} />
             <span className={`flex-1 text-xs font-medium transition-colors ${
               s.status === 'done' ? 'text-foreground' :
-              s.status === 'running' ? 'text-violet-600' :
-              s.status === 'error' ? 'text-red-500' :
+              s.status === 'running' ? 'text-foreground' :
+              s.status === 'error' ? 'text-muted-foreground line-through' :
               'text-muted-foreground'
             }`}>
               {LABEL[src] ?? src}
