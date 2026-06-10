@@ -1,33 +1,26 @@
 import logging
 from typing import Any
 
-import asyncpg  # type: ignore[import-untyped]
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from app.core.config import settings
 
 log = logging.getLogger(__name__)
 
 
-async def create_db_pool() -> Any:
-    if not settings.DATABASE_URL:
+async def create_supabase_client() -> Any:
+    if not settings.SUPABASE_URL or not settings.SUPABASE_SERVICE_ROLE_KEY:
+        log.warning("Supabase credentials not set — running without persistence.")
         return None
     try:
-        pool = await asyncpg.create_pool(dsn=settings.DATABASE_URL, min_size=1, max_size=10)
-        return pool
+        from supabase import acreate_client  # type: ignore[attr-defined]
+        client = await acreate_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+        log.info("Supabase client connected.")
+        return client
     except Exception as e:
-        log.warning("DB pool unavailable (%s) — running without persistence.", e)
+        log.warning("Supabase client unavailable (%s) — running without persistence.", e)
         return None
 
 
-async def create_checkpointer() -> AsyncPostgresSaver | None:
-    dsn = settings.CHECKPOINTER_DSN or settings.DATABASE_URL
-    if not dsn:
-        return None
-    try:
-        cm = AsyncPostgresSaver.from_conn_string(dsn)
-        saver = await cm.__aenter__()
-        await saver.setup()
-        return saver
-    except Exception as e:
-        log.warning("Postgres checkpointer unavailable (%s) — falling back to MemorySaver.", e)
-        return None
+async def create_checkpointer() -> Any:
+    """Always returns MemorySaver — Postgres checkpointer requires direct DB access."""
+    from langgraph.checkpoint.memory import MemorySaver
+    return MemorySaver()

@@ -154,26 +154,35 @@ def deduplicate_properties(state: ScrapingState) -> dict[str, Any]:
     return {'normalized_properties': unique}
 
 
+def _prop_to_dict(p: NormalizedProperty, job_id: str | None) -> dict[str, Any]:
+    return {
+        'titulo': p.titulo, 'direccion': p.direccion, 'direccion_norm': p.direccion_norm,
+        'precio': float(p.precio) if p.precio is not None else None,
+        'moneda': p.moneda, 'tipo_operacion': p.tipo_operacion, 'tipo_propiedad': p.tipo_propiedad,
+        'ambientes': p.ambientes,
+        'm2_total': float(p.m2_total) if p.m2_total is not None else None,
+        'm2_cubiertos': float(p.m2_cubiertos) if p.m2_cubiertos is not None else None,
+        'antiguedad': p.antiguedad, 'amenities': p.amenities, 'imagenes': p.imagenes,
+        'fuente': p.fuente, 'url_origen': p.url_origen, 'scraping_job_id': job_id,
+        'confianza_extraccion': float(p.confianza_extraccion),
+    }
+
+
+async def _upsert_properties(sb: Any, props: list[NormalizedProperty], job_id: str | None) -> None:
+    if sb is None or not props:
+        return
+    data = [_prop_to_dict(p, job_id) for p in props]
+    await sb.table('properties').upsert(
+        data, on_conflict='direccion,precio,tipo_operacion', ignore_duplicates=True
+    ).execute()
+
+
 async def save_portal_properties(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
-    pool = config['configurable'].get('db_pool')
+    sb = config['configurable'].get('supabase')
     job_id = state.get('job_id')
     props: list[NormalizedProperty] = state.get('normalized_properties', [])
 
-    if pool is not None:
-        async with pool.acquire() as conn:
-            for p in props:
-                await conn.execute(
-                    '''insert into public.properties
-                       (titulo, direccion, direccion_norm, precio, moneda, tipo_operacion,
-                        tipo_propiedad, ambientes, m2_total, m2_cubiertos, antiguedad,
-                        amenities, imagenes, fuente, url_origen, scraping_job_id, confianza_extraccion)
-                       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-                       on conflict (direccion, precio, tipo_operacion) do nothing''',
-                    p.titulo, p.direccion, p.direccion_norm, p.precio, p.moneda,
-                    p.tipo_operacion, p.tipo_propiedad, p.ambientes, p.m2_total,
-                    p.m2_cubiertos, p.antiguedad, p.amenities, p.imagenes,
-                    p.fuente, p.url_origen, job_id, p.confianza_extraccion,
-                )
+    await _upsert_properties(sb, props, job_id)
 
     # Emit partial results — portales done, waiting for agency review
     await adispatch_custom_event('property_batch', {
@@ -348,24 +357,11 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
 
 
 async def save_website_properties(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
-    pool = config['configurable'].get('db_pool')
+    sb = config['configurable'].get('supabase')
     job_id = state.get('job_id')
     props: list[NormalizedProperty] = state.get('website_properties', [])
 
-    if pool is not None:
-        async with pool.acquire() as conn:
-            for p in props:
-                await conn.execute(
-                    '''insert into public.properties
-                       (titulo, direccion, direccion_norm, precio, moneda, tipo_operacion,
-                        tipo_propiedad, ambientes, m2_total, amenities, imagenes,
-                        fuente, url_origen, scraping_job_id, confianza_extraccion)
-                       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-                       on conflict (direccion, precio, tipo_operacion) do nothing''',
-                    p.titulo, p.direccion, p.direccion_norm, p.precio, p.moneda,
-                    p.tipo_operacion, p.tipo_propiedad, p.ambientes, p.m2_total,
-                    p.amenities, p.imagenes, p.fuente, p.url_origen, job_id, p.confianza_extraccion,
-                )
+    await _upsert_properties(sb, props, job_id)
 
     portal_count = len(state.get('normalized_properties', []))
     total = portal_count + len(props)
