@@ -146,6 +146,72 @@ def _norm_instagram(item: dict[str, Any]) -> RawProperty | None:
     )
 
 
+# ── Direct website scraper (no Apify, uses httpx + BeautifulSoup) ────────────
+
+async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict[str, str]]:
+    """Crawl the agency website directly — free, no Apify needed."""
+    from bs4 import BeautifulSoup  # type: ignore[import-untyped]
+    import re
+
+    label = url.replace('https://', '').replace('http://', '').split('/')[0]
+    await on_progress(f'web:{label}', 'running', 0)
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (compatible; PropSearchBot/1.0)',
+        'Accept-Language': 'es-AR,es;q=0.9',
+    }
+
+    def html_to_text(html: str) -> str:
+        soup = BeautifulSoup(html, 'html.parser')
+        for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
+            tag.decompose()
+        text = soup.get_text(separator='\n')
+        return re.sub(r'\n{3,}', '\n\n', text).strip()
+
+    pages: list[dict[str, str]] = []
+    visited: set[str] = set()
+
+    async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
+        # Fetch the main page
+        try:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            text = html_to_text(resp.text)
+            if text:
+                pages.append({'url': url, 'text': text[:8000]})
+            visited.add(url)
+        except Exception:
+            await on_progress(f'web:{label}', 'error', 0)
+            return []
+
+        # Find property-related sub-pages (up to 5)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        prop_keywords = ['propiedad', 'propiedades', 'inmueble', 'venta', 'alquiler', 'listing']
+        sub_urls: list[str] = []
+        for a in soup.find_all('a', href=True):
+            href = str(a['href'])
+            if any(k in href.lower() for k in prop_keywords):
+                full = href if href.startswith('http') else url.rstrip('/') + '/' + href.lstrip('/')
+                if full not in visited and label in full:
+                    sub_urls.append(full)
+                    if len(sub_urls) >= 5:
+                        break
+
+        for sub_url in sub_urls:
+            try:
+                r = await client.get(sub_url)
+                r.raise_for_status()
+                t = html_to_text(r.text)
+                if t:
+                    pages.append({'url': sub_url, 'text': t[:8000]})
+                visited.add(sub_url)
+            except Exception:
+                continue
+
+    await on_progress(f'web:{label}', 'done', len(pages))
+    return pages
+
+
 # ── Base interface ─────────────────────────────────────────────────────────────
 
 class BaseApifyService(ABC):
@@ -318,23 +384,7 @@ class ApifyService(BaseApifyService):
         return agencies
 
     async def scrape_website(self, url: str, on_progress: ProgressCb) -> list[dict[str, str]]:
-        label = url.replace('https://', '').replace('http://', '').split('/')[0]
-        await on_progress(f'web:{label}', 'running', 0)
-        input_data = {
-            'startUrls': [{'url': url}],
-            'maxCrawlDepth': 1,
-            'maxCrawlPages': 15,
-            'htmlTransformer': 'readableText',
-            'removeCookieWarnings': True,
-        }
-        raw_items = await self._run_actor('website', _ACTORS['website'], input_data)
-        pages = [
-            {'url': item.get('url', url), 'text': item.get('text') or item.get('markdown', '')}
-            for item in raw_items
-            if item.get('text') or item.get('markdown')
-        ]
-        await on_progress(f'web:{label}', 'done', len(pages))
-        return pages
+        return await _scrape_website_direct(url, on_progress)
 
     async def scrape_instagram_profile(self, handle: str, on_progress: ProgressCb) -> list[RawProperty]:
         await on_progress(f'instagram:{handle}', 'running', 0)
@@ -411,15 +461,18 @@ class MockApifyService(BaseApifyService):
         await on_progress(f'web:{label}', 'running', 0)
         await asyncio.sleep(1.0)
         zona = random.choice(_BARRIOS)
-        pages = []
-        for i in range(random.randint(3, 6)):
-            props_text = '\n'.join([
-                f'Departamento {random.randint(1,4)} ambientes en {zona} - '
-                f'USD {random.randint(80, 350) * 1000} - '
-                f'{random.randint(35, 150)}m² - {random.choice(_CALLES)} {random.randint(100, 4000)}'
-                for _ in range(random.randint(2, 5))
-            ])
-            pages.append({'url': f'{url}propiedades/pagina-{i+1}', 'text': props_text})
+        pages = [
+            {
+                'url': f'{url.rstrip("/")}/propiedades/pagina-{i + 1}',
+                'text': '\n'.join(
+                    f'Departamento {random.randint(1, 4)} ambientes en {zona} - '
+                    f'USD {random.randint(80, 350) * 1000} - '
+                    f'{random.randint(35, 150)}m² - {random.choice(_CALLES)} {random.randint(100, 4000)}'
+                    for _ in range(random.randint(2, 5))
+                ),
+            }
+            for i in range(random.randint(3, 6))
+        ]
         await on_progress(f'web:{label}', 'done', len(pages))
         return pages
 
