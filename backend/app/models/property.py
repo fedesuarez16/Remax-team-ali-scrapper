@@ -5,7 +5,7 @@ from typing import Literal, Union
 
 from pydantic import BaseModel, Field
 
-Fuente = Literal['zonaprop', 'mercadolibre', 'googlemaps', 'argenprop', 'manual']
+Fuente = Literal['zonaprop', 'mercadolibre', 'googlemaps', 'instagram', 'argenprop', 'manual']
 TipoOperacion = Literal['venta', 'alquiler', 'alquiler_temp']
 TipoPropiedad = Literal['departamento', 'casa', 'ph', 'local', 'oficina', 'terreno', 'otro']
 Moneda = Literal['USD', 'ARS']
