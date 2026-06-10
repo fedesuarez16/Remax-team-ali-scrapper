@@ -2,7 +2,8 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Bookmark, Building2, Clock, Plus } from 'lucide-react'
+import { Bookmark, Building2, Clock, Database, Plus } from 'lucide-react'
+import { usePathname } from 'next/navigation'
 import { useSearchHistory } from '@/hooks/useSearchHistory'
 
 const AGENCY_KEY = 'prop_agency_config'
@@ -25,6 +26,7 @@ function readAgencyConfig(): AgencyConfig {
 
 export default function Sidebar() {
   const router = useRouter()
+  const pathname = usePathname()
   const { searches } = useSearchHistory()
   const [agency, setAgency] = useState<AgencyConfig>({ nombre: '', telefono: '', whatsapp: '' })
 
@@ -60,13 +62,24 @@ export default function Sidebar() {
       </div>
 
       {/* Nueva búsqueda */}
-      <div className="px-3 pt-3">
+      <div className="space-y-1 px-3 pt-3">
         <Link
           href="/chat"
           className="flex w-full items-center gap-2 rounded-xl bg-foreground px-3 py-2 text-sm font-medium text-background transition hover:bg-foreground/85"
         >
           <Plus className="size-4" />
           Nueva búsqueda
+        </Link>
+        <Link
+          href="/properties"
+          className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition ${
+            pathname?.startsWith('/properties')
+              ? 'bg-muted text-foreground'
+              : 'text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+          }`}
+        >
+          <Database className="size-4" />
+          Todas las propiedades
         </Link>
       </div>
 
