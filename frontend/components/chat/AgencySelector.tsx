@@ -35,91 +35,56 @@ export function AgencySelector({ agencies, message, onConfirm, disabled }: Props
 
   const withInstagram = agencies.filter((a) => a.instagram_handle)
   const withoutInstagram = agencies.filter((a) => !a.instagram_handle)
-  const selectedCount = [...selected].filter((id) =>
-    agencies.find((a) => a.id === id && a.instagram_handle)
-  ).length
+  const selectedCount = selected.size
 
   return (
     <div className="w-full max-w-md space-y-3 rounded-2xl rounded-tl-sm border border-white/[0.08] bg-white/[0.04] p-4">
       <p className="text-sm text-zinc-300">{message}</p>
 
-      {/* Agencies with Instagram */}
       {withInstagram.length > 0 && (
         <div className="space-y-1.5">
-          <p className="text-xs font-medium text-zinc-500">Con Instagram</p>
+          <p className="text-xs font-medium text-zinc-500">Con Instagram detectado</p>
           {withInstagram.map((a) => (
-            <AgencyRow
-              key={a.id}
-              agency={a}
-              checked={selected.has(a.id)}
-              onChange={() => toggle(a.id)}
-              disabled={disabled}
-            />
+            <AgencyRow key={a.id} agency={a} checked={selected.has(a.id)}
+              onChange={() => toggle(a.id)} disabled={disabled} />
           ))}
         </div>
       )}
 
-      {/* Agencies without Instagram */}
       {withoutInstagram.length > 0 && (
         <div className="space-y-1.5">
-          <p className="text-xs font-medium text-zinc-500">Sin Instagram detectado</p>
+          <p className="text-xs font-medium text-zinc-500">Sin Instagram — se buscará en su sitio web</p>
           {withoutInstagram.map((a) => (
-            <AgencyRow
-              key={a.id}
-              agency={a}
-              checked={selected.has(a.id)}
-              onChange={() => toggle(a.id)}
-              disabled={true}
-              dimmed
-            />
+            <AgencyRow key={a.id} agency={a} checked={selected.has(a.id)}
+              onChange={() => toggle(a.id)} disabled={disabled} />
           ))}
         </div>
       )}
 
       <div className="flex items-center justify-between pt-1">
-        <p className="text-xs text-zinc-600">
-          {selectedCount} con Instagram seleccionadas
-        </p>
+        <p className="text-xs text-zinc-600">{selectedCount} seleccionadas</p>
         <button
           onClick={() => onConfirm([...selected])}
           disabled={disabled || selectedCount === 0}
           className="rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          Continuar con Instagram →
+          Continuar →
         </button>
       </div>
     </div>
   )
 }
 
-function AgencyRow({
-  agency: a,
-  checked,
-  onChange,
-  disabled,
-  dimmed,
-}: {
-  agency: Agency
-  checked: boolean
-  onChange: () => void
-  disabled?: boolean
-  dimmed?: boolean
+function AgencyRow({ agency: a, checked, onChange, disabled }: {
+  agency: Agency; checked: boolean; onChange: () => void; disabled?: boolean
 }) {
   return (
-    <label
-      className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 transition
-        ${dimmed ? 'border-white/[0.04] opacity-40 cursor-not-allowed' : checked
-          ? 'border-violet-500/30 bg-violet-500/10'
-          : 'border-white/[0.06] hover:border-white/[0.12]'
-        }`}
+    <label className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 transition
+      ${checked ? 'border-violet-500/30 bg-violet-500/10' : 'border-white/[0.06] hover:border-white/[0.12]'}
+      ${disabled ? 'cursor-not-allowed opacity-50' : ''}`}
     >
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={onChange}
-        disabled={disabled || dimmed}
-        className="mt-0.5 accent-violet-500"
-      />
+      <input type="checkbox" checked={checked} onChange={onChange}
+        disabled={disabled} className="mt-0.5 accent-violet-500" />
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-zinc-200 truncate">{a.nombre}</span>

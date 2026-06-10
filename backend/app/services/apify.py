@@ -16,10 +16,10 @@ SOURCES = ('zonaprop', 'mercadolibre', 'googlemaps', 'instagram')
 
 # ── Actor IDs ─────────────────────────────────────────────────────────────────
 _ACTORS: dict[str, str] = {
-    'zonaprop':    'crawlerbros/zonaprop-scraper',
-    'mercadolibre': 'easyapi/mercadolibre-search-results-scraper',
-    'googlemaps':  'compass/crawler-google-places',
-    'instagram':   'apify/instagram-post-scraper',
+    'zonaprop':     'crawlerbros~zonaprop-scraper',
+    'mercadolibre': 'easyapi~mercadolibre-search-results-scraper',
+    'googlemaps':   'compass~crawler-google-places',
+    'instagram':    'apify~instagram-post-scraper',
 }
 
 _APIFY_BASE = 'https://api.apify.com/v2'
@@ -28,10 +28,18 @@ _TIMEOUT = 300         # max seconds to wait for a run
 
 # ── Normalisation helpers ──────────────────────────────────────────────────────
 
+_ZP_PROP_TYPE: dict[str, str] = {
+    'apartment': 'departamento', 'residence': 'departamento',
+    'house': 'casa', 'ph': 'ph',
+    'land': 'terreno', 'commercial': 'local', 'office': 'oficina',
+}
+
 def _norm_zonaprop(item: dict[str, Any], zona: str) -> RawProperty | None:
     precio = item.get('price')
     if precio is None:
         return None
+    raw_type = (item.get('propertyType') or '').lower()
+    prop_type = _ZP_PROP_TYPE.get(raw_type, 'otro')
     return RawProperty(
         fuente='zonaprop',
         titulo=item.get('title', ''),
@@ -39,7 +47,7 @@ def _norm_zonaprop(item: dict[str, Any], zona: str) -> RawProperty | None:
         precio=float(precio),
         moneda=item.get('currency', 'USD'),
         tipo_operacion='alquiler' if item.get('operationType') == 'rent' else 'venta',
-        tipo_propiedad=item.get('propertyType') or 'departamento',
+        tipo_propiedad=prop_type,  # type: ignore[arg-type]
         ambientes=item.get('rooms'),
         m2_total=item.get('totalArea'),
         m2_cubiertos=item.get('coveredArea'),
@@ -165,23 +173,33 @@ class ApifyService(BaseApifyService):
         self._token = api_token
         self._client = httpx.AsyncClient(timeout=30)
 
+    # Map internal property types → ZonaProp actor values
+    _PROP_TYPE_MAP = {
+        'departamento': 'apartment',
+        'casa': 'house',
+        'ph': 'ph',
+        'local': 'commercial',
+        'oficina': 'commercial',
+        'terreno': 'land',
+        'otro': 'all',
+    }
+
     def _input_for(self, source: str, filters: ScrapingFilters) -> dict[str, Any]:
         zona = filters.zona or 'Buenos Aires'
         op = filters.tipo_operacion or 'venta'
 
         if source == 'zonaprop':
-            return {
-                'location': zona.lower().replace(' ', '-'),
-                'operationType': 'rent' if op == 'alquiler' else 'sale',
-                'propertyType': filters.tipo_propiedad or 'all',
-                'maxResults': 50,
-            }
+            prop_slug = zona.lower().replace(' ', '-')
+            op_slug = 'alquiler' if op == 'alquiler' else 'venta'
+            search_url = f'https://www.zonaprop.com.ar/departamentos-{op_slug}-{prop_slug}.html'
+            return {'searchUrl': search_url, 'maxResults': 50}
 
         if source == 'mercadolibre':
+            # Build a valid MercadoLibre inmuebles search URL
             cat = 'alquileres' if op == 'alquiler' else 'departamentos'
             slug = zona.lower().replace(' ', '-')
             url = f'https://inmuebles.mercadolibre.com.ar/{cat}/{slug}/'
-            return {'searchUrls': [{'url': url}], 'maxItems': 50}
+            return {'searchUrl': url, 'maxItems': 50}
 
         if source == 'googlemaps':
             return {
