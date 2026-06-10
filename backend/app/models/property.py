@@ -63,6 +63,19 @@ class ScrapingFilters(BaseModel):
     m2_max: float | None = None
 
 
+class Agency(BaseModel):
+    """Real estate agency discovered via Google Maps."""
+    id: str
+    nombre: str
+    direccion: str | None = None
+    telefono: str | None = None
+    sitio_web: str | None = None
+    google_maps_url: str | None = None
+    instagram_handle: str | None = None
+    calificacion: float | None = None
+    zona: str = ''
+
+
 class ScrapingJob(BaseModel):
     id: str
     query_raw: str
@@ -111,6 +124,13 @@ class ClarificationEvent(BaseModel):
     message: str
 
 
+class AgenciesReviewEvent(BaseModel):
+    event: Literal['agencies_review'] = 'agencies_review'
+    agencies: list[Agency]
+    message: str = ''
+
+
 SSEEvent = Union[
-    ProgressEvent, PropertyBatchEvent, DoneEvent, ErrorEvent, ClarificationEvent
+    ProgressEvent, PropertyBatchEvent, DoneEvent, ErrorEvent,
+    ClarificationEvent, AgenciesReviewEvent,
 ]

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ArrowUp, Building2, MapPin, Sparkles } from 'lucide-react'
 import { PropertyCard } from '@/components/chat/PropertyCard'
 import { ProgressBubble } from '@/components/chat/ProgressBubble'
+import { AgencySelector } from '@/components/chat/AgencySelector'
 import { useSSEStream } from '@/hooks/useSSEStream'
 import { cn } from '@/lib/utils'
 
@@ -14,7 +15,7 @@ const SUGGESTIONS = [
 ]
 
 export default function Home() {
-  const { messages, isStreaming, startScraping } = useSSEStream()
+  const { messages, isStreaming, startScraping, resumeScraping } = useSSEStream()
   const [input, setInput] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -111,6 +112,20 @@ export default function Home() {
                     <Sparkles className="size-3.5 text-white" />
                   </div>
                   <ProgressBubble progress={m.progress} />
+                </div>
+              )
+
+              if (m.type === 'agencies') return (
+                <div key={m.id} className="flex items-start gap-3">
+                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 shadow shadow-violet-500/20">
+                    <Sparkles className="size-3.5 text-white" />
+                  </div>
+                  <AgencySelector
+                    agencies={m.agencies}
+                    message={m.message}
+                    onConfirm={(ids) => resumeScraping(m.jobId, ids)}
+                    disabled={isStreaming}
+                  />
                 </div>
               )
 

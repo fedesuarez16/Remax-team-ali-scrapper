@@ -7,10 +7,11 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-from app.models.property import RawProperty, ScrapingFilters
+from app.models.property import Agency, RawProperty, ScrapingFilters
 
 ProgressCb = Callable[[str, str, int], Awaitable[None]]
 
+PORTAL_SOURCES = ('zonaprop', 'mercadolibre')   # phase-1 portal scrapers
 SOURCES = ('zonaprop', 'mercadolibre', 'googlemaps', 'instagram')
 
 # ── Actor IDs ─────────────────────────────────────────────────────────────────
@@ -72,25 +73,37 @@ def _norm_mercadolibre(item: dict[str, Any], zona: str) -> RawProperty | None:
     )
 
 
-def _norm_googlemaps(item: dict[str, Any]) -> RawProperty | None:
+def _extract_instagram_handle(website: str | None) -> str | None:
+    """Pull handle from instagram.com URLs or return None."""
+    if not website:
+        return None
+    import re
+    m = re.search(r'instagram\.com/([A-Za-z0-9_.]+)', website)
+    return m.group(1) if m else None
+
+
+def _norm_googlemaps_agency(item: dict[str, Any], zona: str) -> Agency | None:
+    import uuid
     name = item.get('title') or item.get('name', '')
     if not name:
         return None
-    return RawProperty(
-        fuente='googlemaps',
-        titulo=name,
-        direccion=item.get('address', ''),
-        precio=None,
-        moneda='USD',
-        tipo_operacion='venta',
-        tipo_propiedad='otro',
-        ambientes=None,
-        m2_total=None,
-        m2_cubiertos=None,
-        antiguedad=None,
-        amenities=[],
-        imagenes=[item['imageUrl']] if item.get('imageUrl') else [],
-        url_origen=item.get('website') or item.get('url') or '',
+    website = item.get('website') or ''
+    # try social media links first, then fallback to website URL
+    social = item.get('socialMediaProfiles') or {}
+    ig_handle = (
+        _extract_instagram_handle(social.get('instagram'))
+        or _extract_instagram_handle(website)
+    )
+    return Agency(
+        id=str(uuid.uuid4()),
+        nombre=name,
+        direccion=item.get('address'),
+        telefono=item.get('phone'),
+        sitio_web=website or None,
+        google_maps_url=item.get('url'),
+        instagram_handle=ig_handle,
+        calificacion=item.get('totalScore'),
+        zona=zona,
     )
 
 
@@ -134,6 +147,14 @@ class BaseApifyService(ABC):
         filters: ScrapingFilters,
         on_progress: ProgressCb,
     ) -> list[RawProperty]:
+        ...
+
+    @abstractmethod
+    async def scrape_agencies(
+        self,
+        zona: str,
+        on_progress: ProgressCb,
+    ) -> list[Agency]:
         ...
 
 
@@ -236,7 +257,7 @@ class ApifyService(BaseApifyService):
             elif source == 'mercadolibre':
                 prop = _norm_mercadolibre(item, filters.zona or '')
             elif source == 'googlemaps':
-                prop = _norm_googlemaps(item)
+                prop = None  # googlemaps uses scrape_agencies, not scrape_source
             elif source == 'instagram':
                 prop = _norm_instagram(item)
             if prop is not None:
@@ -244,6 +265,21 @@ class ApifyService(BaseApifyService):
 
         await on_progress(source, 'done', len(results))
         return results
+
+    async def scrape_agencies(self, zona: str, on_progress: ProgressCb) -> list[Agency]:
+        await on_progress('googlemaps', 'running', 0)
+        input_data = {
+            'searchStringsArray': [f'inmobiliarias en {zona}'],
+            'maxCrawledPlacesPerSearch': 20,
+            'language': 'es',
+            'countryCode': 'ar',
+            'includeWebResults': False,
+        }
+        raw_items = await self._run_actor('googlemaps', _ACTORS['googlemaps'], input_data)
+        agencies = [a for item in raw_items
+                    if (a := _norm_googlemaps_agency(item, zona)) is not None]
+        await on_progress('googlemaps', 'done', len(agencies))
+        return agencies
 
 
 # ── Mock implementation ────────────────────────────────────────────────────────
@@ -256,9 +292,20 @@ _AMENITIES = ['pileta', 'gimnasio', 'sum', 'cochera', 'parrilla', 'seguridad 24h
               'laundry', 'balcón', 'terraza']
 
 
+_MOCK_AGENCIES = [
+    ('RE/MAX Palermo', 'remax_palermo', 'remax.com.ar/palermo', 4.8),
+    ('Toribio Achával', 'toribioachaval', 'toribioachaval.com', 4.7),
+    ('Bullrich Propiedades', 'bullrichprop', 'bullrich.com.ar', 4.6),
+    ('L.J. Ramos', 'ljramos', 'ljramos.com.ar', 4.5),
+    ('Soldati Propiedades', 'soldatiprop', 'soldati.com.ar', 4.4),
+    ('Reporte Inmobiliario', None, 'reporteinmobiliario.com', 4.2),
+    ('Inmobiliaria Local', None, None, 3.8),
+]
+
+
 class MockApifyService(BaseApifyService):
-    DELAYS = {'zonaprop': 1.2, 'mercadolibre': 0.9, 'googlemaps': 1.5, 'instagram': 1.0}
-    COUNTS = {'zonaprop': (7, 10), 'mercadolibre': (5, 8), 'googlemaps': (5, 7), 'instagram': (4, 8)}
+    DELAYS = {'zonaprop': 1.2, 'mercadolibre': 0.9, 'instagram': 1.0}
+    COUNTS = {'zonaprop': (7, 10), 'mercadolibre': (5, 8), 'instagram': (4, 8)}
 
     async def scrape_source(self, source: str, filters: ScrapingFilters, on_progress: ProgressCb) -> list[RawProperty]:
         delay = self.DELAYS.get(source, 1.0)
@@ -267,23 +314,47 @@ class MockApifyService(BaseApifyService):
         total = random.randint(*self.COUNTS.get(source, (5, 8)))
         await on_progress(source, 'running', total // 2)
         await asyncio.sleep(delay * 0.6)
-        props = [self._fake(source, filters) for _ in range(total)]
+        props = [self._fake_property(source, filters) for _ in range(total)]
         await on_progress(source, 'done', total)
         return props
 
-    def _fake(self, source: str, f: ScrapingFilters) -> RawProperty:
+    async def scrape_agencies(self, zona: str, on_progress: ProgressCb) -> list[Agency]:
+        import uuid
+        await on_progress('googlemaps', 'running', 0)
+        await asyncio.sleep(1.2)
+        agencies = [
+            Agency(
+                id=str(uuid.uuid4()),
+                nombre=name,
+                direccion=f'Av. Santa Fe {random.randint(100, 4000)}, {zona}, CABA',
+                telefono=f'+54 11 {random.randint(4000, 5999)}-{random.randint(1000, 9999)}',
+                sitio_web=website,
+                instagram_handle=ig,
+                calificacion=rating,
+                zona=zona,
+            )
+            for name, ig, website, rating in _MOCK_AGENCIES
+        ]
+        await on_progress('googlemaps', 'done', len(agencies))
+        return agencies
+
+    def _fake_property(self, source: str, f: ScrapingFilters) -> RawProperty:
         zona = f.zona or random.choice(_BARRIOS)
         calle = random.choice(_CALLES)
-        altura = random.randint(100, 4500)
         op = f.tipo_operacion or random.choice(['venta', 'alquiler'])
         tipo = f.tipo_propiedad or random.choice(['departamento', 'casa', 'ph'])
         amb = random.randint(1, 5)
         m2 = round(random.uniform(28, 180), 1)
         precio = round(random.uniform(70_000, 480_000) if op == 'venta' else random.uniform(350, 2200), 0)
+        tipo_str = tipo or 'propiedad'
+        caption = (
+            f'{tipo_str.capitalize()} en {op} · {amb} ambientes · {m2}m² · '
+            f'{"USD" if op == "venta" else "$"} {precio:,.0f} · {calle} {random.randint(100,4000)}, {zona} 🏠'
+        )
         return RawProperty(
             fuente=source,  # type: ignore[arg-type]
-            titulo=f'{(tipo or "Propiedad").capitalize()} {amb} amb en {zona}',
-            direccion=f'{calle} {altura}, {zona}, CABA',
+            titulo=caption if source == 'instagram' else f'{tipo_str.capitalize()} {amb} amb en {zona}',
+            direccion=f'{calle} {random.randint(100, 4500)}, {zona}, CABA',
             precio=precio,
             moneda='USD',
             tipo_operacion=op,  # type: ignore[arg-type]

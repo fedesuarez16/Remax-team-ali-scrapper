@@ -21,16 +21,24 @@ class StartScrapingResponse(BaseModel):
     job_id: str
 
 
+class ResumeScrapingRequest(BaseModel):
+    selected_agency_ids: list[str]
+
+
+def _sse_headers() -> dict[str, str]:
+    return {'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no'}
+
+
 @router.post('/start', response_model=StartScrapingResponse)
 async def start_scraping(body: StartScrapingRequest, request: Request) -> StartScrapingResponse:
-    pool = request.app.state.db_pool
     job_id = str(uuid.uuid4())
-    async with pool.acquire() as conn:
-        await conn.execute(
-            '''insert into public.scraping_jobs (id, query_raw, estado)
-               values ($1, $2, 'pending')''',
-            uuid.UUID(job_id), body.query,
-        )
+    pool = request.app.state.db_pool
+    if pool is not None:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "insert into public.scraping_jobs (id, query_raw, estado) values ($1, $2, 'pending')",
+                uuid.UUID(job_id), body.query,
+            )
     return StartScrapingResponse(job_id=job_id)
 
 
@@ -39,58 +47,66 @@ async def stream_scraping(job_id: str, query: str, request: Request) -> Streamin
     checkpointer = request.app.state.checkpointer
     pool = request.app.state.db_pool
 
-    # 404 guard: verify the job exists before opening the stream
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            'select id from public.scraping_jobs where id=$1',
-            uuid.UUID(job_id),
-        )
-    if row is None:
-        raise HTTPException(status_code=404, detail='Job not found')
+    if pool is not None:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow('select id from public.scraping_jobs where id=$1', uuid.UUID(job_id))
+        if row is None:
+            raise HTTPException(status_code=404, detail='Job not found')
 
     graph = build_graph(checkpointer=checkpointer)
-
-    config = {
-        'configurable': {
-            'thread_id': job_id,
-            'db_pool': pool,
-        }
-    }
+    config = {'configurable': {'thread_id': job_id, 'db_pool': pool}}
     inputs = {'query': query, 'job_id': job_id}
 
     async def event_generator() -> AsyncGenerator[str, None]:
         seq = 0
-        # mark running
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "update public.scraping_jobs set estado='running' where id=$1",
-                uuid.UUID(job_id),
-            )
+        if pool is not None:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "update public.scraping_jobs set estado='running' where id=$1", uuid.UUID(job_id)
+                )
         try:
             async for ev in graph.astream_events(inputs, config, version='v2'):
                 if ev['event'] != 'on_custom_event':
                     continue
-                name = ev['name']  # progress | property_batch | done | error | clarification
-                data = ev['data']
                 seq += 1
-                yield f'id: {seq}\nevent: {name}\ndata: {json.dumps(data)}\n\n'
+                yield f'id: {seq}\nevent: {ev["name"]}\ndata: {json.dumps(ev["data"])}\n\n'
         except Exception as exc:
             seq += 1
-            err = {'event': 'error', 'source': None,
-                   'message': str(exc), 'recoverable': False}
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "update public.scraping_jobs set estado='error', error_msg=$2 where id=$1",
-                    uuid.UUID(job_id), str(exc),
-                )
-            yield f'id: {seq}\nevent: error\ndata: {json.dumps(err)}\n\n'
+            yield f'id: {seq}\nevent: error\ndata: {json.dumps({"event": "error", "message": str(exc), "recoverable": False})}\n\n'
 
-    return StreamingResponse(
-        event_generator(),
-        media_type='text/event-stream',
-        headers={
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no',
-        },
-    )
+    return StreamingResponse(event_generator(), media_type='text/event-stream', headers=_sse_headers())
+
+
+@router.post('/{job_id}/resume')
+async def resume_scraping(
+    job_id: str, body: ResumeScrapingRequest, request: Request
+) -> StreamingResponse:
+    """Resume a paused graph after agency review. Streams the Instagram phase."""
+    from langgraph.types import Command
+
+    checkpointer = request.app.state.checkpointer
+    pool = request.app.state.db_pool
+
+    if checkpointer is None:
+        raise HTTPException(status_code=503, detail='Checkpointer not available')
+
+    graph = build_graph(checkpointer=checkpointer)
+    config = {'configurable': {'thread_id': job_id, 'db_pool': pool}}
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        seq = 0
+        try:
+            async for ev in graph.astream_events(
+                Command(resume=body.selected_agency_ids),
+                config,
+                version='v2',
+            ):
+                if ev['event'] != 'on_custom_event':
+                    continue
+                seq += 1
+                yield f'id: {seq}\nevent: {ev["name"]}\ndata: {json.dumps(ev["data"])}\n\n'
+        except Exception as exc:
+            seq += 1
+            yield f'id: {seq}\nevent: error\ndata: {json.dumps({"event": "error", "message": str(exc), "recoverable": False})}\n\n'
+
+    return StreamingResponse(event_generator(), media_type='text/event-stream', headers=_sse_headers())
