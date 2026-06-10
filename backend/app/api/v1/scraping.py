@@ -34,11 +34,14 @@ async def start_scraping(body: StartScrapingRequest, request: Request) -> StartS
     job_id = str(uuid.uuid4())
     pool = request.app.state.db_pool
     if pool is not None:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "insert into public.scraping_jobs (id, query_raw, estado) values ($1, $2, 'pending')",
-                uuid.UUID(job_id), body.query,
-            )
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "insert into public.scraping_jobs (id, query_raw, estado) values ($1, $2, 'pending')",
+                    uuid.UUID(job_id), body.query,
+                )
+        except Exception:
+            pass  # DB write optional — job still works without it
     return StartScrapingResponse(job_id=job_id)
 
 
@@ -47,23 +50,12 @@ async def stream_scraping(job_id: str, query: str, request: Request) -> Streamin
     checkpointer = request.app.state.checkpointer
     pool = request.app.state.db_pool
 
-    if pool is not None:
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow('select id from public.scraping_jobs where id=$1', uuid.UUID(job_id))
-        if row is None:
-            raise HTTPException(status_code=404, detail='Job not found')
-
     graph = build_graph(checkpointer=checkpointer)
     config = {'configurable': {'thread_id': job_id, 'db_pool': pool}}
     inputs = {'query': query, 'job_id': job_id}
 
     async def event_generator() -> AsyncGenerator[str, None]:
         seq = 0
-        if pool is not None:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "update public.scraping_jobs set estado='running' where id=$1", uuid.UUID(job_id)
-                )
         try:
             async for ev in graph.astream_events(inputs, config, version='v2'):
                 if ev['event'] != 'on_custom_event':
