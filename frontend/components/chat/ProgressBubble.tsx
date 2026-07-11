@@ -36,15 +36,17 @@ function StatusBar({ progress }: { progress: ProgressMap }) {
   )
 }
 
-export function ProgressBubble({ progress }: { progress: ProgressMap }) {
-  const totalFound = Object.values(progress).reduce((acc, s) => acc + (s.count ?? 0), 0)
-
+export function ProgressBubble({ progress, matchedCount, totalCount = 0 }: { progress: ProgressMap; matchedCount: number; totalCount?: number }) {
   return (
     <div className="w-full max-w-xs space-y-2.5 rounded-2xl rounded-tl-sm border border-border bg-card p-3.5">
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-foreground">Buscando propiedades</span>
-        {totalFound > 0 && (
-          <span className="text-xs text-muted-foreground">{totalFound} encontradas</span>
+        {(matchedCount > 0 || totalCount > 0) && (
+          <span className="text-xs text-muted-foreground">
+            {totalCount > matchedCount
+              ? `${matchedCount} de ${totalCount} coinciden`
+              : `${matchedCount} coincidencias`}
+          </span>
         )}
       </div>
 

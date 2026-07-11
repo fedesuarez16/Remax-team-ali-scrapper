@@ -7,13 +7,21 @@ EXTRACT_FILTERS_TOOL = {
     'input_schema': {
         'type': 'object',
         'properties': {
-            'zona': {'type': ['string', 'null'],
-                     'description': 'Barrio o ciudad, ej: Palermo, Belgrano, La Plata'},
+            'zonas': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'description': (
+                    'TODAS las zonas mencionadas (barrios o ciudades). Una entrada por zona. '
+                    'Ej: ["Los Hornos", "Tolosa", "City Bell"]. Si menciona una sola, devolvé una lista de un elemento.'
+                ),
+            },
             'tipo_operacion': {'type': ['string', 'null'],
                                'enum': ['venta', 'alquiler', 'alquiler_temp', None]},
-            'tipo_propiedad': {'type': ['string', 'null'],
-                               'enum': ['departamento', 'casa', 'ph', 'local',
-                                        'oficina', 'terreno', 'otro', None]},
+            'tipos_propiedad': {
+                'type': 'array',
+                'items': {'type': 'string', 'enum': ['departamento', 'casa', 'ph', 'local', 'oficina', 'terreno', 'otro']},
+                'description': 'Tipos de propiedad aceptados. Puede ser más de uno, ej: ["casa", "ph"]',
+            },
             'precio_min': {'type': ['number', 'null'], 'description': 'USD'},
             'precio_max': {'type': ['number', 'null'], 'description': 'USD'},
             'ambientes_min': {'type': ['integer', 'null']},
@@ -21,7 +29,7 @@ EXTRACT_FILTERS_TOOL = {
             'm2_min': {'type': ['number', 'null']},
             'm2_max': {'type': ['number', 'null']},
         },
-        'required': ['zona'],
+        'required': ['zonas'],
     },
 }
 
@@ -46,6 +54,10 @@ INSTAGRAM_EXTRACT_TOOL = {
                                'enum': ['departamento', 'casa', 'ph', 'local',
                                         'oficina', 'terreno', 'otro', None]},
             'ambientes': {'type': ['integer', 'null']},
+            'banos': {'type': ['integer', 'null']},
+            'cocheras': {'type': ['integer', 'null']},
+            'piso': {'type': ['integer', 'null']},
+            'expensas': {'type': ['number', 'null']},
             'm2': {'type': ['number', 'null']},
             'direccion_zona': {'type': ['string', 'null'],
                                'description': 'Dirección o barrio mencionado'},
@@ -70,5 +82,9 @@ SYSTEM_PROMPT = (
     'Interpretás lenguaje informal (ej: "2 amb", "depto", "para alquilar"). '
     'Si el precio viene en pesos (ARS), dejá precio en null salvo que sea claro. '
     'Llamá SIEMPRE a la herramienta extract_search_filters. '
-    'Si no podés identificar la zona, devolvé zona=null.'
+    'Extraé TODAS las zonas mencionadas como una lista en "zonas" (una entrada por barrio o ciudad). '
+    'Si no podés identificar ninguna zona, devolvé zonas=[]. '
+    'Al extraer cada zona, normalizá el nombre con espacios correctos tal como aparece '
+    'en portales inmobiliarios argentinos: "citybell" → "City Bell", '
+    '"sanandrés" → "San Andrés", "villacrespo" → "Villa Crespo", etc.'
 )

@@ -7,6 +7,7 @@ export type SearchEntry = {
   id: string
   query: string
   zona?: string
+  job_id?: string
   date: string
 }
 
@@ -35,7 +36,7 @@ function notify(): void {
   subscribers.forEach((fn) => fn())
 }
 
-export function addSearch(query: string, zona?: string): void {
+export function addSearch(query: string, zona?: string, job_id?: string): void {
   if (typeof window === 'undefined') return
 
   const trimmed = query.trim()
@@ -52,6 +53,7 @@ export function addSearch(query: string, zona?: string): void {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     query: trimmed,
     zona,
+    ...(job_id ? { job_id } : {}),
     date: new Date().toISOString(),
   }
 

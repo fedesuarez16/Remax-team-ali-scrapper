@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncGenerator
+from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -12,9 +14,21 @@ from app.graphs.extraction.graph import build_graph
 
 router = APIRouter()
 
+# Strong refs to in-flight graph tasks — asyncio only keeps weak references, so
+# without this a run can be garbage-collected mid-stream.
+_graph_tasks: set[asyncio.Task[None]] = set()
+
+
+def _spawn_graph_task(coro: Any) -> None:
+    task = asyncio.ensure_future(coro)
+    _graph_tasks.add(task)
+    task.add_done_callback(_graph_tasks.discard)
+
 
 class StartScrapingRequest(BaseModel):
     query: str
+    polygon: list[list[float]] | None = None
+    localidades: list[str] = []
 
 
 class StartScrapingResponse(BaseModel):
@@ -37,10 +51,65 @@ async def start_scraping(body: StartScrapingRequest, request: Request) -> StartS
         try:
             await sb.table('scraping_jobs').insert({
                 'id': job_id, 'query_raw': body.query, 'estado': 'pending',
+                'polygon': body.polygon, 'localidades': body.localidades or None,
             }).execute()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Without the job row every downstream FK write fails — fail loudly.
+            import logging
+            logging.getLogger(__name__).exception('scraping_jobs insert failed for job %s', job_id)
+            raise HTTPException(status_code=500, detail=f'No se pudo crear el job: {exc}') from exc
     return StartScrapingResponse(job_id=job_id)
+
+
+async def _write_job_terminal(sb: Any, job_id: str, estado: str, prop_count: int = 0) -> None:
+    if sb is None:
+        return
+    try:
+        from datetime import datetime, timezone
+        await sb.table('scraping_jobs').update({
+            'estado': estado,
+            'prop_count': prop_count,
+            'completado_at': datetime.now(timezone.utc).isoformat(),
+        }).eq('id', job_id).execute()
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning('job status write-back failed: %s', exc)
+
+
+async def _run_graph_into_queue(
+    graph: Any,
+    inputs: Any,
+    config: dict[str, Any],
+    queue: asyncio.Queue[Any],
+    sb: Any,
+    job_id: str,
+) -> None:
+    """Run astream_events in a standalone task so client disconnects don't cancel it."""
+    try:
+        async for ev in graph.astream_events(inputs, config, version='v2'):
+            await queue.put(('event', ev))
+        await queue.put(('done', None))
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception('graph run failed for job %s', job_id)
+        await queue.put(('error', exc))
+
+
+async def _read_job_localidades_polygon(sb: Any, job_id: str) -> tuple[list[str] | None, list[list[float]] | None]:
+    """Best-effort read of the persisted job row's `localidades`+`polygon` for
+    injection into the graph's initial `inputs`. Any failure (no sb, no row,
+    chat-originated job) returns `(None, None)` so `inputs` stays exactly as
+    it was pre-change — the chat path must be byte-identical."""
+    if sb is None:
+        return None, None
+    try:
+        res = await sb.table('scraping_jobs').select('localidades,polygon').eq('id', job_id).execute()
+    except Exception:
+        return None, None
+    if not res.data:
+        return None, None
+    row = res.data[0]
+    return row.get('localidades'), row.get('polygon')
 
 
 @router.get('/{job_id}/stream')
@@ -49,17 +118,41 @@ async def stream_scraping(job_id: str, query: str, request: Request) -> Streamin
     sb = request.app.state.supabase
     graph = build_graph(checkpointer=checkpointer)
     config = {'configurable': {'thread_id': job_id, 'supabase': sb}}
-    inputs = {'query': query, 'job_id': job_id}
+    inputs: dict[str, Any] = {'query': query, 'job_id': job_id}
+    localidades, polygon = await _read_job_localidades_polygon(sb, job_id)
+    if localidades:
+        inputs['localidades'] = localidades
+    if polygon:
+        inputs['polygon'] = polygon
+
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    _spawn_graph_task(_run_graph_into_queue(graph, inputs, config, queue, sb, job_id))
 
     async def event_generator() -> AsyncGenerator[str, None]:
         seq = 0
         try:
-            async for ev in graph.astream_events(inputs, config, version='v2'):
+            while True:
+                kind, payload = await queue.get()
+                if kind == 'done':
+                    break
+                if kind == 'error':
+                    raise payload
+                ev = payload
                 if ev['event'] != 'on_custom_event':
                     continue
+                name = ev['name']
+                data = ev['data']
+                if name == 'done':
+                    await _write_job_terminal(sb, job_id, 'done', data.get('total_count', 0))
+                elif name == 'error' and not data.get('recoverable', True):
+                    await _write_job_terminal(sb, job_id, 'error')
                 seq += 1
-                yield f'id: {seq}\nevent: {ev["name"]}\ndata: {json.dumps(ev["data"])}\n\n'
+                yield f'id: {seq}\nevent: {name}\ndata: {json.dumps(data)}\n\n'
+        except GeneratorExit:
+            # Client disconnected — graph task keeps running and will save the checkpoint
+            return
         except Exception as exc:
+            await _write_job_terminal(sb, job_id, 'error')
             seq += 1
             yield f'id: {seq}\nevent: error\ndata: {json.dumps({"event":"error","message":str(exc),"recoverable":False})}\n\n'
 
@@ -74,16 +167,125 @@ async def resume_scraping(job_id: str, body: ResumeScrapingRequest, request: Req
     graph = build_graph(checkpointer=checkpointer)
     config = {'configurable': {'thread_id': job_id, 'supabase': sb}}
 
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    _spawn_graph_task(
+        _run_graph_into_queue(graph, Command(resume=body.selected_agency_ids), config, queue, sb, job_id)
+    )
+
     async def event_generator() -> AsyncGenerator[str, None]:
         seq = 0
         try:
-            async for ev in graph.astream_events(Command(resume=body.selected_agency_ids), config, version='v2'):
+            while True:
+                kind, payload = await queue.get()
+                if kind == 'done':
+                    break
+                if kind == 'error':
+                    raise payload
+                ev = payload
                 if ev['event'] != 'on_custom_event':
                     continue
+                name = ev['name']
+                data = ev['data']
+                if name == 'done':
+                    await _write_job_terminal(sb, job_id, 'done', data.get('total_count', 0))
+                elif name == 'error' and not data.get('recoverable', True):
+                    await _write_job_terminal(sb, job_id, 'error')
                 seq += 1
-                yield f'id: {seq}\nevent: {ev["name"]}\ndata: {json.dumps(ev["data"])}\n\n'
+                yield f'id: {seq}\nevent: {name}\ndata: {json.dumps(data)}\n\n'
+        except GeneratorExit:
+            return
         except Exception as exc:
+            await _write_job_terminal(sb, job_id, 'error')
             seq += 1
             yield f'id: {seq}\nevent: error\ndata: {json.dumps({"event":"error","message":str(exc),"recoverable":False})}\n\n'
 
     return StreamingResponse(event_generator(), media_type='text/event-stream', headers=_sse_headers())
+
+
+def _classify_properties(
+    properties: list[dict[str, Any]], polygon: list[Any] | None,
+) -> tuple[list[dict[str, Any]], dict[str, int] | None]:
+    """Tag each row `in_polygon` (True/False/None-for-ungeocoded) and compute
+    per-bucket counts. Rows are never dropped — outside-polygon rows stay in
+    the payload for map dimming. Falls back to `(properties, None)` (no
+    classification, chat-like/backward-compat shape) when the polygon is
+    missing/empty/malformed (`point_in_polygon`'s own MIN_POLYGON_POINTS gate
+    covers malformed, but we short-circuit here to skip tagging entirely)."""
+    from app.services.polygon import MIN_POLYGON_POINTS, point_in_polygon
+
+    if not polygon or len(polygon) < MIN_POLYGON_POINTS:
+        return properties, None
+
+    inside = outside = ungeocoded = 0
+    tagged: list[dict[str, Any]] = []
+    for row in properties:
+        lat, lng = row.get('lat'), row.get('lng')
+        if lat is None or lng is None:
+            row = {**row, 'in_polygon': None}
+            ungeocoded += 1
+        elif point_in_polygon(float(lat), float(lng), polygon):
+            row = {**row, 'in_polygon': True}
+            inside += 1
+        else:
+            row = {**row, 'in_polygon': False}
+            outside += 1
+        tagged.append(row)
+
+    counts = {'inside': inside, 'outside': outside, 'ungeocoded': ungeocoded, 'total': len(tagged)}
+    return tagged, counts
+
+
+@router.get('/{job_id}/properties')
+async def get_job_properties(job_id: str, request: Request) -> dict[str, Any]:
+    import logging
+    log = logging.getLogger(__name__)
+
+    sb = request.app.state.supabase
+    if sb is None:
+        return {'properties': [], 'polygon': None, 'counts': None}
+
+    job_res = await sb.table('scraping_jobs').select('id,query_raw,polygon').eq('id', job_id).execute()
+    if not job_res.data:
+        raise HTTPException(status_code=404, detail='Job not found')
+    query_raw = job_res.data[0].get('query_raw')
+    polygon = job_res.data[0].get('polygon')
+
+    properties: list[dict[str, Any]] = []
+    try:
+        try:
+            join_res = await sb.table('search_property_results').select(
+                'property_id,matches_criteria,properties(*)'
+            ).eq('job_id', job_id).execute()
+        except Exception:
+            # matches_criteria column missing (migration not applied) — links
+            # still exist, fetch them without the flag.
+            join_res = await sb.table('search_property_results').select(
+                'property_id,properties(*)'
+            ).eq('job_id', job_id).execute()
+        for row in (join_res.data or []):
+            prop = row.get('properties')
+            if prop:
+                prop['matches_criteria'] = row.get('matches_criteria') is not False
+                properties.append(prop)
+    except Exception as exc:
+        log.warning('search_property_results unavailable (%s) — falling back to scraping_job_id lookup', exc)
+
+    # Fallback: table missing or empty → return all properties scraped in this job
+    if not properties:
+        fallback = await sb.table('properties').select('*').eq('scraping_job_id', job_id).execute()
+        properties = fallback.data or []
+
+    # Rank by relevance to the original query so the best matches surface first.
+    if query_raw and properties:
+        try:
+            from app.services.matcher import rank_properties
+            properties = await rank_properties(query_raw, properties)
+        except Exception as exc:
+            log.warning('match ranking failed (%s) — returning unranked properties', exc)
+
+    # Criteria-matching props always lead; stable sort keeps rank order within
+    # each group. Rows without the flag (legacy links) count as matching.
+    properties.sort(key=lambda p: p.get('matches_criteria', True) is False)
+
+    properties, counts = _classify_properties(properties, polygon)
+    return {'properties': properties, 'polygon': polygon, 'counts': counts}

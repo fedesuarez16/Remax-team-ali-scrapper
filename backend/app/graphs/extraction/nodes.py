@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from anthropic import AsyncAnthropic
@@ -8,10 +9,13 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Send, interrupt
 
 from app.core.config import settings
-from app.models.property import NormalizedProperty, ScrapingFilters
+from app.models.property import Agency, NormalizedProperty, ScrapingFilters
 from app.graphs.extraction.state import ScrapingState
-from app.graphs.extraction.tools import EXTRACT_FILTERS_TOOL, SYSTEM_PROMPT
-from app.services.apify import PORTAL_SOURCES, get_apify_service
+from app.graphs.extraction.tools import (
+    EXTRACT_FILTERS_TOOL, INSTAGRAM_EXTRACT_TOOL, INSTAGRAM_SYSTEM_PROMPT, SYSTEM_PROMPT,
+)
+from app.services.apify import PORTAL_SOURCES, get_apify_service, harvest_page_images
+from app.services.zona import normalize_address as _normalize_address, normalize_zona as _normalize_zona
 
 MODEL = 'claude-haiku-4-5-20251001'
 _client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
@@ -37,7 +41,9 @@ async def parse_query(state: ScrapingState, config: RunnableConfig) -> dict[str,
         return {'clarification_needed': True, 'filters': None}
 
     filters = ScrapingFilters(**tool_use.input)
-    if not filters.zona:
+    if not filters.zonas and filters.zona:
+        filters.zonas = [filters.zona]
+    if not filters.zonas:
         await adispatch_custom_event('clarification', {
             'event': 'clarification',
             'message': 'No pude identificar la zona. ¿En qué barrio o ciudad buscás?',
@@ -51,13 +57,34 @@ def route_after_parse(state: ScrapingState) -> str | list[Any]:
         return 'clarification'
     filters = state['filters']
     job_id = state.get('job_id')
-    # Fan-out: portal scrapers only (Google Maps runs separately)
-    sends: list[Any] = [
-        Send('run_portal_scraper', {'__source': src, 'filters': filters, 'job_id': job_id})
-        for src in PORTAL_SOURCES
-    ]
-    # Also discover agencies in parallel
-    sends.append(Send('discover_agencies', {'filters': filters, 'job_id': job_id}))
+    localidades = state.get('localidades') or []
+    # Fan-out unit: localidad when present (polygon search — portal-known slug,
+    # ADR-1), else per-barrio exactly as before (chat path / legacy callers).
+    fanout_units = localidades or filters.zonas or ([filters.zona] if filters.zona else [])
+    if settings.APIFY_DISABLED:
+        sources: tuple[str, ...] = ('mercadolibre',)  # direct httpx, no Apify actor
+    elif settings.SCRAPE_GOOGLEMAPS_ONLY:
+        sources = ()
+    elif settings.SCRAPE_ZONAPROP_ONLY:
+        sources = ('zonaprop',)
+    else:
+        sources = PORTAL_SOURCES
+    # Fan-out: one portal-scraper + agency-discovery branch per (unit × source)
+    sends: list[Any] = []
+    for unit in fanout_units:
+        if localidades:
+            # localidad branch: zona=localidad (drives URL slug + ML q), keep the
+            # full original barrio list on `zonas` for the guard's phrase-set
+            # (ADR-1: set(zonas) | set(localidades) | {zona}) — `localidades` is
+            # scoped to THIS branch's own localidad only (spec Open Question 2:
+            # no cross-localidad guard leakage in multi-localidad polygons).
+            zfilters = filters.model_copy(update={'zona': unit, 'localidades': [unit]})
+        else:
+            zfilters = filters.model_copy(update={'zona': unit})
+        for src in sources:
+            sends.append(Send('run_portal_scraper', {'__source': src, 'filters': zfilters, 'job_id': job_id}))
+        if not settings.SCRAPE_ZONAPROP_ONLY and not settings.APIFY_DISABLED:
+            sends.append(Send('discover_agencies', {'filters': zfilters, 'job_id': job_id}))
     return sends
 
 
@@ -93,6 +120,8 @@ async def run_portal_scraper(state: dict[str, Any], config: RunnableConfig) -> d
 async def discover_agencies(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     filters: ScrapingFilters = state['filters']
     zona = filters.zona or 'Buenos Aires'
+    zona_norm = _normalize_zona(zona)
+    sb = config['configurable'].get('supabase')
     service = get_apify_service()
 
     async def on_progress(src: str, status: str, count: int) -> None:
@@ -105,6 +134,14 @@ async def discover_agencies(state: dict[str, Any], config: RunnableConfig) -> di
             }.get(status, ''),
         }, config=config)
 
+    # ── Cache read (read-through) ──────────────────────────────────────────────
+    cached = await _read_cached_agencies(sb, zona_norm)
+    if len(cached) >= _AGENCY_CACHE_MIN_ROWS:
+        await on_progress('googlemaps', 'running', 0)
+        await on_progress('googlemaps', 'done', len(cached))
+        return {'agencies': cached}
+
+    # ── Cache miss → pay Apify (as today) ────────────────────────────────────
     try:
         agencies = await service.scrape_agencies(zona, on_progress)
     except Exception as exc:
@@ -112,6 +149,17 @@ async def discover_agencies(state: dict[str, Any], config: RunnableConfig) -> di
             'event': 'error', 'source': 'googlemaps', 'message': str(exc), 'recoverable': True,
         }, config=config)
         return {'agencies': [], 'errors': [f'googlemaps: {exc}']}
+
+    # ── Write-behind (awaited) then adopt DB ids so selection round-trips ────
+    try:
+        await _upsert_agencies(sb, agencies, zona_norm)
+        fresh = await _read_cached_agencies(sb, zona_norm)
+        if fresh:
+            agencies = fresh
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning('_upsert_agencies failed: %s', exc)
+
     return {'agencies': agencies}
 
 
@@ -119,10 +167,30 @@ def aggregate_phase1(state: ScrapingState) -> dict[str, Any]:
     return {}
 
 
-def _normalize_address(direccion: str) -> str:
-    import unicodedata
-    s = unicodedata.normalize('NFKD', direccion).encode('ascii', 'ignore').decode()
-    return ' '.join(s.lower().split())
+_VALID_TIPOS = {'departamento', 'casa', 'ph', 'local', 'oficina', 'terreno', 'otro'}
+_TIPO_PROP_ALIASES: dict[str, str] = {
+    'piso': 'departamento',
+    'apartment': 'departamento',
+    'departament': 'departamento',
+    'depto': 'departamento',
+    'dpto': 'departamento',
+    'flat': 'departamento',
+    'house': 'casa',
+    'vivienda': 'casa',
+    'chalet': 'casa',
+    'lote': 'terreno',
+    'comercial': 'local',
+    'shop': 'local',
+}
+
+
+def _normalize_tipo_propiedad(valor: str | None) -> str:
+    if not valor:
+        return 'otro'
+    v = valor.strip().lower()
+    if v in _VALID_TIPOS:
+        return v
+    return _TIPO_PROP_ALIASES.get(v, 'otro')
 
 
 def normalize_properties(state: ScrapingState) -> dict[str, Any]:
@@ -130,12 +198,15 @@ def normalize_properties(state: ScrapingState) -> dict[str, Any]:
     for r in state.get('collected_properties', []):
         out.append(NormalizedProperty(
             titulo=r.titulo,
+            descripcion=r.descripcion,
             direccion=r.direccion,
             direccion_norm=_normalize_address(r.direccion),
             precio=r.precio, moneda=r.moneda,
             tipo_operacion=r.tipo_operacion or 'venta',
-            tipo_propiedad=r.tipo_propiedad or 'otro',
-            ambientes=r.ambientes, m2_total=r.m2_total, m2_cubiertos=r.m2_cubiertos,
+            tipo_propiedad=_normalize_tipo_propiedad(r.tipo_propiedad),
+            ambientes=r.ambientes, banos=r.banos, cocheras=r.cocheras,
+            piso=r.piso, expensas=r.expensas,
+            m2_total=r.m2_total, m2_cubiertos=r.m2_cubiertos,
             antiguedad=r.antiguedad, amenities=r.amenities, imagenes=r.imagenes,
             fuente=r.fuente, url_origen=r.url_origen,
         ))
@@ -154,12 +225,46 @@ def deduplicate_properties(state: ScrapingState) -> dict[str, Any]:
     return {'normalized_properties': unique}
 
 
+def _matches_filters(p: NormalizedProperty, f: ScrapingFilters | None) -> bool:
+    """Search-result criteria. Missing data on a property never excludes it."""
+    if f is None:
+        return True
+    if p.precio is not None:
+        if f.precio_min is not None and p.precio < f.precio_min:
+            return False
+        if f.precio_max is not None and p.precio > f.precio_max:
+            return False
+    if p.ambientes is not None:
+        if f.ambientes_min is not None and p.ambientes < f.ambientes_min:
+            return False
+        if f.ambientes_max is not None and p.ambientes > f.ambientes_max:
+            return False
+    return True
+
+
+def _split_by_criteria(
+    props: list[NormalizedProperty], filters: ScrapingFilters | None,
+) -> tuple[list[NormalizedProperty], list[NormalizedProperty]]:
+    """Partition scraped props into (matched, rest) preserving order, so the
+    search shows everything scraped with the matching ones first."""
+    matched: list[NormalizedProperty] = []
+    rest: list[NormalizedProperty] = []
+    for p in props:
+        (matched if _matches_filters(p, filters) else rest).append(p)
+    return matched, rest
+
+
 def _prop_to_dict(p: NormalizedProperty, job_id: str | None) -> dict[str, Any]:
     return {
-        'titulo': p.titulo, 'direccion': p.direccion, 'direccion_norm': p.direccion_norm,
+        'titulo': p.titulo, 'descripcion': p.descripcion,
+        'direccion': p.direccion, 'direccion_norm': p.direccion_norm,
         'precio': float(p.precio) if p.precio is not None else None,
         'moneda': p.moneda, 'tipo_operacion': p.tipo_operacion, 'tipo_propiedad': p.tipo_propiedad,
         'ambientes': p.ambientes,
+        'banos': p.banos,
+        'cocheras': p.cocheras,
+        'piso': p.piso,
+        'expensas': float(p.expensas) if p.expensas is not None else None,
         'm2_total': float(p.m2_total) if p.m2_total is not None else None,
         'm2_cubiertos': float(p.m2_cubiertos) if p.m2_cubiertos is not None else None,
         'antiguedad': p.antiguedad, 'amenities': p.amenities, 'imagenes': p.imagenes,
@@ -168,13 +273,158 @@ def _prop_to_dict(p: NormalizedProperty, job_id: str | None) -> dict[str, Any]:
     }
 
 
+_AGENCY_CACHE_MIN_ROWS = 1  # >=1 fresh row for the zona → serve from cache, skip Apify
+
+
+def _agency_row_to_model(row: dict[str, Any]) -> Agency:
+    cal = row.get('calificacion')
+    return Agency(
+        id=str(row['id']),
+        nombre=row['nombre'],
+        direccion=row.get('direccion'),
+        telefono=row.get('telefono'),
+        sitio_web=row.get('sitio_web'),
+        google_maps_url=row.get('google_maps_url'),
+        instagram_handle=row.get('instagram_handle'),
+        calificacion=float(cal) if cal is not None else None,
+        zona=row.get('zona') or '',
+    )
+
+
+def _agency_to_row(a: Agency, zona_norm: str, scraped_at: str) -> dict[str, Any]:
+    return {
+        'nombre': a.nombre,
+        'direccion': a.direccion,
+        'telefono': a.telefono,
+        'sitio_web': a.sitio_web,
+        'google_maps_url': a.google_maps_url,
+        'instagram_handle': a.instagram_handle,
+        'calificacion': float(a.calificacion) if a.calificacion is not None else None,
+        'zona': a.zona,
+        'zona_norm': zona_norm,
+        'scraped_at': scraped_at,
+        # id omitted → gen_random_uuid() on insert, preserved on conflict-update.
+        # dedup_key omitted → generated column.
+    }
+
+
+async def _read_cached_agencies(sb: Any, zona_norm: str) -> list[Agency]:
+    if sb is None or not zona_norm:
+        return []
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(days=settings.AGENCY_CACHE_TTL_DAYS)).isoformat()
+    res = await (
+        sb.table('real_estate_agencies')
+        .select('*')
+        .eq('zona_norm', zona_norm)
+        .gte('scraped_at', cutoff)
+        .execute()
+    )
+    return [_agency_row_to_model(r) for r in (res.data or [])]
+
+
+async def _upsert_agencies(sb: Any, agencies: list[Agency], zona_norm: str) -> None:
+    if sb is None or not agencies:
+        return
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows = [_agency_to_row(a, zona_norm, now_iso) for a in agencies]
+    await sb.table('real_estate_agencies').upsert(
+        rows, on_conflict='zona_norm,dedup_key'
+    ).execute()
+
+
 async def _upsert_properties(sb: Any, props: list[NormalizedProperty], job_id: str | None) -> None:
     if sb is None or not props:
         return
     data = [_prop_to_dict(p, job_id) for p in props]
-    await sb.table('properties').upsert(
-        data, on_conflict='direccion,precio,tipo_operacion', ignore_duplicates=True
-    ).execute()
+    try:
+        await sb.table('properties').upsert(
+            data, on_conflict='direccion,precio,tipo_operacion', ignore_duplicates=True
+        ).execute()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception('property upsert failed (%d rows, job %s)', len(data), job_id)
+        return
+
+    # Best-effort geocoding of newly ingested rows — fire-and-forget so it never
+    # delays the SSE `done` event or fails the scraping run. The backfill lock
+    # makes concurrent kicks (multiple save_* calls in flight) a no-op.
+    from app.services.geocode import run_backfill
+    asyncio.ensure_future(run_backfill(sb, limit=50))
+
+
+async def _link_job_properties(
+    sb: Any,
+    props: list[NormalizedProperty],
+    job_id: str | None,
+    matched: list[NormalizedProperty] | None = None,
+) -> None:
+    """Link EVERY scraped prop to the job. `matched` (subset of `props`) marks
+    which ones satisfy the user's criteria — the rest link with
+    `matches_criteria=False` so the results view can order matched-first
+    without dropping anything. `matched=None` flags everything as matching."""
+    if sb is None or not props or not job_id:
+        return
+    try:
+        matched_props = props if matched is None else matched
+        matched_triples = {
+            (p.direccion, float(p.precio) if p.precio is not None else None, p.tipo_operacion)
+            for p in matched_props
+        }
+
+        priced = [p for p in props if p.precio is not None]
+        null_priced = [p for p in props if p.precio is None]
+
+        id_flags: dict[str, bool] = {}
+
+        if priced:
+            direcciones = list({p.direccion for p in priced})
+            res = await sb.table('properties').select(
+                'id,direccion,precio,tipo_operacion'
+            ).in_('direccion', direcciones).execute()
+            priced_triples = {
+                (p.direccion, float(p.precio), p.tipo_operacion)
+                for p in priced
+            }
+            for row in (res.data or []):
+                row_precio = float(row['precio']) if row['precio'] is not None else None
+                triple = (row['direccion'], row_precio, row['tipo_operacion'])
+                if triple in priced_triples:
+                    id_flags[row['id']] = triple in matched_triples
+
+        if null_priced:
+            direcciones_null = list({p.direccion for p in null_priced})
+            res_null = await sb.table('properties').select(
+                'id,direccion,tipo_operacion'
+            ).in_('direccion', direcciones_null).is_('precio', 'null').execute()
+            null_pairs = {(p.direccion, p.tipo_operacion) for p in null_priced}
+            for row in (res_null.data or []):
+                if (row['direccion'], row['tipo_operacion']) in null_pairs:
+                    id_flags[row['id']] = (row['direccion'], None, row['tipo_operacion']) in matched_triples
+
+        if not id_flags:
+            return
+
+        rows = [
+            {'job_id': job_id, 'property_id': pid, 'matches_criteria': flag}
+            for pid, flag in id_flags.items()
+        ]
+        try:
+            await sb.table('search_property_results').upsert(
+                rows, on_conflict='job_id,property_id', ignore_duplicates=True
+            ).execute()
+        except Exception:
+            # matches_criteria column missing (migration not applied) — never
+            # lose the job links over the flag.
+            bare = [{'job_id': job_id, 'property_id': pid} for pid in id_flags]
+            await sb.table('search_property_results').upsert(
+                bare, on_conflict='job_id,property_id', ignore_duplicates=True
+            ).execute()
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning('_link_job_properties failed: %s', exc)
 
 
 async def save_portal_properties(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
@@ -182,14 +432,22 @@ async def save_portal_properties(state: dict[str, Any], config: RunnableConfig) 
     job_id = state.get('job_id')
     props: list[NormalizedProperty] = state.get('normalized_properties', [])
 
+    # Save EVERYTHING scraped to the global catalog, regardless of criteria
     await _upsert_properties(sb, props, job_id)
+
+    # Everything scraped is a search result; the matched ones lead the list
+    filters = state.get('filters')
+    matched, rest = _split_by_criteria(props, filters)
+    ordered = matched + rest
+    await _link_job_properties(sb, ordered, job_id, matched)
 
     # Emit partial results — portales done, waiting for agency review
     await adispatch_custom_event('property_batch', {
-        'event': 'property_batch', 'source': 'portales', 'count': len(props),
-        'properties': [p.model_dump() for p in props],
+        'event': 'property_batch', 'source': 'portales',
+        'count': len(matched), 'total': len(ordered),
+        'properties': [p.model_dump() for p in ordered],
     }, config=config)
-    return {}
+    return {'normalized_properties': ordered}
 
 
 # ── Phase 1 → Phase 2 bridge: agency review interrupt ─────────────────────────
@@ -222,24 +480,23 @@ def route_after_review(state: ScrapingState) -> str | list[Any]:
     selected = state.get('selected_agency_ids', [])
     agencies = state.get('agencies', [])
     if not selected or not agencies:
-        return 'no_instagram'
-
-    # Build a map of agency id → agency
-    agency_map = {a.id: a for a in agencies}
-    selected_agencies = [agency_map[aid] for aid in selected if aid in agency_map]
-    # Fan-out: one website scraper per selected agency that has a website
-    job_id = state.get('job_id')
-    agency_map = {a.id: a for a in agencies}
-    selected_agencies = [agency_map[aid] for aid in selected if aid in agency_map]
-    websites = [(a.nombre, a.sitio_web) for a in selected_agencies if a.sitio_web]
-
-    if not websites:
         return 'no_websites'
 
-    return [
-        Send('run_website_scraper', {'nombre': nombre, 'url': url, 'job_id': job_id})
-        for nombre, url in websites
-    ]
+    agency_map = {a.id: a for a in agencies}
+    selected_agencies = [agency_map[aid] for aid in selected if aid in agency_map]
+    job_id = state.get('job_id')
+
+    sends: list[Any] = []
+    websites_sent = 0
+
+    for a in selected_agencies:
+        if a.sitio_web and websites_sent < settings.MAX_WEBSITE_URLS:
+            sends.append(Send('run_website_scraper', {'nombre': a.nombre, 'url': a.sitio_web, 'job_id': job_id}))
+            websites_sent += 1
+        if a.instagram_handle and not settings.SCRAPE_GOOGLEMAPS_ONLY:
+            sends.append(Send('run_instagram_scraper', {'nombre': a.nombre, 'handle': a.instagram_handle, 'job_id': job_id}))
+
+    return sends if sends else 'no_websites'
 
 
 # ── Phase 2: Website scraping + LLM extraction ───────────────────────────────
@@ -289,9 +546,15 @@ _WEBSITE_EXTRACT_TOOL = {
                         'tipo_operacion': {'type': ['string', 'null'], 'enum': ['venta', 'alquiler', None]},
                         'tipo_propiedad': {'type': ['string', 'null'], 'enum': ['departamento', 'casa', 'ph', 'local', 'oficina', 'terreno', 'otro', None]},
                         'ambientes': {'type': ['integer', 'null']},
+                        'banos': {'type': ['integer', 'null']},
+                        'cocheras': {'type': ['integer', 'null']},
+                        'piso': {'type': ['integer', 'null']},
+                        'expensas': {'type': ['number', 'null']},
+                        'amenities': {'type': ['array', 'null'], 'items': {'type': 'string'}},
                         'm2': {'type': ['number', 'null']},
                         'direccion': {'type': ['string', 'null']},
                         'descripcion': {'type': ['string', 'null']},
+                        'url_ficha': {'type': ['string', 'null']},
                     },
                 },
             },
@@ -304,15 +567,25 @@ _WEBSITE_SYSTEM_PROMPT = (
     'Sos un extractor de propiedades inmobiliarias de páginas web argentinas. '
     'Dado el texto de una página, extraés TODAS las propiedades que aparezcan listadas. '
     'Si no hay propiedades en la página, devolvé propiedades=[]. '
-    'Extraé datos de precios, ambientes, m², tipo y dirección cuando estén disponibles.'
+    'Extraé datos de precios, ambientes, m², tipo y dirección cuando estén disponibles. '
+    'El texto puede contener links en formato markdown [texto](url). '
+    'Si identificás un link que lleva a la ficha individual de una propiedad específica, '
+    'usá esa URL en el campo url_ficha de esa propiedad — es MUY importante: de esa ficha se obtienen las fotos. '
+    'Si no podés asociar un link específico, dejá url_ficha en null.'
 )
 
 
 async def extract_website_properties_llm(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
     pages: list[dict[str, str]] = state.get('website_pages', [])
     results: list[NormalizedProperty] = []
+    total_pages = len(pages)
 
-    for page in pages:
+    for page_idx, page in enumerate(pages, 1):
+        await adispatch_custom_event('progress', {
+            'event': 'progress', 'source': 'extraccion', 'status': 'running',
+            'count': len(results),
+            'message': f'Analizando página {page_idx}/{total_pages}...',
+        }, config=config)
         text = page.get('text', '')
         if not text or len(text) < 100:
             continue
@@ -334,25 +607,72 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
         if not tool_use:
             continue
 
+        page_images: list[str] = page.get('images') or []
+        page_props: list[NormalizedProperty] = []
+        page_url = page.get('url') or ''
+
         for prop in (tool_use.input.get('propiedades') or []):
             filled = sum(1 for f in ['precio', 'tipo_operacion', 'tipo_propiedad', 'ambientes', 'm2', 'direccion']
                          if prop.get(f) is not None)
             confianza = min(1.0, filled / 6)
-            results.append(NormalizedProperty(
-                titulo=prop.get('titulo') or prop.get('descripcion', ''),
+            page_props.append(NormalizedProperty(
+                titulo=prop.get('titulo') or '',
+                descripcion=prop.get('descripcion'),
                 direccion=prop.get('direccion') or '',
                 direccion_norm=_normalize_address(prop.get('direccion') or ''),
                 precio=prop.get('precio'),
                 moneda=prop.get('moneda') or 'USD',  # type: ignore[arg-type]
                 tipo_operacion=prop.get('tipo_operacion') or 'venta',  # type: ignore[arg-type]
-                tipo_propiedad=prop.get('tipo_propiedad') or 'otro',  # type: ignore[arg-type]
+                tipo_propiedad=_normalize_tipo_propiedad(prop.get('tipo_propiedad')),
                 ambientes=prop.get('ambientes'),
+                banos=prop.get('banos'),
+                cocheras=prop.get('cocheras'),
+                piso=prop.get('piso'),
+                expensas=prop.get('expensas'),
+                amenities=prop.get('amenities') or [],
                 m2_total=prop.get('m2'),
                 fuente='googlemaps',
-                url_origen=page.get('url'),
+                url_origen=prop.get('url_ficha') or page.get('url'),
                 confianza_extraccion=confianza,
             ))
 
+        # A single-property page (a listing detail/ficha) owns ALL its images.
+        # On multi-property pages the page-level pool mixes every card's photos in
+        # network-arrival order, so positional assignment shuffles galleries between
+        # properties — those get their gallery from their own ficha below instead.
+        if len(page_props) == 1 and page_images:
+            page_props[0].imagenes = page_images[:20]
+
+        results.extend(page_props)
+
+    # Fetch each property's real gallery from its detail page. Only fichas the LLM
+    # linked explicitly qualify; the listing page itself would re-yield the mixed pool.
+    # Also covers props stuck with a lone og:image from a scraped detail sub-page.
+    scraped_urls = {p.get('url') for p in pages}
+    pending = [p for p in results
+               if len(p.imagenes) < 4 and p.url_origen and p.url_origen not in scraped_urls]
+    if pending:
+        await adispatch_custom_event('progress', {
+            'event': 'progress', 'source': 'extraccion', 'status': 'running',
+            'count': len(results),
+            'message': f'Buscando fotos de {len(pending)} propiedades...',
+        }, config=config)
+        ficha_urls = list(dict.fromkeys(p.url_origen for p in pending))[:30]
+        try:
+            galleries = await harvest_page_images(ficha_urls)
+        except Exception:
+            galleries = {}
+        for p in pending:
+            gallery = galleries.get(p.url_origen or '')
+            if gallery and len(gallery) > len(p.imagenes):
+                p.imagenes = gallery[:20]
+
+    if total_pages:
+        await adispatch_custom_event('progress', {
+            'event': 'progress', 'source': 'extraccion', 'status': 'done',
+            'count': len(results),
+            'message': f'{len(results)} propiedades extraídas',
+        }, config=config)
     return {'website_properties': results}
 
 
@@ -361,20 +681,152 @@ async def save_website_properties(state: dict[str, Any], config: RunnableConfig)
     job_id = state.get('job_id')
     props: list[NormalizedProperty] = state.get('website_properties', [])
 
+    # Save EVERYTHING scraped to the global catalog, regardless of criteria
     await _upsert_properties(sb, props, job_id)
 
-    portal_count = len(state.get('normalized_properties', []))
-    total = portal_count + len(props)
+    # Everything scraped is a search result; the matched ones lead the list
+    filters = state.get('filters')
+    matched, rest = _split_by_criteria(props, filters)
+    ordered = matched + rest
+    await _link_job_properties(sb, ordered, job_id, matched)
 
-    if props:
+    if ordered:
         await adispatch_custom_event('property_batch', {
-            'event': 'property_batch', 'source': 'local', 'count': len(props),
-            'properties': [p.model_dump() for p in props],
+            'event': 'property_batch', 'source': 'local',
+            'count': len(matched), 'total': len(ordered),
+            'properties': [p.model_dump() for p in ordered],
         }, config=config)
 
+    # Emit done only if no instagram track is running (never dispatched in
+    # googlemaps-only test mode, regardless of agency handles)
+    agencies = state.get('agencies', [])
+    selected_ids = state.get('selected_agency_ids', [])
+    agency_map = {a.id: a for a in agencies}
+    has_instagram = not settings.SCRAPE_GOOGLEMAPS_ONLY and any(
+        agency_map[aid].instagram_handle
+        for aid in selected_ids
+        if aid in agency_map
+    )
+    if not has_instagram:
+        portal_count = len(state.get('normalized_properties', []))
+        total = portal_count + len(ordered)
+        await adispatch_custom_event('done', {
+            'event': 'done', 'job_id': job_id, 'total_count': total,
+            'sources': [*list(PORTAL_SOURCES), 'local'],
+        }, config=config)
+    return {'website_properties': ordered}
+
+
+async def run_instagram_scraper(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+    handle: str = state['handle']
+    service = get_apify_service()
+
+    async def on_progress(src: str, status: str, count: int) -> None:
+        await adispatch_custom_event('progress', {
+            'event': 'progress', 'source': f'instagram:{handle}',
+            'status': status, 'count': count,
+            'message': {
+                'running': f'Buscando propiedades en @{handle}...',
+                'done': f'{count} posts de @{handle}',
+                'error': f'Error en @{handle}',
+            }.get(status, ''),
+        }, config=config)
+
+    try:
+        raws = await service.scrape_instagram_profile(handle, on_progress)
+    except Exception as exc:
+        await adispatch_custom_event('error', {
+            'event': 'error', 'source': f'instagram:{handle}', 'message': str(exc), 'recoverable': True,
+        }, config=config)
+        return {'instagram_posts': [], 'errors': [f'instagram:{handle}: {exc}']}
+    return {'instagram_posts': [r.model_dump() for r in raws]}
+
+
+async def extract_instagram_properties_llm(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
+    posts: list[dict] = state.get('instagram_posts', [])
+    results: list[NormalizedProperty] = []
+    total_posts = len(posts)
+
+    for post_idx, post in enumerate(posts, 1):
+        await adispatch_custom_event('progress', {
+            'event': 'progress', 'source': 'extraccion:instagram', 'status': 'running',
+            'count': len(results),
+            'message': f'Analizando post {post_idx}/{total_posts}...',
+        }, config=config)
+        caption = post.get('titulo', '')
+        if not caption or len(caption) < 20:
+            continue
+        try:
+            msg = await _client.messages.create(  # type: ignore[call-overload]
+                model=MODEL,
+                max_tokens=512,
+                system=INSTAGRAM_SYSTEM_PROMPT,
+                tools=[INSTAGRAM_EXTRACT_TOOL],  # type: ignore[list-item]
+                tool_choice={'type': 'tool', 'name': 'extract_property_from_instagram'},
+                messages=[{'role': 'user', 'content': caption}],
+            )
+        except Exception:
+            continue
+        tool_use = next((b for b in msg.content if b.type == 'tool_use'), None)
+        if not tool_use or not tool_use.input.get('es_propiedad'):
+            continue
+        data = tool_use.input
+        results.append(NormalizedProperty(
+            titulo=data.get('descripcion', caption)[:120],
+            descripcion=data.get('descripcion') or caption,
+            direccion=data.get('direccion_zona') or '',
+            direccion_norm=_normalize_address(data.get('direccion_zona') or ''),
+            precio=data.get('precio'),
+            moneda=data.get('moneda') or 'USD',  # type: ignore[arg-type]
+            tipo_operacion=data.get('tipo_operacion') or 'venta',  # type: ignore[arg-type]
+            tipo_propiedad=_normalize_tipo_propiedad(data.get('tipo_propiedad')),
+            ambientes=data.get('ambientes'),
+            banos=data.get('banos'),
+            cocheras=data.get('cocheras'),
+            piso=data.get('piso'),
+            expensas=data.get('expensas'),
+            m2_total=data.get('m2'),
+            amenities=data.get('amenities') or [],
+            imagenes=post.get('imagenes') or [],
+            fuente='instagram',
+            url_origen=post.get('url_origen'),
+        ))
+    if total_posts:
+        await adispatch_custom_event('progress', {
+            'event': 'progress', 'source': 'extraccion:instagram', 'status': 'done',
+            'count': len(results),
+            'message': f'{len(results)} propiedades extraídas de Instagram',
+        }, config=config)
+    return {'instagram_properties': results}
+
+
+async def save_instagram_properties(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+    sb = config['configurable'].get('supabase')
+    job_id = state.get('job_id')
+    props: list[NormalizedProperty] = state.get('instagram_properties', [])
+
+    # Save EVERYTHING scraped to the global catalog, regardless of criteria
+    await _upsert_properties(sb, props, job_id)
+
+    # Everything scraped is a search result; the matched ones lead the list
+    filters = state.get('filters')
+    matched, rest = _split_by_criteria(props, filters)
+    ordered = matched + rest
+    await _link_job_properties(sb, ordered, job_id, matched)
+
+    if ordered:
+        await adispatch_custom_event('property_batch', {
+            'event': 'property_batch', 'source': 'instagram',
+            'count': len(matched), 'total': len(ordered),
+            'properties': [p.model_dump() for p in ordered],
+        }, config=config)
+
+    portal_count = len(state.get('normalized_properties', []))
+    website_count = len(state.get('website_properties', []))
+    total = portal_count + website_count + len(ordered)
     await adispatch_custom_event('done', {
         'event': 'done', 'job_id': job_id, 'total_count': total,
-        'sources': [*list(PORTAL_SOURCES), 'local'],
+        'sources': [*list(PORTAL_SOURCES), 'local', 'instagram'],
     }, config=config)
     return {}
 

@@ -5,11 +5,17 @@ import type { Agency } from '@/components/chat/AgencySelector'
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
 export type Property = {
-  titulo: string | null; direccion: string; precio: number | null; moneda: 'USD' | 'ARS'
+  id?: string
+  titulo: string | null; descripcion: string | null; direccion: string; precio: number | null; moneda: 'USD' | 'ARS'
   tipo_operacion: string; tipo_propiedad: string; ambientes: number | null
+  banos: number | null; cocheras: number | null; piso: number | null; expensas: number | null
   m2_total: number | null; antiguedad: number | null; amenities: string[]
+  destacados?: { label: string; value: string }[]
   imagenes: string[]; fuente: string; url_origen: string | null
   confianza_extraccion: number
+  match_score?: number | null; match_reasons?: string[]
+  matches_criteria?: boolean
+  lat?: number | null; lng?: number | null
 }
 export type SourceStatus = 'pending' | 'running' | 'done' | 'error'
 export type ProgressMap = Record<string, { status: SourceStatus; count: number; message: string }>
@@ -17,17 +23,20 @@ export type ProgressMap = Record<string, { status: SourceStatus; count: number; 
 export type Message =
   | { id: string; type: 'user'; text: string }
   | { id: string; type: 'agent'; text: string }
-  | { id: string; type: 'progress'; progress: ProgressMap }
-  | { id: string; type: 'properties'; properties: Property[] }
+  | { id: string; type: 'progress'; progress: ProgressMap; matchedCount: number; totalCount: number }
+  | { id: string; type: 'done'; jobId: string; matchedCount: number; totalCount: number }
   | { id: string; type: 'agencies'; agencies: Agency[]; message: string; jobId: string }
 
-const INITIAL_SOURCES = ['zonaprop', 'mercadolibre', 'googlemaps']
+export const INITIAL_SOURCES = ['zonaprop', 'mercadolibre', 'googlemaps']
 
 export function useSSEStream() {
   const [messages, setMessages] = useState<Message[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
+  const [lastJobId, setLastJobId] = useState<string | null>(null)
   const esRef = useRef<EventSource | null>(null)
   const progressMsgId = useRef<string | null>(null)
+  const matchedCountRef = useRef(0)
+  const totalCountRef = useRef(0)
 
   const close = useCallback(() => {
     esRef.current?.close(); esRef.current = null; setIsStreaming(false)
@@ -43,6 +52,16 @@ export function useSSEStream() {
     ))
   }, [])
 
+  const addMatched = useCallback((count: number, total?: number) => {
+    matchedCountRef.current += count
+    totalCountRef.current += total ?? count
+    setMessages((prev) => prev.map((m) =>
+      m.id === progressMsgId.current && m.type === 'progress'
+        ? { ...m, matchedCount: matchedCountRef.current, totalCount: totalCountRef.current }
+        : m
+    ))
+  }, [])
+
   const openSSE = useCallback((url: string) => {
     const es = new EventSource(url)
     esRef.current = es
@@ -54,7 +73,7 @@ export function useSSEStream() {
 
     es.addEventListener('property_batch', (e) => {
       const d = JSON.parse((e as MessageEvent).data)
-      setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'properties', properties: d.properties }])
+      addMatched(d.count, d.total)
     })
 
     es.addEventListener('agencies_review', (e) => {
@@ -78,7 +97,19 @@ export function useSSEStream() {
       close()
     })
 
-    es.addEventListener('done', () => close())
+    es.addEventListener('done', (e) => {
+      const me = e as MessageEvent
+      let jobId = url.match(/scraping\/([^/]+)\//)?.[1] ?? ''
+      if (me.data) {
+        try {
+          const d = JSON.parse(me.data)
+          if (d.job_id) jobId = d.job_id
+        } catch { /* ignore */ }
+      }
+      setLastJobId(jobId)
+      setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'done', jobId, matchedCount: matchedCountRef.current, totalCount: totalCountRef.current }])
+      close()
+    })
 
     es.addEventListener('error', (e) => {
       const me = e as MessageEvent
@@ -90,17 +121,26 @@ export function useSSEStream() {
     })
 
     return es
-  }, [close, upsertProgress])
+  }, [close, upsertProgress, addMatched])
 
-  const startScraping = useCallback(async (query: string) => {
+  const startScraping = useCallback(async (
+    query: string, polygon?: [number, number][], localidades?: string[]
+  ) => {
     setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'user', text: query }])
     setIsStreaming(true)
+    setLastJobId(null)
+    matchedCountRef.current = 0
+    totalCountRef.current = 0
 
     let jobId: string
     try {
       const res = await fetch(`${API}/api/v1/scraping/start`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({
+          query,
+          ...(polygon ? { polygon } : {}),
+          ...(localidades && localidades.length > 0 ? { localidades } : {}),
+        }),
       })
       jobId = (await res.json()).job_id
     } catch { setIsStreaming(false); return }
@@ -110,7 +150,7 @@ export function useSSEStream() {
     const initial: ProgressMap = Object.fromEntries(
       INITIAL_SOURCES.map((s) => [s, { status: 'pending' as SourceStatus, count: 0, message: '' }])
     )
-    setMessages((p) => [...p, { id: pid, type: 'progress', progress: initial }])
+    setMessages((p) => [...p, { id: pid, type: 'progress', progress: initial, matchedCount: 0, totalCount: 0 }])
     openSSE(`${API}/api/v1/scraping/${jobId}/stream?query=${encodeURIComponent(query)}`)
   }, [openSSE])
 
@@ -138,11 +178,15 @@ export function useSSEStream() {
         const d = JSON.parse(line.slice(5).trim())
         if (d.event === 'progress') upsertProgress(d.source, d.status, d.count, d.message)
         else if (d.event === 'property_batch')
-          setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'properties', properties: d.properties }])
+          addMatched(d.count, d.total)
         else if (d.event === 'agent_message')
           setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'agent', text: d.message }])
-        else if (d.event === 'done') setIsStreaming(false)
-        else if (d.event === 'error')
+        else if (d.event === 'done') {
+          const resolvedJobId = d.job_id ?? jobId
+          setLastJobId(resolvedJobId)
+          setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'done', jobId: resolvedJobId, matchedCount: matchedCountRef.current, totalCount: totalCountRef.current }])
+          setIsStreaming(false)
+        } else if (d.event === 'error')
           setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'agent', text: `Error: ${d.message}` }])
       } catch { /* ignore parse errors */ }
     }
@@ -159,7 +203,7 @@ export function useSSEStream() {
     } finally {
       setIsStreaming(false)
     }
-  }, [upsertProgress])
+  }, [upsertProgress, addMatched])
 
-  return { messages, isStreaming, startScraping, resumeScraping }
+  return { messages, isStreaming, lastJobId, startScraping, resumeScraping }
 }

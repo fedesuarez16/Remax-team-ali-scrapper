@@ -14,8 +14,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.supabase = await create_supabase_client()
     app.state.checkpointer = await create_checkpointer()
     yield
-    if app.state.supabase is not None:
-        await app.state.supabase.aclose()
+    sb = app.state.supabase
+    if sb is not None and hasattr(sb, 'aclose'):
+        await sb.aclose()
 
 
 app = FastAPI(title="multi-agent-realstate API", lifespan=lifespan)

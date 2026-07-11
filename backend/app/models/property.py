@@ -1,26 +1,43 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Union
+from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 Fuente = Literal['zonaprop', 'mercadolibre', 'googlemaps', 'instagram', 'argenprop', 'manual']
 TipoOperacion = Literal['venta', 'alquiler', 'alquiler_temp']
 TipoPropiedad = Literal['departamento', 'casa', 'ph', 'local', 'oficina', 'terreno', 'otro']
-Moneda = Literal['USD', 'ARS']
+
+
+def _coerce_moneda(v: object) -> str:
+    """Scrapers and LLMs emit free-form currencies ('MXN', 'u$s', '$', None).
+    Peso spellings map to ARS; everything else defaults to USD."""
+    if isinstance(v, str):
+        low = v.strip().lower()
+        if low in ('ars', 'ar$', '$', 'peso', 'pesos'):
+            return 'ARS'
+    return 'USD'
+
+
+Moneda = Annotated[Literal['USD', 'ARS'], BeforeValidator(_coerce_moneda)]
 
 
 class RawProperty(BaseModel):
     """Source-shaped payload from a scraper. Loose by design."""
     fuente: Fuente
     titulo: str | None = None
+    descripcion: str | None = None
     direccion: str
     precio: float | None = None
     moneda: Moneda = 'USD'
     tipo_operacion: TipoOperacion | None = None
     tipo_propiedad: TipoPropiedad | None = None
     ambientes: int | None = None
+    banos: int | None = None
+    cocheras: int | None = None
+    piso: int | None = None
+    expensas: float | None = None
     m2_total: float | None = None
     m2_cubiertos: float | None = None
     antiguedad: int | None = None
@@ -33,6 +50,7 @@ class RawProperty(BaseModel):
 class NormalizedProperty(BaseModel):
     """Unified schema; 1:1 with the properties table columns."""
     titulo: str | None = None
+    descripcion: str | None = None
     direccion: str
     direccion_norm: str | None = None
     precio: float | None = None
@@ -40,6 +58,10 @@ class NormalizedProperty(BaseModel):
     tipo_operacion: TipoOperacion
     tipo_propiedad: TipoPropiedad = 'otro'
     ambientes: int | None = None
+    banos: int | None = None
+    cocheras: int | None = None
+    piso: int | None = None
+    expensas: float | None = None
     m2_total: float | None = None
     m2_cubiertos: float | None = None
     antiguedad: int | None = None
@@ -52,9 +74,11 @@ class NormalizedProperty(BaseModel):
 
 class ScrapingFilters(BaseModel):
     """Parsed from natural language by Claude tool_use."""
-    zona: str | None = None
+    zona: str | None = None          # single zona used per fan-out branch
+    zonas: list[str] = []            # all zonas parsed from the query
+    localidades: list[str] = []      # localidades (partido/ciudad) for polygon searches; empty on chat path
     tipo_operacion: TipoOperacion | None = None
-    tipo_propiedad: TipoPropiedad | None = None
+    tipos_propiedad: list[TipoPropiedad] = []
     precio_min: float | None = None
     precio_max: float | None = None
     ambientes_min: int | None = None
@@ -134,3 +158,30 @@ SSEEvent = Union[
     ProgressEvent, PropertyBatchEvent, DoneEvent, ErrorEvent,
     ClarificationEvent, AgenciesReviewEvent,
 ]
+
+
+class MatchCriteria(BaseModel):
+    zonas: list[str] = []
+    tipos_propiedad: list[TipoPropiedad] = []
+    precio_min: float | None = None
+    precio_max: float | None = None
+    moneda: Moneda = 'USD'
+    ambientes_min: int | None = None
+    amenities_required: list[str] = []
+    amenities_desired: list[str] = []
+
+
+class ScoreBreakdown(BaseModel):
+    zone: int = 0
+    tipo_propiedad: int = 0
+    ambientes: int = 0
+    precio: int = 0
+    amenities_required: int = 0
+    amenities_desired: int = 0
+
+
+class ScoredProperty(BaseModel):
+    property: dict
+    score: int
+    breakdown: ScoreBreakdown
+    match_reasons: list[str]

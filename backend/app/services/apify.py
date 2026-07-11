@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import random
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Callable
+from datetime import datetime
+from typing import Any, Awaitable, Callable, Iterable
 
 import httpx
 
@@ -16,18 +18,73 @@ SOURCES = ('zonaprop', 'mercadolibre', 'googlemaps', 'instagram')
 
 # ── Actor IDs ─────────────────────────────────────────────────────────────────
 _ACTORS: dict[str, str] = {
-    'zonaprop':    'crawlerbros~zonaprop-scraper',
-    'mercadolibre': 'easyapi~mercadolibre-search-results-scraper',
-    'googlemaps':  'compass~crawler-google-places',
-    'instagram':   'apify~instagram-post-scraper',
-    'website':     'apify~website-content-crawler',
+    'zonaprop':   'crawlerbros~zonaprop-scraper',
+    'googlemaps': 'compass~crawler-google-places',
+    'instagram':  'apify~instagram-post-scraper',
+    'website':    'apify~website-content-crawler',
 }
+
+# ── MercadoLibre public REST API (no Apify) ───────────────────────────────────
+_ML_API_BASE = 'https://api.mercadolibre.com'
+_ML_CATEGORY = 'MLA1459'   # Inmuebles Argentina
+_ML_MAX_PAGES = 5           # 5 × 50 = 250 results max
 
 _APIFY_BASE = 'https://api.apify.com/v2'
 _POLL_INTERVAL = 3.0   # seconds between status checks
 _TIMEOUT = 300         # max seconds to wait for a run
 
 # ── Normalisation helpers ──────────────────────────────────────────────────────
+
+def _slugify(value: str) -> str:
+    """Turn a zona name into a portal-safe URL slug (no accents, commas or parens)."""
+    import re
+    import unicodedata
+    ascii_only = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode()
+    cleaned = re.sub(r'[^a-zA-Z0-9\s-]', '', ascii_only)
+    slug = re.sub(r'\s+', '-', cleaned.strip().lower())
+    return re.sub(r'-+', '-', slug)
+
+
+def _guard_phrases(filters: ScrapingFilters) -> set[str]:
+    """Phrase-set for the ZonaProp redirect guard. Map path (localidades
+    present): barrios ∪ localidades ∪ zona — wide on purpose, the polygon is
+    the precision gate downstream. Chat path (no localidades): ONLY this
+    branch's zona, preserving the pre-change per-branch scoping for
+    multi-zona chat queries."""
+    if filters.localidades:
+        phrases = set(filters.zonas) | set(filters.localidades) | {filters.zona or ''}
+    else:
+        phrases = {filters.zona or ''}
+    phrases.discard('')
+    return phrases
+
+
+def _item_matches_zona(item: dict[str, Any], zonas: Iterable[str]) -> bool:
+    """Guard against ZonaProp redirecting an unknown zona slug to a nationwide
+    listing: keep items that mention ANY phrase in `zonas` (as a phrase) in
+    their neighborhood, address, title or description.
+
+    `zonas` is a phrase SET (ADR-1: union of barrios ∪ localidad for a
+    localidad-branch, or a single-item set `{zona}` on the chat path — which
+    preserves today's single-phrase behavior exactly). An empty set keeps
+    everything, same as the old empty-string sentinel.
+
+    A composite phrase ("Villa Elisa, La Plata") requires EVERY comma part in
+    the haystack — the bare localidad also exists in other provinces, and the
+    item's `city` field (ZonaProp = partido) is what tells them apart.
+    """
+    phrase_parts = [
+        parts for parts in
+        ([_slugify(p) for p in z.split(',') if _slugify(p)] for z in zonas)
+        if parts
+    ]
+    if not phrase_parts:
+        return True
+    haystack = _slugify(' '.join(
+        str(item.get(k) or '') for k in ('neighborhood', 'city', 'address', 'title', 'description')
+    ))
+    return any(all(part in haystack for part in parts) for parts in phrase_parts)
+
 
 _ZP_PROP_TYPE: dict[str, str] = {
     'apartment': 'departamento', 'residence': 'departamento',
@@ -41,52 +98,164 @@ def _norm_zonaprop(item: dict[str, Any], zona: str) -> RawProperty | None:
         return None
     raw_type = (item.get('propertyType') or '').lower()
     prop_type = _ZP_PROP_TYPE.get(raw_type, 'otro')
+    year_built = item.get('yearBuilt')
+    antiguedad = (datetime.now().year - int(year_built)) if year_built and int(year_built) > 1900 else None
     return RawProperty(
         fuente='zonaprop',
         titulo=item.get('title', ''),
+        descripcion=item.get('description'),
         direccion=item.get('address') or item.get('neighborhood') or zona,
         precio=float(precio),
         moneda=item.get('currency', 'USD'),
         tipo_operacion='alquiler' if item.get('operationType') == 'rent' else 'venta',
         tipo_propiedad=prop_type,  # type: ignore[arg-type]
         ambientes=item.get('rooms'),
+        banos=int(item['bathrooms']) if item.get('bathrooms') is not None else None,
+        cocheras=int(item['garages']) if item.get('garages') is not None else None,
         m2_total=item.get('totalArea'),
         m2_cubiertos=item.get('coveredArea'),
-        antiguedad=item.get('yearBuilt'),
+        antiguedad=antiguedad,
         amenities=[],
-        imagenes=[img for img in (item.get('images') or []) if isinstance(img, str)][:5],
+        imagenes=[
+            img for img in (item.get('images') or [])
+            if isinstance(img, str) and '/empresas/' not in img and 'logo' not in img.lower()
+        ][:30],
         url_origen=item.get('url', ''),
     )
 
 
-def _norm_mercadolibre(item: dict[str, Any], zona: str) -> RawProperty | None:
-    titulo = item.get('title', '')
-    precio_raw = item.get('price') or item.get('currentPrice')
-    if not precio_raw:
+_ML_PROP_TYPE: dict[str, str] = {
+    'departamento': 'departamento',
+    'casa': 'casa',
+    'ph': 'ph',
+    'local comercial': 'local',
+    'oficina': 'oficina',
+    'terreno': 'terreno',
+    'campo': 'terreno',
+    'cochera': 'otro',
+    'galpón': 'otro',
+}
+
+
+def _norm_mercadolibre_api(item: dict[str, Any], zona: str) -> RawProperty | None:
+    precio = item.get('price')
+    if not precio:
         return None
+
+    addr = item.get('address') or {}
+    parts = [p for p in [addr.get('street_name'), addr.get('city_name')] if p]
+    direccion = ', '.join(parts) if parts else zona
+
+    attrs: dict[str, str] = {
+        a['id']: (a.get('value_name') or '')
+        for a in (item.get('attributes') or [])
+    }
+
+    def parse_area(s: str) -> float | None:
+        m = re.search(r'[\d.]+', s.replace(',', '.'))
+        return float(m.group()) if m else None
+
+    def parse_int(s: str) -> int | None:
+        return int(s) if isinstance(s, str) and s.isdigit() else (int(s) if isinstance(s, int) else None)
+
+    rooms_str = attrs.get('ROOMS', '')
+    ambientes = int(rooms_str) if rooms_str.isdigit() else None
+
+    op_val = attrs.get('OPERATION_TYPE', '').lower()
+    tipo_operacion = 'alquiler' if 'alquiler' in op_val else 'venta'
+
+    prop_type_raw = attrs.get('PROPERTY_TYPE', '').lower()
+    tipo_propiedad = _ML_PROP_TYPE.get(prop_type_raw)
+    if not tipo_propiedad:
+        title = item.get('title', '').lower()
+        if 'casa' in title:
+            tipo_propiedad = 'casa'
+        elif ' ph ' in title or title.startswith('ph ') or title.endswith(' ph'):
+            tipo_propiedad = 'ph'
+        elif 'local' in title:
+            tipo_propiedad = 'local'
+        elif 'oficina' in title:
+            tipo_propiedad = 'oficina'
+        elif 'terreno' in title or 'lote' in title:
+            tipo_propiedad = 'terreno'
+        else:
+            tipo_propiedad = 'departamento'
+
+    thumbnail = item.get('thumbnail', '')
+    imagenes = [thumbnail.replace('-I.jpg', '-O.jpg')] if thumbnail else []
+
     return RawProperty(
         fuente='mercadolibre',
-        titulo=titulo,
-        direccion=item.get('location') or item.get('address') or zona,
-        precio=float(str(precio_raw).replace('.', '').replace(',', '.')),
-        moneda=item.get('currency', 'USD'),
-        tipo_operacion='alquiler' if 'alquiler' in titulo.lower() else 'venta',
-        tipo_propiedad='departamento',
-        ambientes=None,
-        m2_total=None,
-        m2_cubiertos=None,
+        titulo=item.get('title', ''),
+        direccion=direccion,
+        precio=float(precio),
+        moneda=item.get('currency_id', 'USD'),
+        tipo_operacion=tipo_operacion,
+        tipo_propiedad=tipo_propiedad,
+        ambientes=ambientes,
+        banos=parse_int(attrs.get('FULL_BATHROOMS', '')),
+        cocheras=parse_int(attrs.get('PARKING_LOTS', '')),
+        m2_total=parse_area(attrs.get('TOTAL_AREA', '')),
+        m2_cubiertos=parse_area(attrs.get('COVERED_AREA', '')),
         antiguedad=None,
         amenities=[],
-        imagenes=[item['thumbnail']] if item.get('thumbnail') else [],
-        url_origen=item.get('url') or item.get('link', ''),
+        imagenes=imagenes,
+        url_origen=item.get('permalink', ''),
     )
 
 
+async def _scrape_mercadolibre_api(
+    filters: ScrapingFilters,
+    on_progress: ProgressCb,
+) -> list[RawProperty]:
+    zona = filters.zona or 'Buenos Aires'
+    op = filters.tipo_operacion or 'venta'
+    tipos = filters.tipos_propiedad or []
+
+    q_parts = [zona, op]
+    if tipos:
+        q_parts.append(tipos[0])
+    q = ' '.join(q_parts)
+
+    await on_progress('mercadolibre', 'running', 0)
+
+    results: list[RawProperty] = []
+    async with httpx.AsyncClient(timeout=20) as client:
+        for page in range(_ML_MAX_PAGES):
+            offset = page * 50
+            try:
+                resp = await client.get(
+                    f'{_ML_API_BASE}/sites/MLA/search',
+                    params={'category': _ML_CATEGORY, 'q': q, 'limit': 50, 'offset': offset},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception:
+                break
+
+            items = data.get('results', [])
+            if not items:
+                break
+
+            for item in items:
+                prop = _norm_mercadolibre_api(item, zona)
+                if prop is not None:
+                    results.append(prop)
+
+            paging = data.get('paging', {})
+            if offset + 50 >= paging.get('total', 0):
+                break
+
+            if page < _ML_MAX_PAGES - 1:
+                await on_progress('mercadolibre', 'running', len(results))
+
+    await on_progress('mercadolibre', 'done', len(results))
+    return results
+
+
 def _extract_instagram_handle(website: str | None) -> str | None:
-    """Pull handle from instagram.com URLs or return None."""
     if not website:
         return None
-    import re
     m = re.search(r'instagram\.com/([A-Za-z0-9_.]+)', website)
     return m.group(1) if m else None
 
@@ -131,6 +300,7 @@ def _norm_instagram(item: dict[str, Any]) -> RawProperty | None:
     return RawProperty(
         fuente='instagram',
         titulo=caption[:120],
+        descripcion=caption,
         direccion='',
         precio=None,
         moneda='USD',
@@ -141,17 +311,179 @@ def _norm_instagram(item: dict[str, Any]) -> RawProperty | None:
         m2_cubiertos=None,
         antiguedad=None,
         amenities=[],
-        imagenes=images[:5],
+        imagenes=images[:10],
         url_origen=item.get('url') or item.get('postUrl', ''),
     )
 
 
 # ── Direct website scraper (no Apify, uses httpx + BeautifulSoup) ────────────
 
-async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict[str, str]]:
-    """Crawl the agency website directly — free, no Apify needed."""
+# Tokens that flag an image as UI chrome rather than a property photo.
+_IMG_JUNK = (
+    'logo', 'icon', 'favicon', 'sprite', 'bandera', 'flag', 'banner',
+    'placeholder', 'blank', 'pixel', 'avatar', 'whatsapp', 'tile.osm',
+)
+
+
+def _extract_images_from_html(html: str, base: str) -> list[str]:
+    """Property photos visible in server HTML: og:image/twitter:image metas plus
+    content <img> tags (honoring lazy-load attrs and srcset), junk filtered."""
     from bs4 import BeautifulSoup  # type: ignore[import-untyped]
-    import re
+
+    soup = BeautifulSoup(html, 'html.parser')
+    imgs: list[str] = []
+    seen: set[str] = set()
+
+    def _add_img(raw: str) -> None:
+        src = (raw or '').strip()
+        if not src or src.startswith('data:'):
+            return
+        full = src if src.startswith('http') else base.rstrip('/') + '/' + src.lstrip('/')
+        low = full.lower()
+        if not any(ext in low for ext in ('.jpg', '.jpeg', '.png', '.webp')):
+            return
+        if any(j in low for j in _IMG_JUNK):
+            return
+        if full not in seen:
+            seen.add(full)
+            imgs.append(full)
+
+    for meta in soup.find_all('meta'):
+        key = str(meta.get('property') or meta.get('name') or '').lower()
+        if key in ('og:image', 'og:image:url', 'og:image:secure_url', 'twitter:image', 'twitter:image:src'):
+            _add_img(str(meta.get('content') or ''))
+
+    for img in soup.find_all('img'):
+        srcset = img.get('srcset') or img.get('data-srcset') or ''
+        srcset_url = srcset.split(',')[-1].strip().split(' ')[0] if srcset else ''
+        for raw in (
+            img.get('data-src'), img.get('data-lazy-src'), img.get('data-original'),
+            img.get('data-echo'), srcset_url, img.get('src'),
+        ):
+            if raw:
+                _add_img(str(raw))
+                break
+
+    return imgs[:20]
+
+
+# Below this many httpx-parsed images a ficha likely hides its gallery behind JS
+# (e.g. only og:image in server HTML) and is worth a headless-browser pass.
+_GALLERY_MIN_IMGS = 4
+
+
+async def harvest_page_images(urls: list[str], render_budget: int = 8) -> dict[str, list[str]]:
+    """Gallery per URL, for pages known to hold a SINGLE property (fichas).
+
+    All URLs are fetched concurrently with httpx — most real-estate fichas
+    (tokko/xintel) carry the full gallery in server HTML. Playwright rendering is
+    reserved for the few pages where httpx found under ``_GALLERY_MIN_IMGS``
+    images, capped at ``render_budget`` since each render costs seconds.
+    Returns ``{url: [image_urls]}``; URLs that fail are simply absent.
+    """
+    out: dict[str, list[str]] = {}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (compatible; PropSearchBot/1.0)',
+        'Accept-Language': 'es-AR,es;q=0.9',
+    }
+    sem = asyncio.Semaphore(5)
+
+    async def _fetch(client: httpx.AsyncClient, u: str) -> tuple[str, list[str]]:
+        async with sem:
+            try:
+                resp = await client.get(u)
+                resp.raise_for_status()
+                return u, _extract_images_from_html(resp.text, u)
+            except Exception:
+                return u, []
+
+    async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
+        for u, imgs in await asyncio.gather(*(_fetch(client, u) for u in urls)):
+            if imgs:
+                out[u] = imgs
+
+    needs_render = [u for u in urls if len(out.get(u, [])) < _GALLERY_MIN_IMGS][:render_budget]
+    if needs_render:
+        try:
+            rendered = await _render_gallery_images(needs_render)
+            for u, gallery in rendered.items():
+                if len(gallery) > len(out.get(u, [])):
+                    out[u] = gallery
+        except Exception:
+            pass
+
+    return out
+
+
+async def _render_gallery_images(urls: list[str]) -> dict[str, list[str]]:
+    """Load pages in a headless browser and collect gallery photos from network
+    image responses. This is the only way to capture galleries on JS-rendered
+    real-estate sites (xintel/tokko), where photos live in CSS `background-image`
+    or are lazy-loaded and never appear in the server HTML.
+
+    Returns ``{url: [image_urls]}``. On any failure (Playwright missing, launch
+    error) it returns whatever it gathered so far so callers fall back to httpx.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except Exception:
+        return {}
+
+    out: dict[str, list[str]] = {}
+
+    def _keep(u: str) -> str | None:
+        clean = u.split()[0].rstrip('")\'')
+        low = clean.lower()
+        if not any(ext in low for ext in ('.jpg', '.jpeg', '.png', '.webp')):
+            return None
+        if any(j in low for j in _IMG_JUNK):
+            return None
+        return clean
+
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            try:
+                for u in urls:
+                    found: list[str] = []
+                    seen: set[str] = set()
+                    page = await browser.new_page()
+
+                    def _on_response(resp: Any) -> None:
+                        try:
+                            ct = resp.headers.get('content-type', '')
+                            if not ct.startswith('image/') or 'svg' in ct:
+                                return
+                            img = _keep(resp.url)
+                            if img and img not in seen:
+                                seen.add(img)
+                                found.append(img)
+                        except Exception:
+                            pass
+
+                    page.on('response', _on_response)
+                    try:
+                        await page.goto(u, wait_until='networkidle', timeout=25000)
+                        for _ in range(6):  # trigger lazy-loaded photos
+                            await page.mouse.wheel(0, 700)
+                            await page.wait_for_timeout(250)
+                        await page.wait_for_timeout(800)
+                    except Exception:
+                        pass
+                    finally:
+                        await page.close()
+                    if found:
+                        out[u] = found[:20]
+            finally:
+                await browser.close()
+    except Exception:
+        return out
+
+    return out
+
+
+async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict[str, str]]:
+    from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 
     label = url.replace('https://', '').replace('http://', '').split('/')[0]
     await on_progress(f'web:{label}', 'running', 0)
@@ -161,14 +493,36 @@ async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict
         'Accept-Language': 'es-AR,es;q=0.9',
     }
 
-    def html_to_text(html: str) -> str:
+    def parse_page(html: str, base: str) -> tuple[str, list[str]]:
+        from urllib.parse import urljoin, urlparse
         soup = BeautifulSoup(html, 'html.parser')
+        base_domain = urlparse(base).netloc
+
+        # Harvest images before stripping markup. Real-estate sites are usually
+        # JS-rendered, so the reliable server-side photo is og:image; content <img>
+        # tags are often UI chrome (flags, logos) or lazy-loaded via data-* attrs.
+        imgs = _extract_images_from_html(html, base)
+
+        # Remove noise before processing links
         for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
             tag.decompose()
-        text = soup.get_text(separator='\n')
-        return re.sub(r'\n{3,}', '\n\n', text).strip()
 
-    pages: list[dict[str, str]] = []
+        # Render same-domain anchors as markdown links so the LLM can see individual property URLs
+        for a in soup.find_all('a', href=True):
+            href = str(a.get('href', ''))
+            if not href or href.startswith(('#', 'mailto:', 'tel:', 'javascript:')):
+                continue
+            full_href = urljoin(base, href) if not href.startswith('http') else href
+            if urlparse(full_href).netloc != base_domain:
+                continue
+            link_text = a.get_text(strip=True)
+            if link_text:
+                a.replace_with(f'[{link_text}]({full_href})')
+
+        text = soup.get_text(separator='\n')
+        return re.sub(r'\n{3,}', '\n\n', text).strip(), imgs[:20]
+
+    pages: list[dict] = []
     visited: set[str] = set()
 
     async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
@@ -176,9 +530,9 @@ async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict
         try:
             resp = await client.get(url)
             resp.raise_for_status()
-            text = html_to_text(resp.text)
+            text, imgs = parse_page(resp.text, url)
             if text:
-                pages.append({'url': url, 'text': text[:8000]})
+                pages.append({'url': url, 'text': text[:8000], 'images': imgs})
             visited.add(url)
         except Exception:
             await on_progress(f'web:{label}', 'error', 0)
@@ -201,12 +555,24 @@ async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict
             try:
                 r = await client.get(sub_url)
                 r.raise_for_status()
-                t = html_to_text(r.text)
+                t, sub_imgs = parse_page(r.text, sub_url)
                 if t:
-                    pages.append({'url': sub_url, 'text': t[:8000]})
+                    pages.append({'url': sub_url, 'text': t[:8000], 'images': sub_imgs})
                 visited.add(sub_url)
             except Exception:
                 continue
+
+    # Enrich with full galleries via a headless browser. JS-rendered sites hide
+    # their photos from the httpx HTML, so this recovers the real galleries.
+    # Falls back silently to the httpx-parsed images if Playwright is unavailable.
+    try:
+        rendered = await _render_gallery_images([p['url'] for p in pages])
+        for p in pages:
+            gallery = rendered.get(p['url'])
+            if gallery:
+                p['images'] = gallery
+    except Exception:
+        pass
 
     await on_progress(f'web:{label}', 'done', len(pages))
     return pages
@@ -268,22 +634,52 @@ class ApifyService(BaseApifyService):
         'otro': 'all',
     }
 
+    # URL slugs for ZonaProp search URLs
+    _ZP_URL_SLUG = {
+        'departamento': 'departamentos',
+        'casa': 'casas',
+        'ph': 'ph',
+        'local': 'locales-comerciales',
+        'oficina': 'oficinas',
+        'terreno': 'terrenos',
+    }
+
+    # URL slugs for MercadoLibre search URLs
+    _ML_URL_SLUG = {
+        'departamento': 'departamentos',
+        'casa': 'casas',
+        'ph': 'ph',
+        'local': 'locales-y-fondos-de-comercio',
+        'oficina': 'oficinas-y-locales',
+        'terreno': 'terrenos-y-lotes',
+    }
+
     def _input_for(self, source: str, filters: ScrapingFilters) -> dict[str, Any]:
         zona = filters.zona or 'Buenos Aires'
         op = filters.tipo_operacion or 'venta'
 
         if source == 'zonaprop':
-            prop_slug = zona.lower().replace(' ', '-')
+            # Portal-known localidad slug when available (ADR-1/spec: unknown
+            # barrio slugs 404/redirect nationwide on ZonaProp) — else the
+            # existing barrio slug, unchanged for the chat path.
+            zona_slug = _slugify(filters.localidades[0]) if filters.localidades else _slugify(zona)
             op_slug = 'alquiler' if op == 'alquiler' else 'venta'
-            search_url = f'https://www.zonaprop.com.ar/departamentos-{op_slug}-{prop_slug}.html'
-            return {'searchUrl': search_url, 'maxResults': 50}
+            tipos = filters.tipos_propiedad
+            prop_slug = self._ZP_URL_SLUG.get(tipos[0], 'inmuebles') if len(tipos) == 1 else 'inmuebles'
+            search_url = f'https://www.zonaprop.com.ar/{prop_slug}-{op_slug}-{zona_slug}.html'
+            from app.core.config import settings
+            input_data: dict[str, Any] = {'searchUrl': search_url}
+            if settings.ZONAPROP_MAX_RESULTS > 0:
+                input_data['maxResults'] = settings.ZONAPROP_MAX_RESULTS
+            return input_data
 
         if source == 'mercadolibre':
-            # Build a valid MercadoLibre inmuebles search URL
-            cat = 'alquileres' if op == 'alquiler' else 'departamentos'
-            slug = zona.lower().replace(' ', '-')
-            url = f'https://inmuebles.mercadolibre.com.ar/{cat}/{slug}/'
-            return {'searchUrl': url, 'maxItems': 50}
+            op_slug = 'alquiler' if op == 'alquiler' else 'venta'
+            zona_slug = _slugify(zona)
+            tipos = filters.tipos_propiedad
+            cat_slug = self._ML_URL_SLUG.get(tipos[0], 'inmuebles') if len(tipos) == 1 else 'inmuebles'
+            url = f'https://inmuebles.mercadolibre.com.ar/{cat_slug}/{op_slug}/{zona_slug}/'
+            return {'searchUrl': url, 'maxItems': 10}
 
         if source == 'googlemaps':
             return {
@@ -296,9 +692,10 @@ class ApifyService(BaseApifyService):
         if source == 'instagram':
             # Uses handles stored in filters or falls back to empty
             handles = getattr(filters, 'instagram_handles', None) or []
+            from app.core.config import settings
             return {
                 'usernames': handles,
-                'resultsLimit': 30,
+                'resultsLimit': settings.INSTAGRAM_RESULTS_LIMIT,
             }
 
         return {}
@@ -343,36 +740,103 @@ class ApifyService(BaseApifyService):
         filters: ScrapingFilters,
         on_progress: ProgressCb,
     ) -> list[RawProperty]:
+        if source == 'mercadolibre':
+            return await _scrape_mercadolibre_api(filters, on_progress)
+
         actor_id = _ACTORS.get(source)
         if not actor_id:
             return []
 
         await on_progress(source, 'running', 0)
 
-        raw_items = await self._run_actor(source, actor_id, self._input_for(source, filters))
+        if source == 'zonaprop':
+            results = await self._scrape_zonaprop_paginated(actor_id, filters)
 
-        results: list[RawProperty] = []
-        for item in raw_items:
-            prop: RawProperty | None = None
-            if source == 'zonaprop':
-                prop = _norm_zonaprop(item, filters.zona or '')
-            elif source == 'mercadolibre':
-                prop = _norm_mercadolibre(item, filters.zona or '')
-            elif source == 'googlemaps':
-                prop = None  # googlemaps uses scrape_agencies, not scrape_source
-            elif source == 'instagram':
-                prop = _norm_instagram(item)
-            if prop is not None:
-                results.append(prop)
+            # Composite localidad slug ("villa-elisa-la-plata") unknown to
+            # ZonaProp → nationwide redirect → the guard rejects everything
+            # (or the page 404s and the actor returns nothing). Retry ONCE
+            # with the plain localidad slug rather than returning 0 results.
+            if not results and filters.localidades and ',' in filters.localidades[0]:
+                plain = filters.localidades[0].split(',')[0].strip()
+                plain_filters = filters.model_copy(update={'localidades': [plain], 'zona': plain})
+                results = await self._scrape_zonaprop_paginated(actor_id, plain_filters)
+        else:
+            raw_items = await self._run_actor(source, actor_id, self._input_for(source, filters))
+            results = []
+            for item in raw_items:
+                prop: RawProperty | None = None
+                if source == 'instagram':
+                    prop = _norm_instagram(item)
+                # googlemaps uses scrape_agencies, not scrape_source
+                if prop is not None:
+                    results.append(prop)
 
         await on_progress(source, 'done', len(results))
         return results
 
+    # ZonaProp listing pages hold ~30 items; the crawlerbros actor's browser
+    # dies after page 1 (every run returns one page regardless of maxResults),
+    # so WE paginate: one actor run per `...-pagina-N.html` URL.
+    _ZP_PAGE_SIZE = 30
+    # Hard page ceiling when ZONAPROP_MAX_RESULTS is 0 (uncapped).
+    _ZP_MAX_PAGES_UNCAPPED = 20
+
+    async def _scrape_zonaprop_paginated(
+        self, actor_id: str, filters: ScrapingFilters,
+    ) -> list[RawProperty]:
+        from app.core.config import settings
+        cap = settings.ZONAPROP_MAX_RESULTS
+        base_input = self._input_for('zonaprop', filters)
+        base_url: str = base_input['searchUrl']
+        phrases = _guard_phrases(filters)
+        max_pages = (
+            -(-cap // self._ZP_PAGE_SIZE) if cap > 0 else self._ZP_MAX_PAGES_UNCAPPED
+        )
+
+        results: list[RawProperty] = []
+        seen: set[str] = set()
+        page = 1
+        while page <= max_pages and (cap <= 0 or len(results) < cap):
+            input_data = dict(base_input)
+            if page > 1:
+                input_data['searchUrl'] = base_url.replace('.html', f'-pagina-{page}.html')
+            if cap > 0:
+                input_data['maxResults'] = cap - len(results)
+
+            raw_items = await self._run_actor('zonaprop', actor_id, input_data)
+
+            new_unique = 0
+            page_kept = 0
+            for item in raw_items:
+                key = str(item.get('listingId') or item.get('url') or '')
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                new_unique += 1
+                if _item_matches_zona(item, phrases):
+                    prop = _norm_zonaprop(item, filters.zona or '')
+                    if prop is not None and (cap <= 0 or len(results) < cap):
+                        results.append(prop)
+                        page_kept += 1
+
+            # Stop on: empty page, all-duplicates (out-of-range page redirects
+            # back to page 1), all-rejected (drifted into a nationwide
+            # redirect), or a short page (the listing's last one).
+            if not raw_items or new_unique == 0 or page_kept == 0:
+                break
+            if len(raw_items) < self._ZP_PAGE_SIZE:
+                break
+            # A healthy actor run may span multiple pages; skip what it covered.
+            page += max(1, -(-len(raw_items) // self._ZP_PAGE_SIZE))
+        return results
+
     async def scrape_agencies(self, zona: str, on_progress: ProgressCb) -> list[Agency]:
         await on_progress('googlemaps', 'running', 0)
+        from app.core.config import settings
         input_data = {
             'searchStringsArray': [f'inmobiliarias en {zona}'],
-            'maxCrawledPlacesPerSearch': 20,
+            'maxCrawledPlacesPerSearch': settings.GOOGLEMAPS_MAX_PLACES,
             'language': 'es',
             'countryCode': 'ar',
             'includeWebResults': False,
@@ -388,9 +852,10 @@ class ApifyService(BaseApifyService):
 
     async def scrape_instagram_profile(self, handle: str, on_progress: ProgressCb) -> list[RawProperty]:
         await on_progress(f'instagram:{handle}', 'running', 0)
+        from app.core.config import settings
         input_data = {
             'username': [handle],
-            'resultsLimit': 30,
+            'resultsLimit': settings.INSTAGRAM_RESULTS_LIMIT,
             'onlyPostsNewerThan': '3 months',
             'dataDetailLevel': 'basicData',
         }
@@ -423,7 +888,7 @@ _MOCK_AGENCIES = [
 
 class MockApifyService(BaseApifyService):
     DELAYS = {'zonaprop': 1.2, 'mercadolibre': 0.9, 'instagram': 1.0}
-    COUNTS = {'zonaprop': (7, 10), 'mercadolibre': (5, 8), 'instagram': (4, 8)}
+    COUNTS = {'zonaprop': (3, 5), 'mercadolibre': (3, 5), 'instagram': (2, 3)}
 
     async def scrape_source(self, source: str, filters: ScrapingFilters, on_progress: ProgressCb) -> list[RawProperty]:
         delay = self.DELAYS.get(source, 1.0)
@@ -489,7 +954,7 @@ class MockApifyService(BaseApifyService):
         zona = f.zona or random.choice(_BARRIOS)
         calle = random.choice(_CALLES)
         op = f.tipo_operacion or random.choice(['venta', 'alquiler'])
-        tipo = f.tipo_propiedad or random.choice(['departamento', 'casa', 'ph'])
+        tipo = (f.tipos_propiedad[0] if f.tipos_propiedad else None) or random.choice(['departamento', 'casa', 'ph'])
         amb = random.randint(1, 5)
         m2 = round(random.uniform(28, 180), 1)
         precio = round(random.uniform(70_000, 480_000) if op == 'venta' else random.uniform(350, 2200), 0)

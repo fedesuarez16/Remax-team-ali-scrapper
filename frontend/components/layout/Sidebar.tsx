@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Bookmark, Building2, Clock, Database, Plus } from 'lucide-react'
+import { Building2, Clock, Database, MapPin, Plus, Search } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import { useSearchHistory } from '@/hooks/useSearchHistory'
 
@@ -81,6 +81,28 @@ export default function Sidebar() {
           <Database className="size-4" />
           Todas las propiedades
         </Link>
+        <Link
+          href="/search"
+          className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition ${
+            pathname?.startsWith('/search')
+              ? 'bg-muted text-foreground'
+              : 'text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+          }`}
+        >
+          <Search className="size-4" />
+          Buscar en DB
+        </Link>
+        <Link
+          href="/map"
+          className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition ${
+            pathname?.startsWith('/map')
+              ? 'bg-muted text-foreground'
+              : 'text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+          }`}
+        >
+          <MapPin className="size-4" />
+          Mapa
+        </Link>
       </div>
 
       {/* Historial */}
@@ -97,11 +119,18 @@ export default function Sidebar() {
             {searches.map((entry) => (
               <li key={entry.id}>
                 <button
-                  onClick={() => router.push(`/chat?q=${encodeURIComponent(entry.query)}`)}
-                  className="w-full rounded-lg px-2 py-1.5 text-left text-xs text-sidebar-foreground/80 transition hover:bg-sidebar-accent hover:text-sidebar-accent-foreground line-clamp-1"
+                  onClick={() =>
+                    entry.job_id
+                      ? router.push(`/properties?job_id=${encodeURIComponent(entry.job_id)}`)
+                      : router.push(`/chat?q=${encodeURIComponent(entry.query)}`)
+                  }
+                  className="flex w-full items-center gap-2 overflow-hidden rounded-lg px-2 py-1.5 text-left transition hover:bg-sidebar-accent hover:text-sidebar-accent-foreground group"
                   title={entry.query}
                 >
-                  {entry.query}
+                  <Search className="size-3 shrink-0 text-sidebar-foreground/30 group-hover:text-sidebar-foreground/60" />
+                  <span className="truncate text-xs text-sidebar-foreground/70 group-hover:text-sidebar-accent-foreground">
+                    {entry.query}
+                  </span>
                 </button>
               </li>
             ))}
@@ -109,23 +138,8 @@ export default function Sidebar() {
         )}
       </div>
 
-      {/* Divider */}
-      <div className="mx-3 border-t border-sidebar-border" />
-
-      {/* Propiedades guardadas */}
-      <div className="px-3 py-3">
-        <div className="mb-2 flex items-center gap-2">
-          <Bookmark className="size-3.5 text-sidebar-foreground/50" />
-          <p className="text-xs font-medium text-sidebar-foreground/60 uppercase tracking-wide">Guardadas</p>
-        </div>
-        <p className="px-1 text-xs text-sidebar-foreground/40">Próximamente</p>
-      </div>
-
-      {/* Divider */}
-      <div className="mx-3 border-t border-sidebar-border" />
-
       {/* Mi Inmobiliaria */}
-      <div className="px-3 py-3">
+      <div className="border-t border-sidebar-border px-3 py-3">
         <div className="mb-2 flex items-center gap-2">
           <Building2 className="size-3.5 text-sidebar-foreground/50" />
           <p className="text-xs font-medium text-sidebar-foreground/60 uppercase tracking-wide">Mi Inmobiliaria</p>

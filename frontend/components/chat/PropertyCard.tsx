@@ -13,6 +13,24 @@ const FUENTE_LABEL: Record<string, string> = {
   googlemaps: 'Google Maps',
 }
 
+function MatchBar({ score }: { score: number }) {
+  const label = score >= 80 ? 'Coincidencia alta' : score >= 50 ? 'Coincidencia media' : 'Coincidencia baja'
+  return (
+    <div className="border-b border-border px-3 py-2">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-xs font-medium text-foreground">{label}</span>
+        <span className="text-xs font-semibold text-foreground">{score}%</span>
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-foreground transition-all duration-300"
+          style={{ width: `${Math.max(score, 4)}%` }}
+        />
+      </div>
+    </div>
+  )
+}
+
 function ConfidenceDot({ value }: { value: number }) {
   const pct = Math.round(value * 100)
   const opacity = pct >= 80 ? 'bg-foreground' : pct >= 50 ? 'bg-foreground/60' : 'bg-foreground/30'
@@ -29,7 +47,17 @@ export function PropertyCard({ p }: { p: Property }) {
   const conf = p.confianza_extraccion ?? 0
 
   return (
-    <div className="group relative overflow-hidden rounded-2xl border border-border bg-card transition-all duration-200 hover:border-foreground/20 hover:bg-muted/30 hover:shadow-lg hover:shadow-black/5">
+    <div className="group relative overflow-hidden rounded-2xl border border-border bg-card transition-all duration-200 hover:border-foreground/20 hover:bg-muted/30 hover:shadow-lg hover:shadow-black/5" onClick={() => p.url_origen && window.open(p.url_origen, '_blank', 'noopener')} style={p.url_origen ? {cursor: 'pointer'} : undefined}>
+
+      {/* Match bar — only present when ranked against a search query */}
+      {p.match_score != null && <MatchBar score={p.match_score} />}
+
+      {/* Scraped in the search but outside the user's criteria (price/rooms) */}
+      {p.matches_criteria === false && (
+        <div className="border-b border-border bg-muted/40 px-3 py-1.5">
+          <span className="text-xs text-muted-foreground">Fuera de tus criterios</span>
+        </div>
+      )}
 
       {/* Image */}
       <div className="relative aspect-[4/3] overflow-hidden bg-muted">
@@ -67,9 +95,24 @@ export function PropertyCard({ p }: { p: Property }) {
 
         {/* Specs row */}
         <div className="mt-2.5 flex items-center gap-2">
+          {p.tipo_propiedad != null && (
+            <span className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-foreground">
+              {p.tipo_propiedad.charAt(0).toUpperCase() + p.tipo_propiedad.slice(1)}
+            </span>
+          )}
           {p.ambientes != null && (
             <span className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-foreground">
               {p.ambientes} amb
+            </span>
+          )}
+          {p.banos != null && (
+            <span className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-foreground">
+              {p.banos} baño/s
+            </span>
+          )}
+          {p.cocheras != null && (
+            <span className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-foreground">
+              {p.cocheras} cochera/s
             </span>
           )}
           {p.m2_total != null && (
@@ -86,6 +129,27 @@ export function PropertyCard({ p }: { p: Property }) {
             <ConfidenceDot value={conf} />
           </div>
         </div>
+
+        {/* Secondary info row */}
+        {(p.piso != null || p.expensas != null) && (
+          <div className="mt-1.5 flex items-center gap-2">
+            {p.piso != null && (
+              <span className="text-xs text-muted-foreground">
+                Piso {p.piso}
+              </span>
+            )}
+            {p.expensas != null && (
+              <span className="text-xs text-muted-foreground">
+                Expensas {new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 }).format(p.expensas)}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Description */}
+        {p.descripcion && (
+          <p className="mt-2 line-clamp-2 text-sm text-gray-500">{p.descripcion}</p>
+        )}
 
         {/* Amenities */}
         {p.amenities && p.amenities.length > 0 && (

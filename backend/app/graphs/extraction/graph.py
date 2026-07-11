@@ -10,6 +10,7 @@ from app.graphs.extraction.nodes import (
     clarification,
     deduplicate_properties,
     discover_agencies,
+    extract_instagram_properties_llm,
     extract_website_properties_llm,
     no_websites,
     normalize_properties,
@@ -17,8 +18,10 @@ from app.graphs.extraction.nodes import (
     review_agencies,
     route_after_parse,
     route_after_review,
+    run_instagram_scraper,
     run_portal_scraper,
     run_website_scraper,
+    save_instagram_properties,
     save_portal_properties,
     save_website_properties,
 )
@@ -42,9 +45,12 @@ def build_graph(checkpointer: BaseCheckpointSaver[Any] | None = None) -> Any:  #
     g.add_node('review_agencies', review_agencies)
 
     # ── Phase 2 ───────────────────────────────────────────────────────────────
-    g.add_node('run_website_scraper', run_website_scraper)  # type: ignore[arg-type,type-var]
+    g.add_node('run_website_scraper', run_website_scraper)      # type: ignore[arg-type,type-var]
     g.add_node('extract_website_properties_llm', extract_website_properties_llm)
     g.add_node('save_website_properties', save_website_properties)
+    g.add_node('run_instagram_scraper', run_instagram_scraper)  # type: ignore[arg-type,type-var]
+    g.add_node('extract_instagram_properties_llm', extract_instagram_properties_llm)
+    g.add_node('save_instagram_properties', save_instagram_properties)
     g.add_node('no_websites', no_websites)
 
     # ── Edges ─────────────────────────────────────────────────────────────────
@@ -61,11 +67,15 @@ def build_graph(checkpointer: BaseCheckpointSaver[Any] | None = None) -> Any:  #
     g.add_edge('save_portal_properties', 'review_agencies')
 
     g.add_conditional_edges('review_agencies', route_after_review,
-                            ['run_website_scraper', 'no_websites'])
+                            ['run_website_scraper', 'run_instagram_scraper', 'no_websites'])
     g.add_edge('no_websites', END)
 
     g.add_edge('run_website_scraper', 'extract_website_properties_llm')
     g.add_edge('extract_website_properties_llm', 'save_website_properties')
     g.add_edge('save_website_properties', END)
+
+    g.add_edge('run_instagram_scraper', 'extract_instagram_properties_llm')
+    g.add_edge('extract_instagram_properties_llm', 'save_instagram_properties')
+    g.add_edge('save_instagram_properties', END)
 
     return g.compile(checkpointer=checkpointer)
