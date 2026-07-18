@@ -5,6 +5,7 @@ import { Check, ChevronLeft, ChevronRight, Database, Loader2, MapPin, RefreshCw,
 import { PropertyCard } from '@/components/chat/PropertyCard'
 import type { Property } from '@/hooks/useSSEStream'
 import { enrichFicha, guardarSeleccion } from '@/lib/ficha'
+import { sortVentaFirst } from '@/lib/operacion'
 import { cn } from '@/lib/utils'
 
 const keyFor = (p: Property, i: number) => p.id ?? String(i)
@@ -92,7 +93,7 @@ function PropertiesPage() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       if (data.error) throw new Error(data.error)
-      setProperties(data.properties ?? [])
+      setProperties(sortVentaFirst<Property>(data.properties ?? []))
       setTotal(data.total ?? 0)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error desconocido')

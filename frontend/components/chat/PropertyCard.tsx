@@ -1,5 +1,6 @@
 import { ImageIcon, MapPin } from 'lucide-react'
 import type { Property } from '@/hooks/useSSEStream'
+import { operacionLabel } from '@/lib/operacion'
 
 function fmtPrice(p: Property) {
   if (p.precio == null) return 'Consultar'
@@ -78,6 +79,20 @@ export function PropertyCard({ p }: { p: Property }) {
             {FUENTE_LABEL[fuente] ?? fuente}
           </span>
         </div>
+        {/* Operation badge overlay — venta solid, alquiler outlined */}
+        {operacionLabel(p) && (
+          <div className="absolute bottom-2 left-2">
+            <span
+              className={
+                p.tipo_operacion === 'venta'
+                  ? 'inline-flex items-center rounded-full bg-foreground px-2 py-0.5 text-xs font-semibold text-background'
+                  : 'inline-flex items-center rounded-full border border-border bg-background/90 px-2 py-0.5 text-xs font-medium text-foreground backdrop-blur-sm'
+              }
+            >
+              {operacionLabel(p)}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Content */}

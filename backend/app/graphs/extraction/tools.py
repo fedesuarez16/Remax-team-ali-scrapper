@@ -24,8 +24,22 @@ EXTRACT_FILTERS_TOOL = {
             },
             'precio_min': {'type': ['number', 'null'], 'description': 'USD'},
             'precio_max': {'type': ['number', 'null'], 'description': 'USD'},
-            'ambientes_min': {'type': ['integer', 'null']},
-            'ambientes_max': {'type': ['integer', 'null']},
+            'ambientes_min': {
+                'type': ['integer', 'null'],
+                'description': (
+                    'Mínimo de ambientes. Dormitorios NO son ambientes: "N dormitorios" '
+                    'implica al menos N ambientes → ambientes_min=N y ambientes_max=null '
+                    '(una casa de 3 dormitorios suele tener 4 o más ambientes).'
+                ),
+            },
+            'ambientes_max': {
+                'type': ['integer', 'null'],
+                'description': (
+                    'Máximo de ambientes. SOLO si el usuario fija un tope explícito '
+                    '("hasta 3 ambientes", "máximo 3 amb", "como mucho 3"). '
+                    'NUNCA lo infieras de "N ambientes" ni de "N dormitorios" a secas.'
+                ),
+            },
             'm2_min': {'type': ['number', 'null']},
             'm2_max': {'type': ['number', 'null']},
         },
@@ -80,6 +94,8 @@ INSTAGRAM_SYSTEM_PROMPT = (
 SYSTEM_PROMPT = (
     'Sos un parser de búsquedas inmobiliarias para el mercado argentino. '
     'Interpretás lenguaje informal (ej: "2 amb", "depto", "para alquilar"). '
+    'Dormitorios y ambientes son cosas distintas: "3 dormitorios" → ambientes_min=3, ambientes_max=null. '
+    'Fijá ambientes_max únicamente si el usuario pone un tope explícito ("hasta", "máximo", "como mucho"). '
     'Si el precio viene en pesos (ARS), dejá precio en null salvo que sea claro. '
     'Llamá SIEMPRE a la herramienta extract_search_filters. '
     'Extraé TODAS las zonas mencionadas como una lista en "zonas" (una entrada por barrio o ciudad). '

@@ -14,6 +14,7 @@ import {
   useMapEvents,
 } from 'react-leaflet'
 import { pointInPolygon } from '@/lib/geo'
+import { operacionLabel, sortVentaFirst } from '@/lib/operacion'
 import { AgencySelector } from '@/components/chat/AgencySelector'
 import { ProgressBubble } from '@/components/chat/ProgressBubble'
 import { useZoneSearch } from '@/hooks/useZoneSearch'
@@ -51,6 +52,8 @@ const BUENOS_AIRES_CENTER: [number, number] = [-34.6037, -58.3816]
 const INITIAL_ZOOM = 12
 
 const MARKER_STYLE = { color: '#111', fillColor: '#111', fillOpacity: 0.85, weight: 1 }
+// Alquiler: white fill with dark ring, so venta (solid) reads first at a glance.
+const ALQUILER_STYLE = { color: '#111', fillColor: '#fff', fillOpacity: 0.95, weight: 1.5 }
 const CARTERA_STYLE = { color: '#991b1b', fillColor: '#dc2626', fillOpacity: 0.9, weight: 1 }
 const DIMMED_STYLE = { color: '#111', fillColor: '#111', fillOpacity: 0.12, weight: 1, opacity: 0.25 }
 const CARTERA_DIMMED_STYLE = { color: '#991b1b', fillColor: '#dc2626', fillOpacity: 0.12, weight: 1, opacity: 0.25 }
@@ -62,6 +65,12 @@ function fmtPrice(p: MapProperty) {
   const n = new Intl.NumberFormat('es-AR', { maximumFractionDigits: 0 }).format(p.precio)
   return `${p.moneda ?? 'USD'} ${n}${p.tipo_operacion !== 'venta' ? '/mes' : ''}`
 }
+
+const markerStyleFor = (p: MapProperty) =>
+  p.tipo_operacion === 'alquiler' ? ALQUILER_STYLE : MARKER_STYLE
+
+// SVG stacking: later markers paint on top — venta last so it sits above.
+const ventaOnTop = (list: MapProperty[]) => sortVentaFirst(list).reverse()
 
 function DrawClickHandler({
   enabled,
@@ -177,13 +186,13 @@ export default function PropertyMap({
       {focused && (
         <FocusHandler target={[focused.lat, focused.lng]} markerRef={focusMarkerRef} />
       )}
-      {properties.map((p) => (
+      {ventaOnTop(properties).map((p) => (
         <CircleMarker
           key={p.id}
           ref={p.id === focusId ? focusMarkerRef : undefined}
           center={[p.lat, p.lng]}
           radius={p.id === focusId ? 9 : 6}
-          pathOptions={zoneActive && !insideIds.has(p.id) ? DIMMED_STYLE : MARKER_STYLE}
+          pathOptions={zoneActive && !insideIds.has(p.id) ? DIMMED_STYLE : markerStyleFor(p)}
         >
           <Popup>
             <div className="w-48">
@@ -193,6 +202,11 @@ export default function PropertyMap({
                   alt={p.titulo ?? p.direccion}
                   className="mb-2 h-24 w-full rounded-md object-cover"
                 />
+              )}
+              {operacionLabel(p) && (
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  {operacionLabel(p)}
+                </p>
               )}
               <p className="text-sm font-semibold text-foreground">{fmtPrice(p)}</p>
               {p.titulo && <p className="line-clamp-1 text-xs text-muted-foreground">{p.titulo}</p>}
@@ -244,12 +258,12 @@ export default function PropertyMap({
         </CircleMarker>
       ))}
       {zone.phase === 'done' &&
-        zone.jobProperties.map((p) => (
+        ventaOnTop(zone.jobProperties).map((p) => (
           <CircleMarker
             key={`job-${p.id}`}
             center={[p.lat, p.lng]}
             radius={6}
-            pathOptions={!jobInsideIds.has(p.id) ? DIMMED_STYLE : MARKER_STYLE}
+            pathOptions={!jobInsideIds.has(p.id) ? DIMMED_STYLE : markerStyleFor(p)}
           >
             <Popup>
               <div className="w-48">
@@ -259,6 +273,11 @@ export default function PropertyMap({
                     alt={p.titulo ?? p.direccion}
                     className="mb-2 h-24 w-full rounded-md object-cover"
                   />
+                )}
+                {operacionLabel(p) && (
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    {operacionLabel(p)}
+                  </p>
                 )}
                 <p className="text-sm font-semibold text-foreground">{fmtPrice(p)}</p>
                 {p.titulo && <p className="line-clamp-1 text-xs text-muted-foreground">{p.titulo}</p>}
