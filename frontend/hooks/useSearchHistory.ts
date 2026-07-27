@@ -2,13 +2,22 @@
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 const HISTORY_URL = `${API}/api/v1/search-history`
+const FOLDERS_URL = `${HISTORY_URL}/folders`
 
 export type SearchEntry = {
   id: string
   query: string
   zona?: string
   job_id?: string
+  label?: string | null
+  folder_id?: string | null
   date: string
+}
+
+export type Folder = {
+  id: string
+  name: string
+  created_at: string
 }
 
 type SearchHistoryRow = {
@@ -16,6 +25,8 @@ type SearchHistoryRow = {
   query: string
   zona?: string | null
   job_id?: string | null
+  label?: string | null
+  folder_id?: string | null
   created_at: string
 }
 
@@ -25,6 +36,8 @@ function mapRow(row: SearchHistoryRow): SearchEntry {
     query: row.query,
     zona: row.zona ?? undefined,
     job_id: row.job_id ?? undefined,
+    label: row.label ?? null,
+    folder_id: row.folder_id ?? null,
     date: row.created_at,
   }
 }
@@ -32,10 +45,11 @@ function mapRow(row: SearchHistoryRow): SearchEntry {
 // Module-level subscribers set for same-tab live updates without Context
 const subscribers = new Set<() => void>()
 
-// Last known list, kept so a failed fetch degrades gracefully instead of
+// Last known lists, kept so a failed fetch degrades gracefully instead of
 // wiping the sidebar (server is now the source of truth, but we don't want
 // a transient network error to blank the UI).
 let lastKnown: SearchEntry[] = []
+let lastKnownFolders: Folder[] = []
 
 function notify(): void {
   subscribers.forEach((fn) => fn())
@@ -55,20 +69,89 @@ async function fetchHistory(): Promise<SearchEntry[]> {
   }
 }
 
-export async function addSearch(query: string, zona?: string, job_id?: string): Promise<void> {
+async function fetchFolders(): Promise<Folder[]> {
+  try {
+    const res = await fetch(FOLDERS_URL)
+    if (!res.ok) return lastKnownFolders
+    const data = await res.json()
+    lastKnownFolders = (data.folders ?? []) as Folder[]
+    return lastKnownFolders
+  } catch {
+    return lastKnownFolders
+  }
+}
+
+export async function addSearch(
+  query: string,
+  zona?: string,
+  job_id?: string,
+  folder_id?: string | null,
+): Promise<void> {
   const trimmed = query.trim()
   if (!trimmed) return
 
   try {
+    const body: Record<string, unknown> = { query: trimmed, zona, job_id }
+    if (folder_id !== undefined) body.folder_id = folder_id
     const res = await fetch(HISTORY_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: trimmed, zona, job_id }),
+      body: JSON.stringify(body),
     })
     if (!res.ok) return
+    await fetchHistory()
     notify()
   } catch {
     // Swallow — sidebar keeps its last known list, submit flow is unaffected.
+  }
+}
+
+export async function updateEntry(
+  id: string,
+  changes: { label?: string | null; folder_id?: string | null },
+): Promise<void> {
+  try {
+    const res = await fetch(`${HISTORY_URL}/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(changes),
+    })
+    if (!res.ok) return
+    await fetchHistory()
+    notify()
+  } catch {
+    // Swallow — keep last known state, never throw into the UI.
+  }
+}
+
+export async function deleteEntry(id: string): Promise<void> {
+  try {
+    const res = await fetch(`${HISTORY_URL}/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (!res.ok) return
+    await fetchHistory()
+    notify()
+  } catch {
+    // Swallow — keep last known state, never throw into the UI.
+  }
+}
+
+export async function createFolder(name: string): Promise<Folder | null> {
+  const trimmed = name.trim()
+  if (!trimmed) return null
+
+  try {
+    const res = await fetch(FOLDERS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: trimmed }),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    await fetchFolders()
+    notify()
+    return (data.folder ?? null) as Folder | null
+  } catch {
+    return null
   }
 }
 
@@ -76,6 +159,7 @@ import { useEffect, useState } from 'react'
 
 export function useSearchHistory() {
   const [searches, setSearches] = useState<SearchEntry[]>(lastKnown)
+  const [folders, setFolders] = useState<Folder[]>(lastKnownFolders)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -85,12 +169,16 @@ export function useSearchHistory() {
       fetchHistory().then((entries) => {
         if (!cancelled) setSearches(entries)
       })
+      fetchFolders().then((f) => {
+        if (!cancelled) setFolders(f)
+      })
     }
 
     setLoading(true)
-    fetchHistory().then((entries) => {
+    Promise.all([fetchHistory(), fetchFolders()]).then(([entries, f]) => {
       if (!cancelled) {
         setSearches(entries)
+        setFolders(f)
         setLoading(false)
       }
     })
@@ -103,5 +191,5 @@ export function useSearchHistory() {
     }
   }, [])
 
-  return { searches, addSearch, loading }
+  return { searches, folders, addSearch, updateEntry, deleteEntry, createFolder, loading }
 }

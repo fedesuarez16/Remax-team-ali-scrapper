@@ -541,7 +541,7 @@ def _norm_remax(item: dict[str, Any], zona: str) -> RawProperty | None:
         m2_cubiertos=item.get('dimensionCovered') or None,
         amenities=[],
         imagenes=[],
-        url_origen=f'https://www.remax.com.ar/listing/{item.get("slug", "")}-{item.get("id", "")}',
+        url_origen=f'https://www.remax.com.ar/listings/{item.get("slug", "")}',
     )
 
 

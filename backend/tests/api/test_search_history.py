@@ -23,13 +23,14 @@ class _Res:
 class _FakeQuery:
     def __init__(self, store: list[dict], mode: str, insert_defaults: dict | None = None) -> None:
         self._store = store
-        self._mode = mode  # 'select' | 'insert' | 'delete'
+        self._mode = mode  # 'select' | 'insert' | 'delete' | 'update'
         self._insert_defaults = insert_defaults or {}
         self._filters: list[tuple[str, str, object]] = []
         self._order_field: str | None = None
         self._order_desc = False
         self._limit_n: int | None = None
         self._insert_payload: dict | None = None
+        self._update_payload: dict | None = None
 
     # -- filters --------------------------------------------------------
     def select(self, *_a, **_kw) -> '_FakeQuery':
@@ -40,6 +41,10 @@ class _FakeQuery:
         return self
 
     def delete(self) -> '_FakeQuery':
+        return self
+
+    def update(self, payload: dict) -> '_FakeQuery':
+        self._update_payload = payload
         return self
 
     def eq(self, field: str, value) -> '_FakeQuery':
@@ -89,6 +94,12 @@ class _FakeQuery:
                 self._store.remove(r)
             return _Res(matched)
 
+        if self._mode == 'update':
+            matched = [r for r in self._store if self._match(r)]
+            for r in matched:
+                r.update(self._update_payload or {})
+            return _Res(matched)
+
         # select
         rows = [r for r in self._store if self._match(r)]
         if self._order_field:
@@ -112,14 +123,23 @@ class _FakeTable:
     def delete(self) -> _FakeQuery:
         return _FakeQuery(self._store, 'delete', self._insert_defaults)
 
+    def update(self, payload: dict) -> _FakeQuery:
+        return _FakeQuery(self._store, 'update', self._insert_defaults).update(payload)
+
 
 class _FakeSupabase:
-    def __init__(self, rows: list[dict] | None = None) -> None:
+    def __init__(self, rows: list[dict] | None = None, folders: list[dict] | None = None) -> None:
         self._store: list[dict] = rows or []
+        self._folders: list[dict] = folders or []
 
     def table(self, name: str) -> _FakeTable:
         if name == 'search_history':
-            return _FakeTable(self._store, insert_defaults={'zona': None, 'job_id': None})
+            return _FakeTable(
+                self._store,
+                insert_defaults={'zona': None, 'job_id': None, 'label': None, 'folder_id': None},
+            )
+        if name == 'search_history_folders':
+            return _FakeTable(self._folders, insert_defaults={})
         raise AssertionError(f'unexpected table {name}')
 
 
@@ -133,6 +153,9 @@ class _RaisingTable:
         raise RuntimeError('boom')
 
     def delete(self, *_a, **_kw):
+        raise RuntimeError('boom')
+
+    def update(self, *_a, **_kw):
         raise RuntimeError('boom')
 
 
@@ -161,13 +184,31 @@ def _client(fake_sb) -> AsyncClient:
     return AsyncClient(transport=transport, base_url='http://test')
 
 
-def _row(query: str, *, minutes_ago: int, job_id: str | None = None) -> dict:
+def _row(
+    query: str,
+    *,
+    minutes_ago: int,
+    job_id: str | None = None,
+    label: str | None = None,
+    folder_id: str | None = None,
+) -> dict:
     created = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
     return {
         'id': f'id-{uuid.uuid4().hex[:8]}',
         'query': query,
         'zona': None,
         'job_id': job_id,
+        'label': label,
+        'folder_id': folder_id,
+        'created_at': created.isoformat(),
+    }
+
+
+def _folder(name: str, *, minutes_ago: int = 0) -> dict:
+    created = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return {
+        'id': f'folder-{uuid.uuid4().hex[:8]}',
+        'name': name,
         'created_at': created.isoformat(),
     }
 
@@ -224,7 +265,9 @@ async def test_post_new_query_inserts() -> None:
     assert len(fake_sb._store) == 1
 
 
-async def test_post_case_insensitive_dedupe_replaces_row() -> None:
+async def test_post_case_insensitive_dedupe_updates_row_in_place() -> None:
+    # ADR-1: SELECT existing -> UPDATE in place (NOT delete-then-insert),
+    # so the row's id is stable and metadata (label/folder_id) survives.
     existing = _row('casas en palermo', minutes_ago=5)
     fake_sb = _FakeSupabase([existing])
     async with _client(fake_sb) as client:
@@ -233,10 +276,47 @@ async def test_post_case_insensitive_dedupe_replaces_row() -> None:
     assert resp.status_code == 200
     entry = resp.json()['entry']
     assert entry['job_id'] == 'abc123'
-    # delete-then-insert: old row is gone, replaced by a fresh row
-    assert entry['id'] != existing['id']
+    assert entry['id'] == existing['id']
     assert len(fake_sb._store) == 1
     assert fake_sb._store[0]['query'] == 'Casas en Palermo'
+
+
+async def test_post_repeat_query_preserves_label_and_folder_id() -> None:
+    existing = _row('casas en palermo', minutes_ago=5, label='Mis favoritas', folder_id='folder-1')
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.post('/search-history', json={'query': 'casas en palermo'})
+
+    assert resp.status_code == 200
+    entry = resp.json()['entry']
+    assert entry['label'] == 'Mis favoritas'
+    assert entry['folder_id'] == 'folder-1'
+
+
+async def test_post_repeat_query_bumps_created_at_to_top() -> None:
+    older = _row('casas en palermo', minutes_ago=30)
+    newer = _row('deptos en recoleta', minutes_ago=1)
+    fake_sb = _FakeSupabase([older, newer])
+    async with _client(fake_sb) as client:
+        resp = await client.post('/search-history', json={'query': 'casas en palermo'})
+
+    assert resp.status_code == 200
+    async with _client(fake_sb) as client:
+        listing = await client.get('/search-history')
+    queries = [e['query'] for e in listing.json()['history']]
+    assert queries[0] == 'casas en palermo'
+
+
+async def test_get_history_includes_label_and_folder_id() -> None:
+    fake_sb = _FakeSupabase([
+        _row('casas en palermo', minutes_ago=1, label='Favoritas', folder_id='folder-1'),
+    ])
+    async with _client(fake_sb) as client:
+        resp = await client.get('/search-history')
+
+    entry = resp.json()['history'][0]
+    assert entry['label'] == 'Favoritas'
+    assert entry['folder_id'] == 'folder-1'
 
 
 async def test_post_cap_trims_oldest_beyond_20() -> None:
@@ -280,3 +360,150 @@ async def test_post_when_supabase_not_configured() -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data == {'entry': None, 'error': 'Supabase no configurado'}
+
+
+# -- PATCH (label / folder assignment) -----------------------------------
+
+
+async def test_patch_updates_label_only() -> None:
+    existing = _row('casas en palermo', minutes_ago=1, label=None, folder_id='folder-1')
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(f"/search-history/{existing['id']}", json={'label': 'Favoritas'})
+
+    assert resp.status_code == 200
+    entry = resp.json()['entry']
+    assert entry['label'] == 'Favoritas'
+    # untouched — key absent from body
+    assert entry['folder_id'] == 'folder-1'
+
+
+async def test_patch_folder_id_null_unassigns() -> None:
+    existing = _row('casas en palermo', minutes_ago=1, label='Favoritas', folder_id='folder-1')
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(f"/search-history/{existing['id']}", json={'folder_id': None})
+
+    assert resp.status_code == 200
+    entry = resp.json()['entry']
+    assert entry['folder_id'] is None
+    # untouched — key absent from body
+    assert entry['label'] == 'Favoritas'
+
+
+async def test_patch_updates_both_fields() -> None:
+    existing = _row('casas en palermo', minutes_ago=1)
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(
+            f"/search-history/{existing['id']}",
+            json={'label': 'Favoritas', 'folder_id': 'folder-2'},
+        )
+
+    assert resp.status_code == 200
+    entry = resp.json()['entry']
+    assert entry['label'] == 'Favoritas'
+    assert entry['folder_id'] == 'folder-2'
+
+
+async def test_patch_nonexistent_id_returns_error() -> None:
+    fake_sb = _FakeSupabase([])
+    async with _client(fake_sb) as client:
+        resp = await client.patch('/search-history/does-not-exist', json={'label': 'x'})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['entry'] is None
+    assert 'error' in data
+
+
+async def test_patch_when_supabase_not_configured() -> None:
+    async with _client(None) as client:
+        resp = await client.patch('/search-history/some-id', json={'label': 'x'})
+
+    assert resp.status_code == 200
+    assert resp.json() == {'entry': None, 'error': 'Supabase no configurado'}
+
+
+# -- DELETE (per-entry) ---------------------------------------------------
+
+
+async def test_delete_removes_existing_entry() -> None:
+    existing = _row('casas en palermo', minutes_ago=1)
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.delete(f"/search-history/{existing['id']}")
+
+    assert resp.status_code == 200
+    assert resp.json() == {'deleted': True}
+    assert fake_sb._store == []
+
+
+async def test_delete_nonexistent_id_is_idempotent() -> None:
+    fake_sb = _FakeSupabase([])
+    async with _client(fake_sb) as client:
+        resp = await client.delete('/search-history/does-not-exist')
+
+    assert resp.status_code == 200
+    assert resp.json() == {'deleted': True}
+
+
+async def test_delete_when_supabase_not_configured() -> None:
+    async with _client(None) as client:
+        resp = await client.delete('/search-history/some-id')
+
+    assert resp.status_code == 200
+    assert resp.json() == {'deleted': False, 'error': 'Supabase no configurado'}
+
+
+# -- Folders: POST / GET ---------------------------------------------------
+
+
+async def test_folders_post_creates_folder() -> None:
+    fake_sb = _FakeSupabase([])
+    async with _client(fake_sb) as client:
+        resp = await client.post('/search-history/folders', json={'name': 'Clientes VIP'})
+
+    assert resp.status_code == 200
+    folder = resp.json()['folder']
+    assert folder['name'] == 'Clientes VIP'
+    assert len(fake_sb._folders) == 1
+
+
+async def test_folders_post_rejects_empty_name() -> None:
+    fake_sb = _FakeSupabase([])
+    async with _client(fake_sb) as client:
+        resp = await client.post('/search-history/folders', json={'name': '   '})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['folder'] is None
+    assert 'error' in data
+    assert fake_sb._folders == []
+
+
+async def test_folders_post_when_supabase_not_configured() -> None:
+    async with _client(None) as client:
+        resp = await client.post('/search-history/folders', json={'name': 'x'})
+
+    assert resp.status_code == 200
+    assert resp.json() == {'folder': None, 'error': 'Supabase no configurado'}
+
+
+async def test_folders_get_lists_all() -> None:
+    fake_sb = _FakeSupabase([], folders=[_folder('A', minutes_ago=5), _folder('B', minutes_ago=1)])
+    async with _client(fake_sb) as client:
+        resp = await client.get('/search-history/folders')
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['total'] == 2
+    assert [f['name'] for f in data['folders']] == ['B', 'A']
+
+
+async def test_folders_get_when_supabase_not_configured() -> None:
+    async with _client(None) as client:
+        resp = await client.get('/search-history/folders')
+
+    assert resp.status_code == 200
+    assert resp.json() == {'folders': [], 'total': 0, 'error': 'Supabase no configurado'}

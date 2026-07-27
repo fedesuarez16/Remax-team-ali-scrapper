@@ -1,10 +1,9 @@
 'use client'
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Building2, Clock, Database, FileText, Globe, MapPin, Plus, Search } from 'lucide-react'
+import { Building2, Database, FileText, Folder, Globe, MapPin, Plus, Search } from 'lucide-react'
 import { usePathname } from 'next/navigation'
-import { useSearchHistory } from '@/hooks/useSearchHistory'
+import SearchHistoryList from '@/components/layout/SearchHistoryList'
 
 const AGENCY_KEY = 'prop_agency_config'
 
@@ -25,9 +24,7 @@ function readAgencyConfig(): AgencyConfig {
 }
 
 export default function Sidebar() {
-  const router = useRouter()
   const pathname = usePathname()
-  const { searches } = useSearchHistory()
   const [agency, setAgency] = useState<AgencyConfig>({ nombre: '', telefono: '', whatsapp: '' })
 
   useEffect(() => {
@@ -125,40 +122,21 @@ export default function Sidebar() {
           <FileText className="size-4" />
           Ficha Propio
         </Link>
+        <Link
+          href="/historial"
+          className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition ${
+            pathname?.startsWith('/historial')
+              ? 'bg-muted text-foreground'
+              : 'text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+          }`}
+        >
+          <Folder className="size-4" />
+          Carpetas
+        </Link>
       </div>
 
       {/* Historial */}
-      <div className="flex-1 overflow-y-auto px-3 pt-4">
-        <div className="mb-2 flex items-center gap-2">
-          <Clock className="size-3.5 text-sidebar-foreground/50" />
-          <p className="text-xs font-medium text-sidebar-foreground/60 uppercase tracking-wide">Historial</p>
-        </div>
-
-        {searches.length === 0 ? (
-          <p className="px-1 text-xs text-sidebar-foreground/40">Sin búsquedas aún</p>
-        ) : (
-          <ul className="space-y-0.5">
-            {searches.map((entry) => (
-              <li key={entry.id}>
-                <button
-                  onClick={() =>
-                    entry.job_id
-                      ? router.push(`/properties?job_id=${encodeURIComponent(entry.job_id)}`)
-                      : router.push(`/chat?q=${encodeURIComponent(entry.query)}`)
-                  }
-                  className="flex w-full items-center gap-2 overflow-hidden rounded-lg px-2 py-1.5 text-left transition hover:bg-sidebar-accent hover:text-sidebar-accent-foreground group"
-                  title={entry.query}
-                >
-                  <Search className="size-3 shrink-0 text-sidebar-foreground/30 group-hover:text-sidebar-foreground/60" />
-                  <span className="truncate text-xs text-sidebar-foreground/70 group-hover:text-sidebar-accent-foreground">
-                    {entry.query}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      <SearchHistoryList />
 
       {/* Mi Inmobiliaria */}
       <div className="border-t border-sidebar-border px-3 py-3">

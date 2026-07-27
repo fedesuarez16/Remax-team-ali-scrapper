@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -35,14 +36,20 @@ async def list_search_history(request: Request) -> dict[str, Any]:
 
 @router.post('')
 async def create_or_update_search_history(request: Request, body: dict) -> dict[str, Any]:
-    """Upsert a search-history entry via delete-then-insert.
+    """Upsert a search-history entry via SELECT existing -> UPDATE in place.
 
-    Case-insensitive match on `query`: any existing row is deleted, then a
-    fresh row is inserted with the new payload — mirrors the client's old
-    localStorage filter->prepend->slice behavior and keeps the unique index
-    on lower(query) conflict-free. Rows beyond CAP (oldest by created_at)
-    are then trimmed. Never raises — failures are swallowed into
-    {error: str(e)}.
+    Case-insensitive match on `query`. NOTE (ADR-1, deliberate deviation from
+    the older delete-then-insert wording): once `label`/`folder_id` columns
+    exist, delete-then-insert would silently wipe a user's custom label and
+    folder assignment every time they re-run the same search. So instead we
+    SELECT the row matching lower(query); if found, UPDATE it in place
+    (merging zona/job_id when provided, folder_id only if the key is present
+    in the body, and bumping created_at so the row resurfaces at the top of
+    the most-recent-first listing) while PRESERVING `label` and any
+    `folder_id` not explicitly overridden. If no row exists, INSERT a fresh
+    one (label null) and trim beyond CAP. `label` is never set by POST — it
+    is only ever set/changed via PATCH. Never raises — failures are
+    swallowed into {error: str(e)}.
     """
     sb = request.app.state.supabase
     if sb is None:
@@ -56,14 +63,135 @@ async def create_or_update_search_history(request: Request, body: dict) -> dict[
     job_id = body.get('job_id')
 
     try:
-        await sb.table('search_history').delete().ilike('query', query).execute()
+        existing_res = await sb.table('search_history').select('*').ilike('query', query).execute()
+        existing_rows = existing_res.data or []
+
+        if existing_rows:
+            existing = existing_rows[0]
+            update_payload: dict[str, Any] = {
+                'query': query,
+                'zona': zona,
+                'job_id': job_id,
+                'created_at': datetime.now(timezone.utc).isoformat(),
+            }
+            if 'folder_id' in body:
+                update_payload['folder_id'] = body.get('folder_id')
+            res = await (
+                sb.table('search_history')
+                .update(update_payload)
+                .eq('id', existing['id'])
+                .execute()
+            )
+            entry = res.data[0] if res.data else None
+            return {'entry': entry}
+
         payload: dict[str, Any] = {'query': query, 'zona': zona, 'job_id': job_id}
+        if 'folder_id' in body:
+            payload['folder_id'] = body.get('folder_id')
         res = await sb.table('search_history').insert(payload).execute()
         entry = res.data[0] if res.data else None
         await _trim_cap(sb)
         return {'entry': entry}
     except Exception as e:
         return {'entry': None, 'error': str(e)}
+
+
+@router.post('/folders')
+async def create_search_history_folder(request: Request, body: dict) -> dict[str, Any]:
+    """Create a folder to group search-history entries.
+
+    Declared BEFORE the `/{entry_id}` routes (ADR-3) so the static
+    `/folders` segment can never be shadowed by a path-param route.
+    """
+    sb = request.app.state.supabase
+    if sb is None:
+        return {'folder': None, 'error': 'Supabase no configurado'}
+
+    name = (body.get('name') or '').strip()
+    if not name:
+        return {'folder': None, 'error': 'name es requerido'}
+
+    try:
+        res = await sb.table('search_history_folders').insert({'name': name}).execute()
+        folder = res.data[0] if res.data else None
+        return {'folder': folder}
+    except Exception as e:
+        return {'folder': None, 'error': str(e)}
+
+
+@router.get('/folders')
+async def list_search_history_folders(request: Request) -> dict[str, Any]:
+    """List all folders, most-recent-first.
+
+    Declared BEFORE the `/{entry_id}` routes (ADR-3).
+    """
+    sb = request.app.state.supabase
+    if sb is None:
+        return {'folders': [], 'total': 0, 'error': 'Supabase no configurado'}
+
+    try:
+        res = await (
+            sb.table('search_history_folders')
+            .select('*')
+            .order('created_at', desc=True)
+            .execute()
+        )
+        folders = res.data or []
+        return {'folders': folders, 'total': len(folders)}
+    except Exception as e:
+        return {'folders': [], 'total': 0, 'error': str(e)}
+
+
+@router.patch('/{entry_id}')
+async def update_search_history_entry(request: Request, entry_id: str, body: dict) -> dict[str, Any]:
+    """Update `label` and/or `folder_id` on a single entry.
+
+    Uses presence checks (`'label' in body` / `'folder_id' in body`, ADR-5)
+    rather than falsy checks, so a client can explicitly clear a label or
+    unassign a folder by sending `null` while an absent key leaves that
+    column untouched.
+    """
+    sb = request.app.state.supabase
+    if sb is None:
+        return {'entry': None, 'error': 'Supabase no configurado'}
+
+    update_payload: dict[str, Any] = {}
+    if 'label' in body:
+        update_payload['label'] = body.get('label')
+    if 'folder_id' in body:
+        update_payload['folder_id'] = body.get('folder_id')
+
+    try:
+        res = await (
+            sb.table('search_history')
+            .update(update_payload)
+            .eq('id', entry_id)
+            .execute()
+        )
+        rows = res.data or []
+        if not rows:
+            return {'entry': None, 'error': 'entry no encontrada'}
+        return {'entry': rows[0]}
+    except Exception as e:
+        return {'entry': None, 'error': str(e)}
+
+
+@router.delete('/{entry_id}')
+async def delete_search_history_entry(request: Request, entry_id: str) -> dict[str, Any]:
+    """Delete a single history entry by id. Idempotent — deleting a
+    non-existent id is not an error (Postgres delete is naturally
+    idempotent), so this always returns {deleted: true} absent a real
+    backend/DB failure.
+    """
+    sb = request.app.state.supabase
+    if sb is None:
+        return {'deleted': False, 'error': 'Supabase no configurado'}
+
+    try:
+        await sb.table('search_history').delete().eq('id', entry_id).execute()
+        return {'deleted': True}
+    except Exception as e:
+        return {'deleted': False, 'error': str(e)}
 
 
 async def _trim_cap(sb: Any, cap: int = CAP) -> None:

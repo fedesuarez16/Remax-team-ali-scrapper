@@ -40,11 +40,11 @@ def test_maps_core_fields() -> None:
     assert prop.direccion == 'Avenida Asamblea 1400'
 
 
-def test_builds_listing_detail_url_from_slug_and_id() -> None:
+def test_builds_listing_detail_url_from_slug() -> None:
     prop = _norm_remax(_REAL_ITEM, 'Parque Chacabuco')
     assert prop is not None
     assert prop.url_origen == (
-        'https://www.remax.com.ar/listing/en-venta-3-dormit-c-dep-coch-fte-pque-chacabuco-610152'
+        'https://www.remax.com.ar/listings/en-venta-3-dormit-c-dep-coch-fte-pque-chacabuco'
     )
 
 
