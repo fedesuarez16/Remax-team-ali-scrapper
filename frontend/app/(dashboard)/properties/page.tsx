@@ -20,6 +20,8 @@ const FUENTES = [
   { value: '', label: 'Todas' },
   { value: 'zonaprop', label: 'ZonaProp' },
   { value: 'mercadolibre', label: 'MercadoLibre' },
+  { value: 'argenprop', label: 'Argenprop' },
+  { value: 'remax', label: 'RE/MAX' },
   { value: 'googlemaps', label: 'Sitios web' },
 ]
 

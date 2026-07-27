@@ -452,39 +452,58 @@ async def save_portal_properties(state: dict[str, Any], config: RunnableConfig) 
 
 # ── Phase 1 → Phase 2 bridge: agency review interrupt ─────────────────────────
 
+async def _fetch_active_manual_sources(sb: Any) -> list[dict]:
+    """Manually-registered sources (backend/app/api/v1/manual_sources.py) —
+    e.g. a RE/MAX office or small inmobiliaria not surfaced by the Google
+    Maps 'inmobiliarias en {zona}' search. Best-effort: an empty list on any
+    failure just means no manual sources get folded in this run."""
+    if sb is None:
+        return []
+    try:
+        res = await sb.table('manual_sources').select('nombre,url').eq('activo', True).execute()
+        return res.data or []
+    except Exception:
+        return []
+
+
 async def review_agencies(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
     agencies = state.get('agencies', [])
+    sb = config['configurable'].get('supabase')
+    manual_sources = await _fetch_active_manual_sources(sb)
 
-    if not agencies:
-        # No agencies found → skip Instagram, emit done
+    if not agencies and not manual_sources:
+        # No agencies found, no manual sources registered → skip Instagram, emit done
         await adispatch_custom_event('done', {
             'event': 'done',
             'job_id': state.get('job_id'),
             'total_count': len(state.get('normalized_properties', [])),
             'sources': list(PORTAL_SOURCES),
         }, config=config)
-        return {'selected_agency_ids': []}
+        return {'selected_agency_ids': [], 'manual_sources': []}
 
-    await adispatch_custom_event('agencies_review', {
-        'event': 'agencies_review',
-        'agencies': [a.model_dump() for a in agencies],
-        'message': f'Encontré {len(agencies)} inmobiliarias locales. Seleccioná las que querés incluir para buscar propiedades en sus sitios web.',
-    }, config=config)
+    if agencies:
+        await adispatch_custom_event('agencies_review', {
+            'event': 'agencies_review',
+            'agencies': [a.model_dump() for a in agencies],
+            'message': f'Encontré {len(agencies)} inmobiliarias locales. Seleccioná las que querés incluir para buscar propiedades en sus sitios web.',
+        }, config=config)
 
-    # INTERRUPT — graph pauses here, resumes when user sends selected_agency_ids
-    selected: list[str] = interrupt({'type': 'agency_selection'})
-    return {'selected_agency_ids': selected}
+        # INTERRUPT — graph pauses here, resumes when user sends selected_agency_ids
+        selected: list[str] = interrupt({'type': 'agency_selection'})
+    else:
+        selected = []
+
+    return {'selected_agency_ids': selected, 'manual_sources': manual_sources}
 
 
 def route_after_review(state: ScrapingState) -> str | list[Any]:
     selected = state.get('selected_agency_ids', [])
     agencies = state.get('agencies', [])
-    if not selected or not agencies:
-        return 'no_websites'
+    manual_sources = state.get('manual_sources', [])
+    job_id = state.get('job_id')
 
     agency_map = {a.id: a for a in agencies}
     selected_agencies = [agency_map[aid] for aid in selected if aid in agency_map]
-    job_id = state.get('job_id')
 
     sends: list[Any] = []
     websites_sent = 0
@@ -495,6 +514,15 @@ def route_after_review(state: ScrapingState) -> str | list[Any]:
             websites_sent += 1
         if a.instagram_handle and not settings.SCRAPE_GOOGLEMAPS_ONLY:
             sends.append(Send('run_instagram_scraper', {'nombre': a.nombre, 'handle': a.instagram_handle, 'job_id': job_id}))
+
+    # Manually-registered sources reach the SAME website-scraping pipeline,
+    # regardless of whether any agency was selected above — they share the
+    # MAX_WEBSITE_URLS cap with agency websites.
+    for src in manual_sources:
+        if websites_sent >= settings.MAX_WEBSITE_URLS:
+            break
+        sends.append(Send('run_website_scraper', {'nombre': src['nombre'], 'url': src['url'], 'job_id': job_id}))
+        websites_sent += 1
 
     return sends if sends else 'no_websites'
 

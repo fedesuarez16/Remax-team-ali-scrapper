@@ -1,7 +1,7 @@
 # Skill Registry — multi-agent-realstate
 
-Generated: 2026-05-28
-Project: multi-agent-realstate
+Generated: 2026-07-18
+Project: remax-team-ali-scrapper (multi-agent-realstate)
 
 ## User Skills
 
@@ -20,7 +20,12 @@ Project: multi-agent-realstate
 
 ## Project Conventions
 
-None detected — project is new and empty.
+- Monorepo: `frontend/` (Next.js 16 App Router, React 19, TS, Tailwind 4, Supabase JS client) + `backend/` (FastAPI, Playwright/Apify scraping, Supabase/Postgres, LangGraph) + `supabase/` (migrations).
+- Deploy: frontend on Vercel, backend on Railway (Docker, `$PORT` dynamic).
+- `frontend/AGENTS.md`: Next.js 16 has breaking API changes vs training data — read `node_modules/next/dist/docs/` before writing Next-specific code; heed deprecation notices.
+- Global user CLAUDE.md rules apply repo-wide: conventional commits only (no AI attribution), never build after changes, use bat/rg/fd/sd/eza (never cat/grep/find/sed/ls), short default answers, verify claims before agreeing.
+- Backend has pytest configured (`backend/tests/`, `pytest-asyncio`, ruff, mypy strict). Frontend has NO test runner configured (no vitest/jest in package.json) — only `lint`/`typecheck`/`build` scripts.
+- Search history feature (`frontend/hooks/useSearchHistory.ts`) is currently 100% client-side `localStorage`, no backend persistence — origin-scoped, does not sync across domains/devices/browsers.
 
 ## Compact Rules
 

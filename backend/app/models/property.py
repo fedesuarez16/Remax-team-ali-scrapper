@@ -5,7 +5,7 @@ from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, BeforeValidator, Field
 
-Fuente = Literal['zonaprop', 'mercadolibre', 'googlemaps', 'instagram', 'argenprop', 'manual']
+Fuente = Literal['zonaprop', 'mercadolibre', 'googlemaps', 'instagram', 'argenprop', 'remax', 'manual']
 TipoOperacion = Literal['venta', 'alquiler', 'alquiler_temp']
 TipoPropiedad = Literal['departamento', 'casa', 'ph', 'local', 'oficina', 'terreno', 'otro']
 

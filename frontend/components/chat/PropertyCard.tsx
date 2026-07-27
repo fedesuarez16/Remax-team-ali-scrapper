@@ -11,6 +11,8 @@ function fmtPrice(p: Property) {
 const FUENTE_LABEL: Record<string, string> = {
   zonaprop: 'ZonaProp',
   mercadolibre: 'MercadoLibre',
+  argenprop: 'Argenprop',
+  remax: 'RE/MAX',
   googlemaps: 'Google Maps',
 }
 

@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Building2, Clock, Database, MapPin, Plus, Search } from 'lucide-react'
+import { Building2, Clock, Database, Globe, MapPin, Plus, Search } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import { useSearchHistory } from '@/hooks/useSearchHistory'
 
@@ -102,6 +102,17 @@ export default function Sidebar() {
         >
           <MapPin className="size-4" />
           Mapa
+        </Link>
+        <Link
+          href="/sources"
+          className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition ${
+            pathname?.startsWith('/sources')
+              ? 'bg-muted text-foreground'
+              : 'text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+          }`}
+        >
+          <Globe className="size-4" />
+          Fuentes
         </Link>
       </div>
 

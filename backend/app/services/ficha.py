@@ -247,6 +247,8 @@ async def _fetch_full_gallery(prop: dict[str, Any]) -> list[str]:
     - mercadolibre → official item API (best-effort; ML now gates its API).
     - googlemaps → url_origen is the agency-site ficha of a single property,
       so its harvested images belong to it unambiguously.
+    - argenprop/remax → generic Playwright harvest of the listing's own ficha
+      page (same reasoning as googlemaps: one property per URL).
     Instagram keeps the images captured at scrape time: re-harvesting pulls
     unrelated posts. Returns [] on any failure so the caller keeps the
     search-time images.
@@ -257,7 +259,7 @@ async def _fetch_full_gallery(prop: dict[str, Any]) -> list[str]:
         return await _zonaprop_gallery(url_origen)
     if fuente == 'mercadolibre':
         return await _mercadolibre_gallery(url_origen)
-    if fuente == 'googlemaps' and url_origen.startswith('http'):
+    if fuente in ('googlemaps', 'argenprop', 'remax') and url_origen.startswith('http'):
         from app.services.apify import harvest_page_images
         galleries = await harvest_page_images([url_origen])
         return galleries.get(url_origen, [])

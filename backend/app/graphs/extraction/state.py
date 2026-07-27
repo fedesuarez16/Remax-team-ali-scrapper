@@ -25,6 +25,11 @@ class ScrapingState(TypedDict, total=False):
     # Phase 1 — agency discovery (fan-in reducer)
     agencies: Annotated[list[Agency], operator.add]
 
+    # Manually-registered sources (backend/app/api/v1/manual_sources.py) —
+    # folded into the website-scraping fan-out in route_after_review
+    # regardless of Google-Maps agency discovery/selection.
+    manual_sources: list[dict]
+
     # Phase 2 — Website + Instagram scraping (set after interrupt resume)
     selected_agency_ids: list[str]
     website_pages: Annotated[list[dict], operator.add]

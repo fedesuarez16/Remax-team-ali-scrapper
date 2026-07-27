@@ -13,12 +13,13 @@ from app.models.property import Agency, RawProperty, ScrapingFilters
 
 ProgressCb = Callable[[str, str, int], Awaitable[None]]
 
-PORTAL_SOURCES = ('zonaprop', 'mercadolibre')   # phase-1 portal scrapers
-SOURCES = ('zonaprop', 'mercadolibre', 'googlemaps', 'instagram')
+PORTAL_SOURCES = ('zonaprop', 'mercadolibre', 'argenprop', 'remax')   # phase-1 portal scrapers
+SOURCES = ('zonaprop', 'mercadolibre', 'argenprop', 'remax', 'googlemaps', 'instagram')
 
 # ── Actor IDs ─────────────────────────────────────────────────────────────────
 _ACTORS: dict[str, str] = {
     'zonaprop':   'crawlerbros~zonaprop-scraper',
+    'argenprop':  'apify~website-content-crawler',
     'googlemaps': 'compass~crawler-google-places',
     'instagram':  'apify~instagram-post-scraper',
     'website':    'apify~website-content-crawler',
@@ -28,6 +29,51 @@ _ACTORS: dict[str, str] = {
 _ML_API_BASE = 'https://api.mercadolibre.com'
 _ML_CATEGORY = 'MLA1459'   # Inmuebles Argentina
 _ML_MAX_PAGES = 5           # 5 × 50 = 250 results max
+
+# ── RE/MAX public REST API (no Apify) — same undocumented-but-open API its own
+# Angular frontend calls (confirmed via live requests, no auth required) ──────
+_REMAX_API_BASE = 'https://api-ar.redremax.com/remaxweb-ar/api'
+_REMAX_MAX_PAGES = 5   # 5 × 20 = 100 results max
+_REMAX_PAGE_SIZE = 20
+
+# id → value from GET {_REMAX_API_BASE}/listingTypes/findAll (relevé el catálogo
+# completo en vivo). typeId query values, no reverse-engineered guess.
+_REMAX_TYPE_IDS: dict[str, tuple[int, ...]] = {
+    'departamento': (1, 2, 3, 4, 5, 6, 7, 8),
+    'ph': (12,),
+    'casa': (9, 10, 11),
+    'terreno': (18, 19, 23, 26),
+    'local': (17, 20),
+    'oficina': (16, 27),
+    'otro': (13, 14, 15, 21, 22, 28),
+}
+_REMAX_TYPE_VALUE_TO_TIPO: dict[str, str] = {
+    'departamento_duplex': 'departamento', 'departamento_estandar': 'departamento',
+    'departamento_loft': 'departamento', 'departamento_monoambiente': 'departamento',
+    'departamento_penthouse': 'departamento', 'departamento_piso': 'departamento',
+    'departamento_semipiso': 'departamento', 'departamento_triplex': 'departamento',
+    'ph': 'ph',
+    'casa': 'casa', 'casa_duplex': 'casa', 'casa_triplex': 'casa',
+    'terrenos_y_lotes': 'terreno', 'campo': 'terreno', 'quinta': 'terreno', 'chacra': 'terreno',
+    'local': 'local', 'fondo_de_comercio': 'local',
+    'oficina': 'oficina', 'consultorio': 'oficina',
+}
+
+# ── Argenprop — behind AWS WAF Bot Control (verified: httpx and default
+# headless Chromium both get challenged after the first request), crawled via
+# Apify's generic website-content-crawler actor instead, which does get past
+# it. `?pagina-N` pagination confirmed from real hrefs; robots.txt only
+# `Allow`s pagina-1..pagina-10, hence the hard cap. ─────────────────────────
+_ARGENPROP_BASE = 'https://www.argenprop.com'
+_ARGENPROP_MAX_PAGES_HARD = 10
+_ARGENPROP_URL_SLUG: dict[str, str] = {
+    'departamento': 'departamentos',
+    'casa': 'casas',
+    'ph': 'ph',
+    'local': 'locales-comerciales',
+    'oficina': 'oficinas',
+    'terreno': 'terrenos',
+}
 
 _APIFY_BASE = 'https://api.apify.com/v2'
 _POLL_INTERVAL = 3.0   # seconds between status checks
@@ -122,6 +168,138 @@ def _norm_zonaprop(item: dict[str, Any], zona: str) -> RawProperty | None:
         ][:30],
         url_origen=item.get('url', ''),
     )
+
+
+_ARGENPROP_TIPO_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r'\bdepartamento\b', re.I), 'departamento'),
+    (re.compile(r'\bph\b', re.I), 'ph'),
+    (re.compile(r'\bcasa\b', re.I), 'casa'),
+    (re.compile(r'\boficina\b', re.I), 'oficina'),
+    (re.compile(r'\blocal\b', re.I), 'local'),
+    (re.compile(r'\bterreno\b|\blote\b', re.I), 'terreno'),
+]
+
+
+def _argenprop_tipo_propiedad(title_primary: str) -> str:
+    for pattern, tipo in _ARGENPROP_TIPO_PATTERNS:
+        if pattern.search(title_primary):
+            return tipo
+    return 'otro'
+
+
+def _argenprop_search_urls(filters: ScrapingFilters, max_pages: int) -> list[str]:
+    """Argenprop listing-page URLs for one search, page 1..N. Page 1 has no
+    query string; later pages append the literal `?pagina-N` token (no `=`,
+    confirmed from real `href`s) — capped at 10 because robots.txt only
+    `Allow`s pagina-1 through pagina-10."""
+    zona = filters.zona or 'Buenos Aires'
+    op_slug = 'alquiler' if filters.tipo_operacion == 'alquiler' else 'venta'
+    tipos = filters.tipos_propiedad or []
+    tipo_slug = _ARGENPROP_URL_SLUG.get(tipos[0], 'inmuebles') if len(tipos) == 1 else 'inmuebles'
+    zona_slug = _slugify(filters.localidades[0]) if filters.localidades else _slugify(zona)
+    base_url = f'{_ARGENPROP_BASE}/{tipo_slug}/{op_slug}/{zona_slug}'
+
+    capped = max(1, min(max_pages, _ARGENPROP_MAX_PAGES_HARD))
+    return [base_url] + [f'{base_url}?pagina-{page}' for page in range(2, capped + 1)]
+
+
+def _parse_argenprop_page(html: str, filters: ScrapingFilters) -> list[RawProperty]:
+    """Argenprop's search-results HTML, parsed deterministically (no LLM).
+
+    `saveHtml: true` on the website-content-crawler actor does NOT return raw
+    DOM — it's run through Readability (reader-mode extraction) first, which
+    strips every `class` attribute site-wide. Verified against a real captured
+    run: what survives per card is the bare (non-`data-`) attributes Argenprop
+    puts on its `<a idaviso=... montonormalizado=... dormitorios=...>` card
+    link, plus a few `data-*` attributes and stable sibling ordering of the
+    `<p>`/`<ul>`/`<h2>` content underneath it — so cards are matched via
+    `a[idaviso]` and fields via those attributes / sibling position, not CSS
+    classes. The photo carousel is stripped entirely by Readability (only the
+    agency logo `<img>` survives), so galleries are NOT extracted here — the
+    ficha-level harvester (`harvest_page_images`) fills them in on demand.
+    """
+    from bs4 import BeautifulSoup  # type: ignore[import-untyped]
+
+    if not html:
+        return []
+    soup = BeautifulSoup(html, 'html.parser')
+    tipo_operacion = filters.tipo_operacion or 'venta'
+    results: list[RawProperty] = []
+
+    for card in soup.select('a[idaviso]'):
+        href = str(card.get('href') or '')
+        if not href:
+            continue
+        url_origen = href if href.startswith('http') else _ARGENPROP_BASE + href
+
+        monto = card.get('montonormalizado')
+        try:
+            precio = float(str(monto)) if monto else None
+        except ValueError:
+            precio = None
+        if not precio:
+            continue
+
+        direccion_el = card.select_one('p[data-card-direccion]')
+        direccion = direccion_el.get_text(strip=True) if direccion_el else (filters.zona or '')
+
+        price_el = direccion_el.find_previous_sibling('p') if direccion_el else None
+        currency_raw = 'USD'
+        if price_el is not None:
+            currency_span = price_el.find('span')
+            if currency_span is not None and currency_span.get_text(strip=True):
+                currency_raw = currency_span.get_text(strip=True)
+
+        title_primary_el = direccion_el.find_next_sibling('p') if direccion_el else None
+        title_primary = title_primary_el.get_text(strip=True) if title_primary_el else ''
+
+        m2_cubiertos: float | None = None
+        ambientes: int | None = None
+        antiguedad: int | None = None
+        features_ul = card.find('ul')
+        if features_ul is not None:
+            for feat_span in features_ul.select('li span'):
+                feat = feat_span.get_text(strip=True)
+                if 'm²' in feat:
+                    if num := re.search(r'[\d.,]+', feat):
+                        m2_cubiertos = float(num.group().replace(',', '.'))
+                elif 'dorm' in feat:
+                    if num := re.search(r'\d+', feat):
+                        ambientes = int(num.group())
+                elif 'año' in feat:
+                    if num := re.search(r'\d+', feat):
+                        antiguedad = int(num.group())
+        if ambientes is None:
+            dorm_attr = str(card.get('dormitorios') or '')
+            if dorm_attr.isdigit():
+                ambientes = int(dorm_attr)
+
+        titulo_el = card.find('h2')
+        titulo = titulo_el.get_text(strip=True) if titulo_el else title_primary
+
+        descripcion = None
+        if titulo_el is not None:
+            desc_el = titulo_el.find_next_sibling('p')
+            descripcion = desc_el.get_text(strip=True) if desc_el else None
+
+        results.append(RawProperty(
+            fuente='argenprop',
+            titulo=titulo,
+            descripcion=descripcion,
+            direccion=direccion,
+            precio=precio,
+            moneda=currency_raw,  # type: ignore[arg-type]
+            tipo_operacion=tipo_operacion,  # type: ignore[arg-type]
+            tipo_propiedad=_argenprop_tipo_propiedad(title_primary),  # type: ignore[arg-type]
+            ambientes=ambientes,
+            m2_cubiertos=m2_cubiertos,
+            antiguedad=antiguedad,
+            amenities=[],
+            imagenes=[],
+            url_origen=url_origen,
+        ))
+
+    return results
 
 
 _ML_PROP_TYPE: dict[str, str] = {
@@ -250,6 +428,102 @@ async def _scrape_mercadolibre_api(
                 await on_progress('mercadolibre', 'running', len(results))
 
     await on_progress('mercadolibre', 'done', len(results))
+    return results
+
+
+def _norm_remax(item: dict[str, Any], zona: str) -> RawProperty | None:
+    precio = item.get('price')
+    if not precio:
+        return None
+
+    moneda = ((item.get('currency') or {}).get('value')) or 'USD'
+    op_val = (item.get('operation') or {}).get('value', 'sale')
+    tipo_operacion = 'alquiler' if op_val in ('rent', 'temporal') else 'venta'
+    type_val = (item.get('type') or {}).get('value', '')
+    tipo_propiedad = _REMAX_TYPE_VALUE_TO_TIPO.get(type_val, 'otro')
+    direccion = item.get('displayAddress') or item.get('geoLabel') or zona
+
+    return RawProperty(
+        fuente='remax',
+        titulo=item.get('title', ''),
+        direccion=direccion,
+        precio=float(precio),
+        moneda=moneda,  # type: ignore[arg-type]
+        tipo_operacion=tipo_operacion,  # type: ignore[arg-type]
+        tipo_propiedad=tipo_propiedad,  # type: ignore[arg-type]
+        ambientes=item.get('totalRooms'),
+        banos=item.get('bathrooms'),
+        m2_total=item.get('dimensionTotalBuilt') or None,
+        m2_cubiertos=item.get('dimensionCovered') or None,
+        amenities=[],
+        imagenes=[],
+        url_origen=f'https://www.remax.com.ar/listing/{item.get("slug", "")}-{item.get("id", "")}',
+    )
+
+
+def _remax_matches_zona(item: dict[str, Any], zona: str) -> bool:
+    """RE/MAX's `locations` query param uses an undocumented hierarchical
+    encoding (colon-delimited, unclear positions) — rather than guess it
+    wrong, results are paged unfiltered and matched by text against
+    `geoLabel`/`displayAddress`, same guard idea as ZonaProp's
+    `_item_matches_zona`."""
+    phrase = _slugify(zona)
+    if not phrase:
+        return True
+    haystack = _slugify(' '.join(
+        str(item.get(k) or '') for k in ('geoLabel', 'displayAddress')
+    ))
+    return phrase in haystack
+
+
+async def _scrape_remax_api(
+    filters: ScrapingFilters,
+    on_progress: ProgressCb,
+) -> list[RawProperty]:
+    zona = filters.zona or 'Buenos Aires'
+    op_id = 2 if filters.tipo_operacion == 'alquiler' else 1
+    tipos = filters.tipos_propiedad or []
+
+    in_params = [f'operationId:{op_id}']
+    if len(tipos) == 1 and tipos[0] in _REMAX_TYPE_IDS:
+        ids_csv = ','.join(str(i) for i in _REMAX_TYPE_IDS[tipos[0]])
+        in_params.append(f'typeId:{ids_csv}')
+
+    await on_progress('remax', 'running', 0)
+
+    results: list[RawProperty] = []
+    async with httpx.AsyncClient(timeout=20) as client:
+        for page in range(_REMAX_MAX_PAGES):
+            try:
+                resp = await client.get(
+                    f'{_REMAX_API_BASE}/listings/findAllWithEntrepreneurships',
+                    params={
+                        'page': page, 'pageSize': _REMAX_PAGE_SIZE,
+                        'sort': '-createdAt', 'in': in_params,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception:
+                break
+
+            items = data.get('data', [])
+            if not items:
+                break
+
+            for item in items:
+                if not _remax_matches_zona(item, zona):
+                    continue
+                prop = _norm_remax(item, zona)
+                if prop is not None:
+                    results.append(prop)
+
+            if page + 1 >= data.get('totalPages', 0):
+                break
+            if page < _REMAX_MAX_PAGES - 1:
+                await on_progress('remax', 'running', len(results))
+
+    await on_progress('remax', 'done', len(results))
     return results
 
 
@@ -742,6 +1016,10 @@ class ApifyService(BaseApifyService):
     ) -> list[RawProperty]:
         if source == 'mercadolibre':
             return await _scrape_mercadolibre_api(filters, on_progress)
+        if source == 'remax':
+            return await _scrape_remax_api(filters, on_progress)
+        if source == 'argenprop':
+            return await self._scrape_argenprop(filters, on_progress)
 
         actor_id = _ACTORS.get(source)
         if not actor_id:
@@ -831,6 +1109,40 @@ class ApifyService(BaseApifyService):
             page += max(1, -(-len(raw_items) // self._ZP_PAGE_SIZE))
         return results
 
+    async def _scrape_argenprop(
+        self, filters: ScrapingFilters, on_progress: ProgressCb,
+    ) -> list[RawProperty]:
+        """One actor run carrying every paginated URL as `startUrls` — unlike
+        ZonaProp's per-page runs, this avoids paying for a fresh browser
+        cold-start (and a fresh WAF challenge) on every page."""
+        from app.core.config import settings
+        await on_progress('argenprop', 'running', 0)
+
+        urls = _argenprop_search_urls(filters, settings.ARGENPROP_MAX_PAGES)
+        input_data = {
+            'startUrls': [{'url': u} for u in urls],
+            'maxCrawlPages': len(urls),
+            'crawlerType': 'playwright:chrome',
+            'saveHtml': True,
+        }
+        raw_pages = await self._run_actor('argenprop', _ACTORS['argenprop'], input_data)
+
+        results: list[RawProperty] = []
+        seen: set[str] = set()
+        for page in raw_pages:
+            html = page.get('html')
+            if not html:
+                continue
+            for prop in _parse_argenprop_page(html, filters):
+                key = str(prop.url_origen or '')
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(prop)
+
+        await on_progress('argenprop', 'done', len(results))
+        return results
+
     async def scrape_agencies(self, zona: str, on_progress: ProgressCb) -> list[Agency]:
         await on_progress('googlemaps', 'running', 0)
         from app.core.config import settings
@@ -887,8 +1199,8 @@ _MOCK_AGENCIES = [
 
 
 class MockApifyService(BaseApifyService):
-    DELAYS = {'zonaprop': 1.2, 'mercadolibre': 0.9, 'instagram': 1.0}
-    COUNTS = {'zonaprop': (3, 5), 'mercadolibre': (3, 5), 'instagram': (2, 3)}
+    DELAYS = {'zonaprop': 1.2, 'mercadolibre': 0.9, 'argenprop': 1.4, 'remax': 0.9, 'instagram': 1.0}
+    COUNTS = {'zonaprop': (3, 5), 'mercadolibre': (3, 5), 'argenprop': (3, 5), 'remax': (3, 5), 'instagram': (2, 3)}
 
     async def scrape_source(self, source: str, filters: ScrapingFilters, on_progress: ProgressCb) -> list[RawProperty]:
         delay = self.DELAYS.get(source, 1.0)

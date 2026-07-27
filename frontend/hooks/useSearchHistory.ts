@@ -1,7 +1,7 @@
 'use client'
 
-const STORAGE_KEY = 'prop_search_history'
-const MAX = 20
+const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
+const HISTORY_URL = `${API}/api/v1/search-history`
 
 export type SearchEntry = {
   id: string
@@ -11,85 +11,97 @@ export type SearchEntry = {
   date: string
 }
 
+type SearchHistoryRow = {
+  id: string
+  query: string
+  zona?: string | null
+  job_id?: string | null
+  created_at: string
+}
+
+function mapRow(row: SearchHistoryRow): SearchEntry {
+  return {
+    id: row.id,
+    query: row.query,
+    zona: row.zona ?? undefined,
+    job_id: row.job_id ?? undefined,
+    date: row.created_at,
+  }
+}
+
 // Module-level subscribers set for same-tab live updates without Context
 const subscribers = new Set<() => void>()
 
-function readFromStorage(): SearchEntry[] {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? (JSON.parse(raw) as SearchEntry[]) : []
-  } catch {
-    return []
-  }
-}
-
-function writeToStorage(entries: SearchEntry[]): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
-  } catch {
-    // Ignore storage errors (private mode, quota exceeded, etc.)
-  }
-}
+// Last known list, kept so a failed fetch degrades gracefully instead of
+// wiping the sidebar (server is now the source of truth, but we don't want
+// a transient network error to blank the UI).
+let lastKnown: SearchEntry[] = []
 
 function notify(): void {
   subscribers.forEach((fn) => fn())
 }
 
-export function addSearch(query: string, zona?: string, job_id?: string): void {
-  if (typeof window === 'undefined') return
+async function fetchHistory(): Promise<SearchEntry[]> {
+  try {
+    const res = await fetch(HISTORY_URL)
+    if (!res.ok) return lastKnown
+    const data = await res.json()
+    const rows = (data.history ?? []) as SearchHistoryRow[]
+    lastKnown = rows.map(mapRow)
+    return lastKnown
+  } catch {
+    // Backend unreachable — keep the last known list, never throw into the UI.
+    return lastKnown
+  }
+}
 
+export async function addSearch(query: string, zona?: string, job_id?: string): Promise<void> {
   const trimmed = query.trim()
   if (!trimmed) return
 
-  const existing = readFromStorage()
-
-  // Dedupe case-insensitive: remove any previous entry with same query
-  const deduped = existing.filter(
-    (e) => e.query.toLowerCase() !== trimmed.toLowerCase()
-  )
-
-  const next: SearchEntry = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    query: trimmed,
-    zona,
-    ...(job_id ? { job_id } : {}),
-    date: new Date().toISOString(),
+  try {
+    const res = await fetch(HISTORY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: trimmed, zona, job_id }),
+    })
+    if (!res.ok) return
+    notify()
+  } catch {
+    // Swallow — sidebar keeps its last known list, submit flow is unaffected.
   }
-
-  // Prepend and cap at MAX
-  const updated = [next, ...deduped].slice(0, MAX)
-
-  writeToStorage(updated)
-  notify()
 }
 
 import { useEffect, useState } from 'react'
 
 export function useSearchHistory() {
-  const [searches, setSearches] = useState<SearchEntry[]>([])
+  const [searches, setSearches] = useState<SearchEntry[]>(lastKnown)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    // Initial read (SSR-safe — runs only in browser)
-    setSearches(readFromStorage())
+    let cancelled = false
 
-    // Subscribe to same-tab updates
-    const refresh = () => setSearches(readFromStorage())
+    const refresh = () => {
+      fetchHistory().then((entries) => {
+        if (!cancelled) setSearches(entries)
+      })
+    }
+
+    setLoading(true)
+    fetchHistory().then((entries) => {
+      if (!cancelled) {
+        setSearches(entries)
+        setLoading(false)
+      }
+    })
+
     subscribers.add(refresh)
 
-    // Cross-tab sync via storage event
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY) {
-        setSearches(readFromStorage())
-      }
-    }
-    window.addEventListener('storage', onStorage)
-
     return () => {
+      cancelled = true
       subscribers.delete(refresh)
-      window.removeEventListener('storage', onStorage)
     }
   }, [])
 
-  return { searches, addSearch }
+  return { searches, addSearch, loading }
 }
