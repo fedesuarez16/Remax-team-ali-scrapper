@@ -35,6 +35,20 @@ _ML_MAX_PAGES = 5           # 5 × 50 = 250 results max
 _REMAX_API_BASE = 'https://api-ar.redremax.com/remaxweb-ar/api'
 _REMAX_MAX_PAGES = 5   # 5 × 20 = 100 results max
 _REMAX_PAGE_SIZE = 20
+# Location autocomplete (what remax.com.ar's own search box calls — public,
+# verified live) + resolved `locations` filter cache.
+_REMAX_LOCATION_CACHE: dict[str, str | None] = {}
+# `locations` is `in:` + 7 colon slots; the id goes in the slot matching the
+# autocomplete result's `level` (0-based index == level). Which id field to
+# read also depends on the level. Reverse-engineered from the Angular
+# frontend's own request and verified live: level 3 (city) slot 4 →
+# `in::::1067:::` returns Manuel B Gonnet listings; level 4 (neighborhood)
+# slot 5 → `in:::::5::` returns Las Cañitas listings. The `@label` suffix the
+# frontend appends is ignored by the server.
+_REMAX_LEVEL_ID_FIELD: dict[int, str] = {
+    2: 'countyId', 3: 'cityId', 4: 'neighborhoodId', 5: 'privatecommunityId',
+}
+_REMAX_LOCATION_SLOTS = 7
 
 # id → value from GET {_REMAX_API_BASE}/listingTypes/findAll (relevé el catálogo
 # completo en vivo). typeId query values, no reverse-engineered guess.
@@ -66,6 +80,11 @@ _REMAX_TYPE_VALUE_TO_TIPO: dict[str, str] = {
 # `Allow`s pagina-1..pagina-10, hence the hard cap. ─────────────────────────
 _ARGENPROP_BASE = 'https://www.argenprop.com'
 _ARGENPROP_MAX_PAGES_HARD = 10
+# The portal's own location-autocomplete API (what argenprop.com's search box
+# calls) — public, NOT behind the WAF, verified live. Resolves free-text zonas
+# to Argenprop's canonical slugs ("Gonnet" → MANUEL-GONNET).
+_ARGENPROP_AUTOCOMPLETE_URL = 'https://api.sosiva451.com/Ubicaciones/buscar'
+_ARGENPROP_SLUG_CACHE: dict[str, str | None] = {}
 _ARGENPROP_URL_SLUG: dict[str, str] = {
     'departamento': 'departamentos',
     'casa': 'casas',
@@ -187,16 +206,66 @@ def _argenprop_tipo_propiedad(title_primary: str) -> str:
     return 'otro'
 
 
-def _argenprop_search_urls(filters: ScrapingFilters, max_pages: int) -> list[str]:
+async def _argenprop_resolve_zona_slug(zona: str) -> str | None:
+    """Free-text zona → Argenprop's canonical URL slug, via the portal's own
+    autocomplete API ("Gonnet" → "manuel-gonnet"). Naive slugs the portal
+    doesn't know 301 to the NATIONWIDE listing, so guessing is not an option.
+
+    Results come ordered by `Importancia`, which ranks fuzzy matches above
+    exact ones (real case: "villa elisa" → "Barrio Villa Felisa, San Lorenzo"
+    first) — so the winner is the first result whose slugified label contains
+    EVERY comma-part of the query, never the raw first item. Slug is the
+    lowercased `CodigoBarrio` (when present) or `CodigoLocalidad`. Returns
+    None on no confident match or any API failure — callers fall back to
+    `_slugify`, with the zona guard as the final safety net."""
+    query_parts = [p.strip() for p in zona.split(',') if p.strip()]
+    if not query_parts:
+        return None
+    cache_key = _slugify(zona)
+    if cache_key in _ARGENPROP_SLUG_CACHE:
+        return _ARGENPROP_SLUG_CACHE[cache_key]
+
+    slug: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(
+                _ARGENPROP_AUTOCOMPLETE_URL,
+                params={'stringBusqueda': query_parts[0]},
+            )
+            resp.raise_for_status()
+            results = resp.json()
+        wanted = [_slugify(p) for p in query_parts]
+        for entry in results:
+            label_slug = _slugify(str(entry.get('label') or ''))
+            if not all(part in label_slug for part in wanted):
+                continue
+            value = entry.get('value') or {}
+            code = value.get('CodigoBarrio') or value.get('CodigoLocalidad') or ''
+            if code:
+                slug = str(code).lower()
+                break
+    except Exception:
+        return None  # transient failure — don't cache, retry next search
+
+    _ARGENPROP_SLUG_CACHE[cache_key] = slug
+    return slug
+
+
+def _argenprop_search_urls(
+    filters: ScrapingFilters, max_pages: int, zona_slug: str | None = None,
+) -> list[str]:
     """Argenprop listing-page URLs for one search, page 1..N. Page 1 has no
     query string; later pages append the literal `?pagina-N` token (no `=`,
     confirmed from real `href`s) — capped at 10 because robots.txt only
-    `Allow`s pagina-1 through pagina-10."""
+    `Allow`s pagina-1 through pagina-10. `zona_slug` is the portal-resolved
+    slug from `_argenprop_resolve_zona_slug`; without one, falls back to
+    naive `_slugify` (the zona guard downstream rejects redirect garbage)."""
     zona = filters.zona or 'Buenos Aires'
     op_slug = 'alquiler' if filters.tipo_operacion == 'alquiler' else 'venta'
     tipos = filters.tipos_propiedad or []
     tipo_slug = _ARGENPROP_URL_SLUG.get(tipos[0], 'inmuebles') if len(tipos) == 1 else 'inmuebles'
-    zona_slug = _slugify(filters.localidades[0]) if filters.localidades else _slugify(zona)
+    if zona_slug is None:
+        zona_slug = _slugify(filters.localidades[0]) if filters.localidades else _slugify(zona)
     base_url = f'{_ARGENPROP_BASE}/{tipo_slug}/{op_slug}/{zona_slug}'
 
     capped = max(1, min(max_pages, _ARGENPROP_MAX_PAGES_HARD))
@@ -224,6 +293,11 @@ def _parse_argenprop_page(html: str, filters: ScrapingFilters) -> list[RawProper
         return []
     soup = BeautifulSoup(html, 'html.parser')
     tipo_operacion = filters.tipo_operacion or 'venta'
+    # Unknown zona slugs 301-redirect to the bare nationwide listing (verified
+    # live: /departamentos/venta/gonnet → /departamentos/venta, which even
+    # includes Uruguay) — same failure mode as ZonaProp, same guard: drop any
+    # card whose text doesn't mention the requested zona phrases.
+    phrases = _guard_phrases(filters)
     results: list[RawProperty] = []
 
     for card in soup.select('a[idaviso]'):
@@ -281,6 +355,16 @@ def _parse_argenprop_page(html: str, filters: ScrapingFilters) -> list[RawProper
         if titulo_el is not None:
             desc_el = titulo_el.find_next_sibling('p')
             descripcion = desc_el.get_text(strip=True) if desc_el else None
+
+        # The listing URL slug always carries the real zone
+        # ("casa-en-venta-en-manuel-b-gonnet-...") — include it in the guard's
+        # haystack alongside the visible text.
+        if not _item_matches_zona({
+            'address': direccion,
+            'title': titulo,
+            'description': f'{title_primary} {descripcion or ""} {url_origen}',
+        }, phrases):
+            continue
 
         results.append(RawProperty(
             fuente='argenprop',
@@ -476,6 +560,55 @@ def _remax_matches_zona(item: dict[str, Any], zona: str) -> bool:
     return phrase in haystack
 
 
+async def _remax_resolve_location(zona: str) -> str | None:
+    """Free-text zona → RE/MAX `locations` filter string, via the portal's
+    own autocomplete API. This is what makes zona searches actually return
+    results: without a server-side location filter the API serves the newest
+    listings NATIONWIDE, and a specific zona almost never appears in that
+    sample (the original "always 0 results" failure).
+
+    Result labels carry `<b>` highlight tags and fuzzy matches can outrank
+    exact ones, so the winner is the first result whose slugified label
+    (tags stripped) contains EVERY comma-part of the query. Returns None on
+    no confident match or API failure — callers fall back to nationwide
+    paging plus the text zona guard."""
+    query_parts = [p.strip() for p in zona.split(',') if p.strip()]
+    if not query_parts:
+        return None
+    cache_key = _slugify(zona)
+    if cache_key in _REMAX_LOCATION_CACHE:
+        return _REMAX_LOCATION_CACHE[cache_key]
+
+    location: str | None = None
+    try:
+        from urllib.parse import quote
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(
+                f'{_REMAX_API_BASE}/search/findAll/{quote(query_parts[0])}',
+                params={'level': 1},
+            )
+            resp.raise_for_status()
+            geo_results = (resp.json().get('data') or {}).get('geoSearch') or []
+        wanted = [_slugify(p) for p in query_parts]
+        for entry in geo_results:
+            label = re.sub(r'</?b>', '', str(entry.get('label') or ''))
+            label_slug = _slugify(label)
+            if not all(part in label_slug for part in wanted):
+                continue
+            id_field = _REMAX_LEVEL_ID_FIELD.get(entry.get('level') or 0)
+            loc_id = entry.get(id_field) if id_field else None
+            if loc_id:
+                slots = [''] * _REMAX_LOCATION_SLOTS
+                slots[entry['level']] = str(loc_id)
+                location = 'in:' + ':'.join(slots)
+                break
+    except Exception:
+        return None  # transient failure — don't cache, retry next search
+
+    _REMAX_LOCATION_CACHE[cache_key] = location
+    return location
+
+
 async def _scrape_remax_api(
     filters: ScrapingFilters,
     on_progress: ProgressCb,
@@ -489,25 +622,37 @@ async def _scrape_remax_api(
         ids_csv = ','.join(str(i) for i in _REMAX_TYPE_IDS[tipos[0]])
         in_params.append(f'typeId:{ids_csv}')
 
+    # Server-side location filter — the fan-out unit (localidad on the map
+    # path, zona on the chat path) is what the user actually asked for.
+    loc_zona = filters.localidades[0] if filters.localidades else zona
+    location = await _remax_resolve_location(loc_zona)
+
     await on_progress('remax', 'running', 0)
 
     results: list[RawProperty] = []
     async with httpx.AsyncClient(timeout=20) as client:
         for page in range(_REMAX_MAX_PAGES):
+            params: dict[str, Any] = {
+                'page': page, 'pageSize': _REMAX_PAGE_SIZE,
+                'sort': '-createdAt', 'in': in_params,
+            }
+            if location:
+                params['locations'] = location
             try:
                 resp = await client.get(
                     f'{_REMAX_API_BASE}/listings/findAllWithEntrepreneurships',
-                    params={
-                        'page': page, 'pageSize': _REMAX_PAGE_SIZE,
-                        'sort': '-createdAt', 'in': in_params,
-                    },
+                    params=params,
                 )
                 resp.raise_for_status()
-                data = resp.json()
+                body = resp.json()
             except Exception:
                 break
 
-            items = data.get('data', [])
+            # Response is double-nested: {"data": {"data": [...items...],
+            # "page":.., "totalPages":..}, "code":200, "message":.., "errors":..}
+            # — confirmed against a real request.
+            paging = body.get('data') or {}
+            items = paging.get('data', [])
             if not items:
                 break
 
@@ -518,7 +663,7 @@ async def _scrape_remax_api(
                 if prop is not None:
                     results.append(prop)
 
-            if page + 1 >= data.get('totalPages', 0):
+            if page + 1 >= paging.get('totalPages', 0):
                 break
             if page < _REMAX_MAX_PAGES - 1:
                 await on_progress('remax', 'running', len(results))
@@ -1118,7 +1263,12 @@ class ApifyService(BaseApifyService):
         from app.core.config import settings
         await on_progress('argenprop', 'running', 0)
 
-        urls = _argenprop_search_urls(filters, settings.ARGENPROP_MAX_PAGES)
+        # Resolve the zona to Argenprop's canonical slug via its autocomplete
+        # API — the fan-out unit (localidad on the map path, zona on the chat
+        # path) is what the user actually asked for.
+        zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
+        zona_slug = await _argenprop_resolve_zona_slug(zona)
+        urls = _argenprop_search_urls(filters, settings.ARGENPROP_MAX_PAGES, zona_slug=zona_slug)
         input_data = {
             'startUrls': [{'url': u} for u in urls],
             'maxCrawlPages': len(urls),

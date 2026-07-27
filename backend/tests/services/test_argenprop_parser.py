@@ -51,7 +51,7 @@ _READABILITY_PAGE = """
     </a>
   </div>
   <div id="18831782">
-    <a href="https://www.argenprop.com/casa-en-venta-en-belgrano-3-ambientes--18831782"
+    <a href="https://www.argenprop.com/casa-en-venta-en-palermo-hollywood-3-ambientes--18831782"
        target="_blank" idaviso="18831782" idtipopropiedad="9" idtipooperacion="1"
        dormitorios="2" ambientes="" idmoneda="2" montonormalizado="150000000" montooperacion="150000000">
       <div data-photos="">
@@ -61,8 +61,8 @@ _READABILITY_PAGE = """
         <div>
           <div>
             <p><span>$</span> 150.000.000</p>
-            <p data-card-direccion="">Av. Cabildo 3200</p>
-            <p>Casa en Venta en Belgrano, Belgrano</p>
+            <p data-card-direccion="">Bonpland 2200</p>
+            <p>Casa en Venta en Palermo Hollywood, Palermo</p>
           </div>
           <p><img alt="Otra Inmobiliaria" src="https://www.argenprop.com/static-content/otro.jpg"></p>
         </div>
@@ -114,6 +114,74 @@ def test_falls_back_to_dormitorios_attribute_when_no_feature_list() -> None:
     props = _parse_argenprop_page(_READABILITY_PAGE, _filters())
     assert props[1].ambientes == 2
     assert props[1].m2_cubiertos == 120
+
+
+# Verified live: an unknown zona slug (e.g. /departamentos/venta/gonnet)
+# 301-redirects to the bare nationwide listing (/departamentos/venta), which
+# even includes Uruguay (Punta del Este). Same failure mode ZonaProp already
+# guards against with `_item_matches_zona` — the parser must apply the same
+# zona guard so a bad slug yields 0 results instead of country-wide garbage.
+_OFF_ZONE_PAGE = """
+<div>
+  <div id="19896539">
+    <a href="https://www.argenprop.com/departamento-en-venta-en-punta-del-este-4-ambientes--19896539"
+       idaviso="19896539" dormitorios="3" montonormalizado="480000">
+      <div>
+        <div>
+          <div>
+            <p><span>USD</span> 480.000</p>
+            <p data-card-direccion="">Rambla Lorenzo Batlle 2200</p>
+            <p>Departamento en Venta en Punta del Este</p>
+          </div>
+        </div>
+        <h2>Frente al mar en Playa Brava</h2>
+        <p>Vista plena al mar.</p>
+      </div>
+    </a>
+  </div>
+  <div id="20000001">
+    <a href="https://www.argenprop.com/casa-en-venta-en-manuel-b-gonnet-4-ambientes--20000001"
+       idaviso="20000001" dormitorios="3" montonormalizado="320000">
+      <div>
+        <div>
+          <div>
+            <p><span>USD</span> 320.000</p>
+            <p data-card-direccion="">Calle 502 1600, Gonnet</p>
+            <p>Casa en Venta en Manuel B. Gonnet, La Plata</p>
+          </div>
+        </div>
+        <h2>Casa con parque en Gonnet</h2>
+        <p>Sobre lote de 900m2.</p>
+      </div>
+    </a>
+  </div>
+</div>
+"""
+
+
+def test_zona_guard_rejects_off_zone_cards_after_nationwide_redirect() -> None:
+    filters = ScrapingFilters(zona='Gonnet', tipo_operacion='venta')
+    props = _parse_argenprop_page(_OFF_ZONE_PAGE, filters)
+    assert len(props) == 1
+    assert 'Gonnet' in props[0].direccion
+
+
+def test_zona_guard_uses_localidades_phrase_set_on_map_path() -> None:
+    # Map path: phrases = barrios ∪ localidades ∪ zona (ADR-1) — the localidad
+    # alone must be enough to keep the card.
+    filters = ScrapingFilters(
+        zona='Manuel B. Gonnet', zonas=['Gonnet'],
+        localidades=['Manuel B. Gonnet'], tipo_operacion='venta',
+    )
+    props = _parse_argenprop_page(_OFF_ZONE_PAGE, filters)
+    assert len(props) == 1
+    assert props[0].url_origen.endswith('--20000001')
+
+
+def test_zona_guard_empty_zona_keeps_everything() -> None:
+    filters = ScrapingFilters(tipo_operacion='venta')
+    props = _parse_argenprop_page(_OFF_ZONE_PAGE, filters)
+    assert len(props) == 2
 
 
 def test_infers_tipo_propiedad_from_title_text_not_numeric_id() -> None:

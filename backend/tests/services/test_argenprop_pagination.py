@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from app.models.property import ScrapingFilters
+from app.services import apify
 from app.services.apify import ApifyService, _argenprop_search_urls
 
 _HTML_NO_LISTINGS = '<html><body></body></html>'
@@ -27,6 +28,16 @@ async def _noop_progress(source: str, status: str, count: int) -> None:
 @pytest.fixture()
 def service() -> ApifyService:
     return ApifyService(api_token='dummy-token')
+
+
+@pytest.fixture(autouse=True)
+def _no_zona_resolver(monkeypatch: pytest.MonkeyPatch):
+    """Keep pagination tests off the network: the zona resolver (portal
+    autocomplete API) answers None here — URL building falls back to
+    `_slugify`, which is exactly the pre-resolver behavior these tests pin."""
+    async def _none(zona: str) -> None:
+        return None
+    monkeypatch.setattr(apify, '_argenprop_resolve_zona_slug', _none)
 
 
 def test_search_urls_base_page_has_no_query_string() -> None:
@@ -65,6 +76,34 @@ async def test_single_actor_run_carries_all_start_urls(
     assert len(calls[0]['startUrls']) == 3
     assert calls[0]['maxCrawlPages'] == 3
     assert calls[0]['saveHtml'] is True
+
+
+async def test_resolved_portal_slug_overrides_naive_slugify(
+    service: ApifyService, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # "Gonnet" naively slugifies to /gonnet — which 301s to the nationwide
+    # listing. The portal-autocomplete resolver answers "manuel-gonnet"
+    # (Argenprop's real slug, verified live) and the run must use THAT.
+    from app.core.config import settings
+    monkeypatch.setattr(settings, 'ARGENPROP_MAX_PAGES', 1)
+
+    async def fake_resolve(zona: str) -> str:
+        assert zona == 'Gonnet'
+        return 'manuel-gonnet'
+
+    monkeypatch.setattr(apify, '_argenprop_resolve_zona_slug', fake_resolve)
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_run(src: str, actor: str, input_data: dict[str, Any]) -> list[dict[str, Any]]:
+        calls.append(input_data)
+        return []
+
+    monkeypatch.setattr(service, '_run_actor', fake_run)
+    filters = ScrapingFilters(zona='Gonnet', tipo_operacion='venta', tipos_propiedad=['departamento'])
+    await service.scrape_source('argenprop', filters, _noop_progress)
+
+    assert calls[0]['startUrls'][0]['url'] == 'https://www.argenprop.com/departamentos/venta/manuel-gonnet'
 
 
 async def test_pages_without_html_are_skipped_not_fatal(
