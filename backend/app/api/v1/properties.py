@@ -7,6 +7,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request
 
 from app.services.ficha import enrich_ficha as _enrich_ficha
+from app.services.importer import import_property_from_url as _import_property
 from app.services.geocode import backfill_state as _backfill_state
 from app.services.geocode import run_backfill as _run_backfill
 from app.services.matcher import match_properties as _match_properties
@@ -21,12 +22,23 @@ async def list_properties(
     offset: int = 0,
     fuente: str | None = None,
     tipo_operacion: str | None = None,
+    tipo_propiedad: str | None = None,
+    moneda: str | None = None,
+    precio_min: float | None = None,
+    precio_max: float | None = None,
+    ambientes_min: int | None = None,
+    banos_min: int | None = None,
+    cocheras_min: int | None = None,
+    m2_min: float | None = None,
+    m2_max: float | None = None,
     q: str | None = None,
 ) -> dict[str, Any]:
     """List properties from Supabase, most recent first, with pagination.
 
-    When ``q`` is provided, matches it (case-insensitive, partial) against the
-    free-text columns ``titulo``, ``direccion`` and ``direccion_norm``.
+    Supports the essential Zonaprop-style filters: tipo/operación/fuente/moneda
+    as exact matches, precio and m2_total as ranges, ambientes/banos/cocheras
+    as minimums. When ``q`` is provided, matches it (case-insensitive, partial)
+    against the free-text columns ``titulo``, ``direccion`` and ``direccion_norm``.
     """
     sb = request.app.state.supabase
     if sb is None:
@@ -38,10 +50,26 @@ async def list_properties(
             .select('*', count='exact')
             .order('created_at', desc=True)
         )
-        if fuente:
-            query = query.eq('fuente', fuente)
-        if tipo_operacion:
-            query = query.eq('tipo_operacion', tipo_operacion)
+        for column, value in (
+            ('fuente', fuente),
+            ('tipo_operacion', tipo_operacion),
+            ('tipo_propiedad', tipo_propiedad),
+            ('moneda', moneda),
+        ):
+            if value:
+                query = query.eq(column, value)
+        for column, value in (
+            ('precio', precio_min),
+            ('ambientes', ambientes_min),
+            ('banos', banos_min),
+            ('cocheras', cocheras_min),
+            ('m2_total', m2_min),
+        ):
+            if value is not None:
+                query = query.gte(column, value)
+        for column, value in (('precio', precio_max), ('m2_total', m2_max)):
+            if value is not None:
+                query = query.lte(column, value)
         if q:
             term = _sanitize_term(q)
             if term:
@@ -126,6 +154,44 @@ async def trigger_backfill(request: Request, limit: int = 200, force: bool = Fal
 @router.get('/geocode/status')
 async def geocode_status(request: Request) -> dict[str, Any]:
     return _backfill_state()
+
+
+# Ficha Propio caps imports per request: each URL costs a fetch + LLM call and
+# possibly a headless render, and the batch runs inside one HTTP request.
+_IMPORT_MAX_URLS = 10
+
+
+@router.post('/import')
+async def import_properties(request: Request, body: dict) -> dict[str, Any]:
+    """Ficha Propio — import portal listing URLs into the own-brand catalog.
+
+    Body: ``{"urls": ["https://..."]}``. Each URL is processed independently;
+    a failing page yields a per-URL error without aborting the batch.
+
+    NOTE: declared before the `/{property_id}` catch-all, like `/map`.
+    """
+    sb = request.app.state.supabase
+    if sb is None:
+        return {'results': [], 'error': 'Supabase no configurado'}
+
+    raw = body.get('urls') or []
+    urls = list(dict.fromkeys(u.strip() for u in raw if isinstance(u, str) and u.strip()))
+    if not urls:
+        raise HTTPException(status_code=400, detail='urls requerido')
+    if len(urls) > _IMPORT_MAX_URLS:
+        raise HTTPException(status_code=400, detail=f'Máximo {_IMPORT_MAX_URLS} links por vez')
+
+    results: list[dict[str, Any]] = []
+    for u in urls:
+        try:
+            r = await _import_property(sb, u)
+            results.append({
+                'url': u, 'status': 'ok',
+                'created': r['created'], 'property': r['property'],
+            })
+        except Exception as e:
+            results.append({'url': u, 'status': 'error', 'error': str(e)})
+    return {'results': results}
 
 
 @router.get('/{property_id}')

@@ -14,7 +14,26 @@ const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
 const PAGE_SIZE = 50
 
-type Filter = { fuente: string; tipo_operacion: string }
+type Filter = {
+  fuente: string
+  tipo_operacion: string
+  tipo_propiedad: string
+  moneda: string
+  precio_min: string
+  precio_max: string
+  ambientes_min: string
+  banos_min: string
+  cocheras_min: string
+  m2_min: string
+  m2_max: string
+  q: string
+}
+
+const EMPTY_FILTER: Filter = {
+  fuente: '', tipo_operacion: '', tipo_propiedad: '', moneda: '',
+  precio_min: '', precio_max: '', ambientes_min: '', banos_min: '',
+  cocheras_min: '', m2_min: '', m2_max: '', q: '',
+}
 
 const FUENTES = [
   { value: '', label: 'Todas' },
@@ -31,6 +50,35 @@ const OPERACIONES = [
   { value: 'alquiler', label: 'Alquiler' },
 ]
 
+const TIPOS_PROPIEDAD = [
+  { value: '', label: 'Todos' },
+  { value: 'departamento', label: 'Departamento' },
+  { value: 'casa', label: 'Casa' },
+  { value: 'ph', label: 'PH' },
+  { value: 'local', label: 'Local' },
+  { value: 'oficina', label: 'Oficina' },
+  { value: 'terreno', label: 'Terreno' },
+  { value: 'otro', label: 'Otro' },
+]
+
+const MONEDAS = [
+  { value: '', label: 'Todas' },
+  { value: 'USD', label: 'USD' },
+  { value: 'ARS', label: 'ARS' },
+]
+
+const minOptions = (label: string, max: number) => [
+  { value: '', label: 'Todos' },
+  ...Array.from({ length: max }, (_, i) => ({
+    value: String(i + 1),
+    label: `${i + 1}+ ${label}`,
+  })),
+]
+
+const AMBIENTES = minOptions('amb.', 5)
+const BANOS = minOptions('baños', 4)
+const COCHERAS = minOptions('coch.', 3)
+
 function PropertiesPage() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -41,7 +89,7 @@ function PropertiesPage() {
   const [page, setPage] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [filter, setFilter] = useState<Filter>({ fuente: '', tipo_operacion: '' })
+  const [filter, setFilter] = useState<Filter>(EMPTY_FILTER)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [preparing, setPreparing] = useState(false)
 
@@ -87,8 +135,9 @@ function PropertiesPage() {
           limit: String(PAGE_SIZE),
           offset: String(targetPage * PAGE_SIZE),
         })
-        if (filter.fuente) params.set('fuente', filter.fuente)
-        if (filter.tipo_operacion) params.set('tipo_operacion', filter.tipo_operacion)
+        for (const [key, value] of Object.entries(filter)) {
+          if (value.trim()) params.set(key, value.trim())
+        }
         url = `${API}/api/v1/properties?${params}`
       }
       const res = await fetch(url)
@@ -113,8 +162,15 @@ function PropertiesPage() {
   useEffect(() => {
     setPage(0)
     setSelected(new Set())
-    void load(0)
+    // Debounced so typing in the free-text/numeric filters doesn't fire a
+    // request per keystroke.
+    const t = setTimeout(() => void load(0), 350)
+    return () => clearTimeout(t)
   }, [filter, jobId])
+
+  const hasFilters = Object.values(filter).some((v) => v.trim() !== '')
+  const set = (key: keyof Filter) => (v: string) =>
+    setFilter((f) => ({ ...f, [key]: v }))
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
@@ -161,19 +217,47 @@ function PropertiesPage() {
 
         {/* Filters — only shown when not in job-scoped mode */}
         {!jobId && (
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            <FilterSelect
-              label="Fuente"
-              value={filter.fuente}
-              options={FUENTES}
-              onChange={(v) => setFilter((f) => ({ ...f, fuente: v }))}
-            />
-            <FilterSelect
-              label="Operación"
-              value={filter.tipo_operacion}
-              options={OPERACIONES}
-              onChange={(v) => setFilter((f) => ({ ...f, tipo_operacion: v }))}
-            />
+          <div className="mt-4 space-y-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <input
+                type="search"
+                value={filter.q}
+                onChange={(e) => set('q')(e.target.value)}
+                placeholder="Buscar por ubicación o título..."
+                className="w-56 rounded-lg border border-border bg-card px-2.5 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
+              />
+              <FilterSelect label="Fuente" value={filter.fuente} options={FUENTES} onChange={set('fuente')} />
+              <FilterSelect label="Operación" value={filter.tipo_operacion} options={OPERACIONES} onChange={set('tipo_operacion')} />
+              <FilterSelect label="Tipo" value={filter.tipo_propiedad} options={TIPOS_PROPIEDAD} onChange={set('tipo_propiedad')} />
+              <FilterSelect label="Ambientes" value={filter.ambientes_min} options={AMBIENTES} onChange={set('ambientes_min')} />
+              <FilterSelect label="Baños" value={filter.banos_min} options={BANOS} onChange={set('banos_min')} />
+              <FilterSelect label="Cocheras" value={filter.cocheras_min} options={COCHERAS} onChange={set('cocheras_min')} />
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <FilterSelect label="Moneda" value={filter.moneda} options={MONEDAS} onChange={set('moneda')} />
+              <RangeInputs
+                label="Precio"
+                min={filter.precio_min}
+                max={filter.precio_max}
+                onMin={set('precio_min')}
+                onMax={set('precio_max')}
+              />
+              <RangeInputs
+                label="Superficie (m²)"
+                min={filter.m2_min}
+                max={filter.m2_max}
+                onMin={set('m2_min')}
+                onMax={set('m2_max')}
+              />
+              {hasFilters && (
+                <button
+                  onClick={() => setFilter(EMPTY_FILTER)}
+                  className="text-xs font-medium text-muted-foreground underline-offset-2 transition hover:text-foreground hover:underline"
+                >
+                  Limpiar filtros
+                </button>
+              )}
+            </div>
           </div>
         )}
       </header>
@@ -325,6 +409,41 @@ function FilterSelect({
           <option key={o.value} value={o.value}>{o.label}</option>
         ))}
       </select>
+    </div>
+  )
+}
+
+function RangeInputs({
+  label, min, max, onMin, onMax,
+}: {
+  label: string
+  min: string
+  max: string
+  onMin: (v: string) => void
+  onMax: (v: string) => void
+}) {
+  const inputCls =
+    'w-20 rounded-lg border border-border bg-card px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20'
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-muted-foreground">{label}:</span>
+      <input
+        type="number"
+        min={0}
+        value={min}
+        onChange={(e) => onMin(e.target.value)}
+        placeholder="Mín"
+        className={inputCls}
+      />
+      <span className="text-xs text-muted-foreground">–</span>
+      <input
+        type="number"
+        min={0}
+        value={max}
+        onChange={(e) => onMax(e.target.value)}
+        placeholder="Máx"
+        className={inputCls}
+      />
     </div>
   )
 }
