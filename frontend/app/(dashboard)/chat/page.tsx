@@ -5,13 +5,18 @@ import { ArrowUp, Building2, Sparkles } from 'lucide-react'
 import { SearchDoneCard } from '@/components/chat/SearchDoneCard'
 import { ProgressBubble } from '@/components/chat/ProgressBubble'
 import { AgencySelector } from '@/components/chat/AgencySelector'
+import { SourceSelector } from '@/components/chat/SourceSelector'
 import { useSSEStream } from '@/hooks/useSSEStream'
 import { addSearch } from '@/hooks/useSearchHistory'
+import { DEFAULT_SELECTION, describeSelection, isSelectionEmpty, type SourceSelection } from '@/lib/sources'
 import { cn } from '@/lib/utils'
 
 function ChatPage() {
   const { messages, isStreaming, lastJobId, startScraping, resumeScraping } = useSSEStream()
   const [input, setInput] = useState('')
+  // Where to scrape. Chosen before submit and sent with POST /scraping/start;
+  // the default reproduces the pre-selector behaviour (search everything).
+  const [selection, setSelection] = useState<SourceSelection>(DEFAULT_SELECTION)
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const searchParams = useSearchParams()
@@ -37,12 +42,12 @@ function ChatPage() {
 
   const submit = () => {
     const q = input.trim()
-    if (!q || isStreaming) return
+    if (!q || isStreaming || isSelectionEmpty(selection)) return
     setInput('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
     lastQueryRef.current = q
     addSearch(q)
-    void startScraping(q)
+    void startScraping(q, undefined, undefined, selection)
   }
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -73,10 +78,10 @@ function ChatPage() {
       />
       <button
         onClick={submit}
-        disabled={isStreaming || !input.trim()}
+        disabled={isStreaming || !input.trim() || isSelectionEmpty(selection)}
         className={cn(
           'flex size-8 shrink-0 items-center justify-center rounded-xl transition-all',
-          input.trim() && !isStreaming
+          input.trim() && !isStreaming && !isSelectionEmpty(selection)
             ? 'bg-foreground text-background hover:bg-foreground/85'
             : 'bg-muted text-muted-foreground cursor-not-allowed'
         )}
@@ -97,12 +102,17 @@ function ChatPage() {
             </div>
             <h2 className="text-2xl font-semibold tracking-tight text-foreground">¿Qué propiedad buscás?</h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              Describí en lenguaje natural y busco en todos los portales.
+              Describí en lenguaje natural y elegí dónde quiero buscar.
             </p>
+          </div>
+          <div className="mb-4">
+            <SourceSelector value={selection} onChange={setSelection} disabled={isStreaming} />
           </div>
           {inputBar}
           <p className="mt-2 text-center text-xs text-muted-foreground">
-            Shift + Enter para nueva línea
+            {isSelectionEmpty(selection)
+              ? 'Elegí al menos una fuente para buscar'
+              : `Buscando en: ${describeSelection(selection)}`}
           </p>
         </div>
       </div>
@@ -190,9 +200,14 @@ function ChatPage() {
 
       {/* Input */}
       <div className="border-t border-border p-4">
+        <div className="mx-auto mb-3 w-full max-w-3xl">
+          <SourceSelector value={selection} onChange={setSelection} disabled={isStreaming} />
+        </div>
         {inputBar}
         <p className="mt-2 text-center text-xs text-muted-foreground">
-          Shift + Enter para nueva línea
+          {isSelectionEmpty(selection)
+            ? 'Elegí al menos una fuente para buscar'
+            : `Buscando en: ${describeSelection(selection)}`}
         </p>
       </div>
     </div>

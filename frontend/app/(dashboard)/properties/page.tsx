@@ -4,8 +4,9 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { Check, ChevronLeft, ChevronRight, Database, Loader2, MapPin, RefreshCw, Send } from 'lucide-react'
 import { PropertyCard } from '@/components/chat/PropertyCard'
 import type { Property } from '@/hooks/useSSEStream'
-import { enrichFicha, guardarSeleccion } from '@/lib/ficha'
+import { enrichFicha, guardarSeleccion, marcarEnviadas } from '@/lib/ficha'
 import { sortVentaFirst } from '@/lib/operacion'
+import { EMPTY_FILTER, FilterBar, matchesFilter, type Filter } from '@/lib/propertyFilters'
 import { cn } from '@/lib/utils'
 
 const keyFor = (p: Property, i: number) => p.id ?? String(i)
@@ -13,71 +14,6 @@ const keyFor = (p: Property, i: number) => p.id ?? String(i)
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
 const PAGE_SIZE = 50
-
-type Filter = {
-  fuente: string
-  tipo_operacion: string
-  tipo_propiedad: string
-  moneda: string
-  precio_min: string
-  precio_max: string
-  ambientes_min: string
-  banos_min: string
-  cocheras_min: string
-  m2_min: string
-  m2_max: string
-  q: string
-}
-
-const EMPTY_FILTER: Filter = {
-  fuente: '', tipo_operacion: '', tipo_propiedad: '', moneda: '',
-  precio_min: '', precio_max: '', ambientes_min: '', banos_min: '',
-  cocheras_min: '', m2_min: '', m2_max: '', q: '',
-}
-
-const FUENTES = [
-  { value: '', label: 'Todas' },
-  { value: 'zonaprop', label: 'ZonaProp' },
-  { value: 'mercadolibre', label: 'MercadoLibre' },
-  { value: 'argenprop', label: 'Argenprop' },
-  { value: 'remax', label: 'RE/MAX' },
-  { value: 'googlemaps', label: 'Sitios web' },
-]
-
-const OPERACIONES = [
-  { value: '', label: 'Todas' },
-  { value: 'venta', label: 'Venta' },
-  { value: 'alquiler', label: 'Alquiler' },
-]
-
-const TIPOS_PROPIEDAD = [
-  { value: '', label: 'Todos' },
-  { value: 'departamento', label: 'Departamento' },
-  { value: 'casa', label: 'Casa' },
-  { value: 'ph', label: 'PH' },
-  { value: 'local', label: 'Local' },
-  { value: 'oficina', label: 'Oficina' },
-  { value: 'terreno', label: 'Terreno' },
-  { value: 'otro', label: 'Otro' },
-]
-
-const MONEDAS = [
-  { value: '', label: 'Todas' },
-  { value: 'USD', label: 'USD' },
-  { value: 'ARS', label: 'ARS' },
-]
-
-const minOptions = (label: string, max: number) => [
-  { value: '', label: 'Todos' },
-  ...Array.from({ length: max }, (_, i) => ({
-    value: String(i + 1),
-    label: `${i + 1}+ ${label}`,
-  })),
-]
-
-const AMBIENTES = minOptions('amb.', 5)
-const BANOS = minOptions('baños', 4)
-const COCHERAS = minOptions('coch.', 3)
 
 function PropertiesPage() {
   const router = useRouter()
@@ -101,19 +37,35 @@ function PropertiesPage() {
       return next
     })
 
+  // Base list is already filtered server-side; job results arrive unfiltered
+  // (full `properties(*)` for one job) so we narrow them client-side here.
+  const shown = jobId ? properties.filter((p) => matchesFilter(p, filter)) : properties
+
+  const enviadasCount = shown.filter((p) => p.enviada_at).length
+
   const allSelected =
-    properties.length > 0 && properties.every((p, i) => selected.has(keyFor(p, i)))
+    shown.length > 0 && shown.every((p, i) => selected.has(keyFor(p, i)))
 
   const toggleAll = () =>
-    setSelected(allSelected ? new Set() : new Set(properties.map((p, i) => keyFor(p, i))))
+    setSelected(allSelected ? new Set() : new Set(shown.map((p, i) => keyFor(p, i))))
 
   const prepararYEnviar = async () => {
-    const chosen = properties.filter((p, i) => selected.has(keyFor(p, i)))
+    const chosen = shown.filter((p, i) => selected.has(keyFor(p, i)))
     if (chosen.length === 0 || preparing) return
     setPreparing(true)
     try {
       // Parse each description with the LLM (amenities + destacados) before building the ficha.
       const enriched = await Promise.all(chosen.map(enrichFicha))
+      // Dejar sellado el envío: al volver a esta búsqueda las enviadas se
+      // distinguen de las pendientes. Si falla, el envío sigue igual.
+      const marcadas = await marcarEnviadas(chosen.map((p) => p.id ?? ''))
+      if (marcadas.length > 0) {
+        const sent = new Set(marcadas)
+        const stamp = new Date().toISOString()
+        setProperties((prev) =>
+          prev.map((p) => (p.id && sent.has(p.id) ? { ...p, enviada_at: stamp } : p))
+        )
+      }
       guardarSeleccion(enriched)
       router.push('/ficha')
     } finally {
@@ -168,10 +120,6 @@ function PropertiesPage() {
     return () => clearTimeout(t)
   }, [filter, jobId])
 
-  const hasFilters = Object.values(filter).some((v) => v.trim() !== '')
-  const set = (key: keyof Filter) => (v: string) =>
-    setFilter((f) => ({ ...f, [key]: v }))
-
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
       {/* Header */}
@@ -188,9 +136,9 @@ function PropertiesPage() {
               <p className="text-xs text-muted-foreground">
                 {loading
                   ? 'Cargando...'
-                  : jobId
-                    ? `${properties.length} propiedades`
-                    : `${total} propiedades`}
+                  : `${jobId ? shown.length : total} propiedades${
+                      enviadasCount > 0 ? ` · ${enviadasCount} enviada${enviadasCount === 1 ? '' : 's'}` : ''
+                    }`}
               </p>
             </div>
           </div>
@@ -198,7 +146,7 @@ function PropertiesPage() {
           <div className="flex items-center gap-2">
             <button
               onClick={toggleAll}
-              disabled={loading || properties.length === 0}
+              disabled={loading || shown.length === 0}
               className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground transition hover:bg-muted disabled:opacity-50"
             >
               <Check className="size-3.5" />
@@ -215,51 +163,9 @@ function PropertiesPage() {
           </div>
         </div>
 
-        {/* Filters — only shown when not in job-scoped mode */}
-        {!jobId && (
-          <div className="mt-4 space-y-2">
-            <div className="flex flex-wrap items-center gap-3">
-              <input
-                type="search"
-                value={filter.q}
-                onChange={(e) => set('q')(e.target.value)}
-                placeholder="Buscar por ubicación o título..."
-                className="w-56 rounded-lg border border-border bg-card px-2.5 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
-              />
-              <FilterSelect label="Fuente" value={filter.fuente} options={FUENTES} onChange={set('fuente')} />
-              <FilterSelect label="Operación" value={filter.tipo_operacion} options={OPERACIONES} onChange={set('tipo_operacion')} />
-              <FilterSelect label="Tipo" value={filter.tipo_propiedad} options={TIPOS_PROPIEDAD} onChange={set('tipo_propiedad')} />
-              <FilterSelect label="Ambientes" value={filter.ambientes_min} options={AMBIENTES} onChange={set('ambientes_min')} />
-              <FilterSelect label="Baños" value={filter.banos_min} options={BANOS} onChange={set('banos_min')} />
-              <FilterSelect label="Cocheras" value={filter.cocheras_min} options={COCHERAS} onChange={set('cocheras_min')} />
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <FilterSelect label="Moneda" value={filter.moneda} options={MONEDAS} onChange={set('moneda')} />
-              <RangeInputs
-                label="Precio"
-                min={filter.precio_min}
-                max={filter.precio_max}
-                onMin={set('precio_min')}
-                onMax={set('precio_max')}
-              />
-              <RangeInputs
-                label="Superficie (m²)"
-                min={filter.m2_min}
-                max={filter.m2_max}
-                onMin={set('m2_min')}
-                onMax={set('m2_max')}
-              />
-              {hasFilters && (
-                <button
-                  onClick={() => setFilter(EMPTY_FILTER)}
-                  className="text-xs font-medium text-muted-foreground underline-offset-2 transition hover:text-foreground hover:underline"
-                >
-                  Limpiar filtros
-                </button>
-              )}
-            </div>
-          </div>
-        )}
+        <div className="mt-4">
+          <FilterBar filter={filter} onChange={setFilter} />
+        </div>
       </header>
 
       {/* Content */}
@@ -273,23 +179,29 @@ function PropertiesPage() {
             <p className="text-sm text-foreground">No se pudieron cargar las propiedades</p>
             <p className="text-xs text-muted-foreground">{error}</p>
           </div>
-        ) : properties.length === 0 ? (
+        ) : shown.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
             <Database className="size-10 text-muted-foreground/40" />
             <div>
               <p className="text-sm font-medium text-foreground">
-                {jobId ? 'Esta búsqueda no tiene propiedades guardadas' : 'Aún no hay propiedades guardadas'}
+                {properties.length > 0
+                  ? 'Ninguna propiedad coincide con los filtros'
+                  : jobId
+                    ? 'Esta búsqueda no tiene propiedades guardadas'
+                    : 'Aún no hay propiedades guardadas'}
               </p>
               <p className="mt-1 text-xs text-muted-foreground">
-                {jobId
-                  ? 'Las propiedades se guardan al completarse la búsqueda.'
-                  : 'Ejecutá una búsqueda en el chat para empezar a llenar la base.'}
+                {properties.length > 0
+                  ? 'Ajustá o limpiá los filtros para ver más resultados.'
+                  : jobId
+                    ? 'Las propiedades se guardan al completarse la búsqueda.'
+                    : 'Ejecutá una búsqueda en el chat para empezar a llenar la base.'}
               </p>
             </div>
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {properties.map((p, i) => {
+            {shown.map((p, i) => {
               const key = keyFor(p, i)
               const isSel = selected.has(key)
               return (
@@ -385,65 +297,6 @@ function PropertiesPage() {
           </button>
         </div>
       )}
-    </div>
-  )
-}
-
-function FilterSelect({
-  label, value, options, onChange,
-}: {
-  label: string
-  value: string
-  options: { value: string; label: string }[]
-  onChange: (v: string) => void
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-muted-foreground">{label}:</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="rounded-lg border border-border bg-card px-2.5 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>{o.label}</option>
-        ))}
-      </select>
-    </div>
-  )
-}
-
-function RangeInputs({
-  label, min, max, onMin, onMax,
-}: {
-  label: string
-  min: string
-  max: string
-  onMin: (v: string) => void
-  onMax: (v: string) => void
-}) {
-  const inputCls =
-    'w-20 rounded-lg border border-border bg-card px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20'
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-muted-foreground">{label}:</span>
-      <input
-        type="number"
-        min={0}
-        value={min}
-        onChange={(e) => onMin(e.target.value)}
-        placeholder="Mín"
-        className={inputCls}
-      />
-      <span className="text-xs text-muted-foreground">–</span>
-      <input
-        type="number"
-        min={0}
-        value={max}
-        onChange={(e) => onMax(e.target.value)}
-        placeholder="Máx"
-        className={inputCls}
-      />
     </div>
   )
 }

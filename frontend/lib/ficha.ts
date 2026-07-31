@@ -42,6 +42,31 @@ export async function updateProperty(id: string, patch: Partial<Property>): Prom
   }
 }
 
+/**
+ * Marcar propiedades como ENVIADAS al cliente (o desmarcarlas con `enviada:
+ * false`). Se llama al preparar y enviar una selección, para que al volver a la
+ * misma búsqueda se distingan de las que todavía no se mandaron.
+ * Devuelve los ids efectivamente marcados; en un fallo devuelve [] y el flujo
+ * de fichas sigue igual — la marca es informativa, no bloquea el envío.
+ */
+export async function marcarEnviadas(ids: string[], enviada = true): Promise<string[]> {
+  const clean = [...new Set(ids.filter(Boolean))]
+  if (clean.length === 0) return []
+  try {
+    const res = await fetch(`${API}/api/v1/properties/mark-sent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: clean, enviada }),
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    if (data.error) return []
+    return ((data.properties ?? []) as Property[]).map((p) => p.id!).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
 // Datos del agente / inmobiliaria. Placeholder — reemplazar por datos reales o config del usuario.
 export const AGENTE = {
   nombre: 'Federico Suárez',

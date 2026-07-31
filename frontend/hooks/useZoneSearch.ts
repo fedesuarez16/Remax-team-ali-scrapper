@@ -3,7 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Agency } from '@/components/chat/AgencySelector'
 import type { MapProperty } from '@/components/map/PropertyMap'
 import { samplePolygon } from '@/lib/geo'
+import { addSearch } from '@/hooks/useSearchHistory'
 import { INITIAL_SOURCES, useSSEStream, type ProgressMap } from '@/hooks/useSSEStream'
+import type { SourceSelection } from '@/lib/sources'
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
@@ -50,6 +52,19 @@ export function useZoneSearch() {
   const [insideCount, setInsideCount] = useState(0)
   const [draining, setDraining] = useState(false)
   const resumedAgenciesIdRef = useRef<string | null>(null)
+
+  // Map-search history persistence. `runQuery`/`runZona` are captured at
+  // confirmRun so the auto-save survives a later cancel() (which resets zonas).
+  // `savedEntryId` is the just-saved row's id, handed to the inline name/folder
+  // panel on the done card. A per-jobId ref stops the job_id upsert re-firing.
+  const [savedEntryId, setSavedEntryId] = useState<string | null>(null)
+  const [runQuery, setRunQuery] = useState('')
+  const runZonaRef = useRef<string>('')
+  const savedJobRef = useRef<string | null>(null)
+  // Serializes the initial save against the job_id upsert: both POST via
+  // SELECT-by-query then UPDATE/INSERT, so firing them concurrently could
+  // INSERT a duplicate before the first row exists. The effect awaits this.
+  const firstSaveRef = useRef<Promise<unknown>>(Promise.resolve())
 
   const agenciesMsg = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -141,16 +156,36 @@ export function useZoneSearch() {
     }
   }, [])
 
-  const confirmRun = useCallback((vertices: [number, number][]) => {
+  const confirmRun = useCallback((vertices: [number, number][], selection?: SourceSelection) => {
     setPolygon(vertices)
     setJobProperties([])
     setUngeocodedCount(0)
     setInsideCount(0)
     setStalled(false)
+    setSavedEntryId(null)
+    savedJobRef.current = null
     setPhase('running')
-    const query = `Propiedades en ${zonas.join(', ')}`
-    void startScraping(query, vertices, localidades)
+    const zona = zonas.join(', ')
+    const query = `Propiedades en ${zona}`
+    setRunQuery(query)
+    runZonaRef.current = zona
+    // Save immediately so a map search is never lost even before the job id
+    // exists; the effect below upserts the same row with job_id once it does.
+    firstSaveRef.current = addSearch(query, zona).then((id) => {
+      if (id) setSavedEntryId(id)
+    })
+    void startScraping(query, vertices, localidades, selection)
   }, [zonas, localidades, startScraping])
+
+  // Attach job_id to the saved history row once the job exists (upsert-by-query
+  // returns the same id, preserving any label/folder the user set on the card).
+  useEffect(() => {
+    if (!jobId || !runQuery || savedJobRef.current === jobId) return
+    savedJobRef.current = jobId
+    void firstSaveRef.current
+      .then(() => addSearch(runQuery, runZonaRef.current || undefined, jobId))
+      .then((id) => id && setSavedEntryId(id))
+  }, [jobId, runQuery])
 
   const confirmAgencies = useCallback((ids: string[]) => {
     if (!jobId) return
@@ -299,6 +334,8 @@ export function useZoneSearch() {
     draining,
     stalled,
     polygon,
+    savedEntryId,
+    runQuery,
     resolveZone,
     confirmRun,
     confirmAgencies,

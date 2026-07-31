@@ -1,6 +1,7 @@
 'use client'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Agency } from '@/components/chat/AgencySelector'
+import type { SourceSelection } from '@/lib/sources'
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
@@ -16,6 +17,8 @@ export type Property = {
   match_score?: number | null; match_reasons?: string[]
   matches_criteria?: boolean
   lat?: number | null; lng?: number | null
+  /** Instante en que se preparó/envió al cliente. null = todavía no enviada. */
+  enviada_at?: string | null
 }
 export type SourceStatus = 'pending' | 'running' | 'done' | 'error'
 export type ProgressMap = Record<string, { status: SourceStatus; count: number; message: string }>
@@ -124,7 +127,12 @@ export function useSSEStream() {
   }, [close, upsertProgress, addMatched])
 
   const startScraping = useCallback(async (
-    query: string, polygon?: [number, number][], localidades?: string[]
+    query: string,
+    polygon?: [number, number][],
+    localidades?: string[],
+    // Where to scrape, picked before submit. Omitted → backend default
+    // (every portal + all inmobiliarias), i.e. the pre-selector behaviour.
+    sourceSelection?: SourceSelection
   ) => {
     setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'user', text: query }])
     setIsStreaming(true)
@@ -140,9 +148,22 @@ export function useSSEStream() {
           query,
           ...(polygon ? { polygon } : {}),
           ...(localidades && localidades.length > 0 ? { localidades } : {}),
+          ...(sourceSelection ? { source_selection: sourceSelection } : {}),
         }),
       })
-      jobId = (await res.json()).job_id
+      const data = await res.json()
+      if (!res.ok || !data.job_id) {
+        // 400 = the source selection can't produce a search (e.g. no track
+        // enabled). Surface the backend's reason instead of hanging on a
+        // stream that will never open.
+        setMessages((p) => [...p, {
+          id: crypto.randomUUID(), type: 'agent',
+          text: data?.detail ?? 'No se pudo iniciar la búsqueda.',
+        }])
+        setIsStreaming(false)
+        return
+      }
+      jobId = data.job_id
     } catch { setIsStreaming(false); return }
 
     const pid = crypto.randomUUID()

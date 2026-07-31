@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { Building2, Database, FileText, Folder, Globe, MapPin, Plus, Search } from 'lucide-react'
+import { Building2, Database, FileText, Folder, Globe, MapPin, Plus, Search, Sparkles } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import SearchHistoryList from '@/components/layout/SearchHistoryList'
 
@@ -132,6 +132,17 @@ export default function Sidebar() {
         >
           <Folder className="size-4" />
           Carpetas
+        </Link>
+        <Link
+          href="/limpieza"
+          className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition ${
+            pathname?.startsWith('/limpieza')
+              ? 'bg-muted text-foreground'
+              : 'text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+          }`}
+        >
+          <Sparkles className="size-4" />
+          Limpieza
         </Link>
       </div>
 

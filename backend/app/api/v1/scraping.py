@@ -25,10 +25,29 @@ def _spawn_graph_task(coro: Any) -> None:
     task.add_done_callback(_graph_tasks.discard)
 
 
+class SourceSelection(BaseModel):
+    """Where to scrape, picked by the user BEFORE the search runs.
+
+    Defaults reproduce the pre-feature behaviour exactly (every portal + the
+    inmobiliarias track over all zonas), so callers that omit the field — and
+    job rows persisted before the column existed — keep working untouched.
+
+    `portales=[]` with `buscar_portales=True` means "todos los portales": an
+    empty subset is no restriction, not an empty search.
+    """
+    buscar_portales: bool = True
+    portales: list[str] = []
+    buscar_inmobiliarias: bool = True
+    # None/blank = todas las zonas. Otherwise only the inmobiliarias we
+    # manually classified into this zona are consulted.
+    zona_inmobiliarias: str | None = None
+
+
 class StartScrapingRequest(BaseModel):
     query: str
     polygon: list[list[float]] | None = None
     localidades: list[str] = []
+    source_selection: SourceSelection = SourceSelection()
 
 
 class StartScrapingResponse(BaseModel):
@@ -43,15 +62,43 @@ def _sse_headers() -> dict[str, str]:
     return {'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no'}
 
 
+def _validated_selection(selection: SourceSelection) -> dict[str, Any]:
+    """Reject selections that can only produce an empty search, then hand back
+    the normalized dict that gets persisted on the job row."""
+    from app.services.apify import PORTAL_SOURCES
+
+    if not selection.buscar_portales and not selection.buscar_inmobiliarias:
+        raise HTTPException(
+            status_code=400,
+            detail='Elegí al menos una fuente: portales inmobiliarios o inmobiliarias.',
+        )
+    unknown = [p for p in selection.portales if p not in PORTAL_SOURCES]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Portales desconocidos: {", ".join(unknown)}. '
+                   f'Disponibles: {", ".join(PORTAL_SOURCES)}.',
+        )
+    zona = (selection.zona_inmobiliarias or '').strip()
+    return {
+        'buscar_portales': selection.buscar_portales,
+        'portales': selection.portales,
+        'buscar_inmobiliarias': selection.buscar_inmobiliarias,
+        'zona_inmobiliarias': zona or None,
+    }
+
+
 @router.post('/start', response_model=StartScrapingResponse)
 async def start_scraping(body: StartScrapingRequest, request: Request) -> StartScrapingResponse:
     job_id = str(uuid.uuid4())
+    source_selection = _validated_selection(body.source_selection)
     sb = request.app.state.supabase
     if sb is not None:
         try:
             await sb.table('scraping_jobs').insert({
                 'id': job_id, 'query_raw': body.query, 'estado': 'pending',
                 'polygon': body.polygon, 'localidades': body.localidades or None,
+                'source_selection': source_selection,
             }).execute()
         except Exception as exc:
             # Without the job row every downstream FK write fails — fail loudly.
@@ -95,21 +142,35 @@ async def _run_graph_into_queue(
         await queue.put(('error', exc))
 
 
-async def _read_job_localidades_polygon(sb: Any, job_id: str) -> tuple[list[str] | None, list[list[float]] | None]:
-    """Best-effort read of the persisted job row's `localidades`+`polygon` for
-    injection into the graph's initial `inputs`. Any failure (no sb, no row,
-    chat-originated job) returns `(None, None)` so `inputs` stays exactly as
-    it was pre-change — the chat path must be byte-identical."""
+async def _read_job_inputs(sb: Any, job_id: str) -> dict[str, Any]:
+    """Best-effort read of the persisted job row's `localidades`, `polygon` and
+    `source_selection` for injection into the graph's initial `inputs`. Any
+    failure (no sb, no row, chat-originated job) returns `{}` so `inputs` stays
+    exactly as it was pre-change — the chat path must be byte-identical.
+
+    Keys with no value are omitted rather than set to `None`: the graph reads
+    them with `.get(...)` defaults, and a legacy row lacking `source_selection`
+    must fall through to "search everything"."""
     if sb is None:
-        return None, None
+        return {}
     try:
-        res = await sb.table('scraping_jobs').select('localidades,polygon').eq('id', job_id).execute()
+        res = await (
+            sb.table('scraping_jobs')
+            .select('localidades,polygon,source_selection')
+            .eq('id', job_id)
+            .execute()
+        )
     except Exception:
-        return None, None
+        # `source_selection` column not applied yet — retry without it so the
+        # polygon/localidades injection (already in production) keeps working.
+        try:
+            res = await sb.table('scraping_jobs').select('localidades,polygon').eq('id', job_id).execute()
+        except Exception:
+            return {}
     if not res.data:
-        return None, None
+        return {}
     row = res.data[0]
-    return row.get('localidades'), row.get('polygon')
+    return {k: row[k] for k in ('localidades', 'polygon', 'source_selection') if row.get(k)}
 
 
 @router.get('/{job_id}/stream')
@@ -119,11 +180,7 @@ async def stream_scraping(job_id: str, query: str, request: Request) -> Streamin
     graph = build_graph(checkpointer=checkpointer)
     config = {'configurable': {'thread_id': job_id, 'supabase': sb}}
     inputs: dict[str, Any] = {'query': query, 'job_id': job_id}
-    localidades, polygon = await _read_job_localidades_polygon(sb, job_id)
-    if localidades:
-        inputs['localidades'] = localidades
-    if polygon:
-        inputs['polygon'] = polygon
+    inputs.update(await _read_job_inputs(sb, job_id))
 
     queue: asyncio.Queue[Any] = asyncio.Queue()
     _spawn_graph_task(_run_graph_into_queue(graph, inputs, config, queue, sb, job_id))

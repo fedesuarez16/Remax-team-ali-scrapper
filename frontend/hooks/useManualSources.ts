@@ -8,7 +8,17 @@ export type ManualSource = {
   nombre: string
   url: string
   activo: boolean
+  /** The zona WE classified this source into. null = no zona bucket. */
+  zona: string | null
   date: string
+}
+
+/** A zona that actually has inmobiliarias loaded — what the pre-search
+ * "elegí la zona" step renders. */
+export type SourceZona = {
+  zona: string
+  zona_norm: string
+  count: number
 }
 
 type ManualSourceRow = {
@@ -16,11 +26,19 @@ type ManualSourceRow = {
   nombre: string
   url: string
   activo: boolean
+  zona?: string | null
   created_at: string
 }
 
 function mapRow(row: ManualSourceRow): ManualSource {
-  return { id: row.id, nombre: row.nombre, url: row.url, activo: row.activo, date: row.created_at }
+  return {
+    id: row.id,
+    nombre: row.nombre,
+    url: row.url,
+    activo: row.activo,
+    zona: row.zona ?? null,
+    date: row.created_at,
+  }
 }
 
 // Module-level subscribers set for same-tab live updates without Context
@@ -51,17 +69,24 @@ async function fetchSources(): Promise<ManualSource[]> {
 
 /** Registers a source (agency/portal website) so future searches also
  * crawl it — see backend/app/graphs/extraction/nodes.py route_after_review.
+ * `zona` is the manual classification: a search scoped to that zona will
+ * only consult the sources filed under it.
  * Returns an error message on failure, or null on success. */
-export async function addSource(nombre: string, url: string): Promise<string | null> {
+export async function addSource(nombre: string, url: string, zona?: string): Promise<string | null> {
   const trimmedNombre = nombre.trim()
   const trimmedUrl = url.trim()
+  const trimmedZona = (zona ?? '').trim()
   if (!trimmedNombre || !trimmedUrl) return 'Completá nombre y URL'
 
   try {
     const res = await fetch(SOURCES_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nombre: trimmedNombre, url: trimmedUrl }),
+      body: JSON.stringify({
+        nombre: trimmedNombre,
+        url: trimmedUrl,
+        ...(trimmedZona ? { zona: trimmedZona } : {}),
+      }),
     })
     const data = await res.json()
     if (data.error) return data.error as string
@@ -114,4 +139,56 @@ export function useManualSources() {
   }, [])
 
   return { sources, addSource, deleteSource, loading }
+}
+
+// ── Zonas ────────────────────────────────────────────────────────────────────
+
+let lastKnownZonas: SourceZona[] = []
+
+async function fetchZonas(): Promise<SourceZona[]> {
+  try {
+    const res = await fetch(`${SOURCES_URL}/zonas`)
+    if (!res.ok) return lastKnownZonas
+    const data = await res.json()
+    lastKnownZonas = (data.zonas ?? []) as SourceZona[]
+    return lastKnownZonas
+  } catch {
+    return lastKnownZonas
+  }
+}
+
+/** Zonas that have inmobiliarias loaded. Subscribes to the same notify() bus
+ * as the source list, so loading a source in the Fuentes tab immediately
+ * refreshes the zona step of the search selector. */
+export function useSourceZonas() {
+  const [zonas, setZonas] = useState<SourceZona[]>(lastKnownZonas)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const refresh = () => {
+      fetchZonas().then((entries) => {
+        if (!cancelled) setZonas(entries)
+      })
+    }
+
+    // `loading` already starts true and this effect runs once on mount, so
+    // there is nothing to re-set here.
+    fetchZonas().then((entries) => {
+      if (!cancelled) {
+        setZonas(entries)
+        setLoading(false)
+      }
+    })
+
+    subscribers.add(refresh)
+
+    return () => {
+      cancelled = true
+      subscribers.delete(refresh)
+    }
+  }, [])
+
+  return { zonas, loading }
 }

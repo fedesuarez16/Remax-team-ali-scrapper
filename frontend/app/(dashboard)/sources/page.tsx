@@ -1,12 +1,19 @@
 'use client'
 import { useState } from 'react'
-import { Globe, Loader2, Plus, Trash2 } from 'lucide-react'
-import { useManualSources } from '@/hooks/useManualSources'
+import { Globe, Loader2, MapPin, Plus, Trash2 } from 'lucide-react'
+import { useManualSources, useSourceZonas } from '@/hooks/useManualSources'
+
+const ZONA_SUGERIDAS = [
+  'City Bell', 'Gonnet', 'Villa Elisa', 'Casco La Plata',
+  'Los Hornos', 'Ensenada', 'Berisso', 'Hudson',
+]
 
 export default function SourcesPage() {
   const { sources, addSource, deleteSource, loading } = useManualSources()
+  const { zonas } = useSourceZonas()
   const [nombre, setNombre] = useState('')
   const [url, setUrl] = useState('')
+  const [zona, setZona] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -14,7 +21,7 @@ export default function SourcesPage() {
   const handleSubmit = async () => {
     setSaving(true)
     setError(null)
-    const err = await addSource(nombre, url)
+    const err = await addSource(nombre, url, zona)
     setSaving(false)
     if (err) {
       setError(err)
@@ -22,6 +29,8 @@ export default function SourcesPage() {
     }
     setNombre('')
     setUrl('')
+    // Keep `zona` so loading several inmobiliarias into the same zona in a
+    // row doesn't mean retyping it every time.
   }
 
   const handleDelete = async (id: string) => {
@@ -37,7 +46,8 @@ export default function SourcesPage() {
           <h1 className="text-xl font-semibold tracking-tight">Fuentes</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Cargá inmobiliarias o portales que no aparecen en Google (ej: la web de una oficina RE/MAX).
-            Cada búsqueda futura también va a rastrear estos sitios.
+            Cada búsqueda futura también va a rastrear estos sitios. La zona que asignes acá es la que
+            después se puede elegir al buscar — la clasificación la hacemos nosotros, no el sistema.
           </p>
         </div>
       </header>
@@ -59,6 +69,20 @@ export default function SourcesPage() {
             placeholder="https://www.remax.com.ar/agencia/belgrano"
             className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/20"
           />
+          <input
+            type="text"
+            value={zona}
+            onChange={(e) => setZona(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && !saving && handleSubmit()}
+            list="zonas-cargadas"
+            placeholder="Zona (ej: City Bell) — opcional"
+            className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/20"
+          />
+          <datalist id="zonas-cargadas">
+            {[...new Set([...zonas.map((z) => z.zona), ...ZONA_SUGERIDAS])].map((z) => (
+              <option key={z} value={z} />
+            ))}
+          </datalist>
           {error && <p className="text-xs text-destructive">{error}</p>}
           <button
             onClick={handleSubmit}
@@ -89,7 +113,19 @@ export default function SourcesPage() {
                 >
                   <Globe className="size-4 shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-foreground">{s.nombre}</p>
+                    <p className="flex items-center gap-2 truncate text-sm font-medium text-foreground">
+                      {s.nombre}
+                      {s.zona ? (
+                        <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
+                          <MapPin className="size-3" />
+                          {s.zona}
+                        </span>
+                      ) : (
+                        <span className="shrink-0 text-[11px] font-normal text-muted-foreground/60">
+                          sin zona
+                        </span>
+                      )}
+                    </p>
                     <a
                       href={s.url}
                       target="_blank"

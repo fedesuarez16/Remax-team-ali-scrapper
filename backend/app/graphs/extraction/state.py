@@ -16,6 +16,11 @@ class ScrapingState(TypedDict, total=False):
     # OUT of graph state (ADR-3) — it's dead state here, consumed authoritatively
     # by GET /{job_id}/properties instead.
     localidades: list[str]
+    # Where to scrape, picked by the user BEFORE the search ran (see
+    # app.api.v1.scraping.SourceSelection). Persisted on the job row and
+    # injected here by stream_scraping; read via nodes._read_selection, whose
+    # defaults mean "search everything" when the key is absent.
+    source_selection: dict
 
     # Phase 1 — portal scraping (fan-in reducer)
     collected_properties: Annotated[list[RawProperty], operator.add]

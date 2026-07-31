@@ -12,6 +12,7 @@ from app.graphs.extraction.nodes import (
     discover_agencies,
     extract_instagram_properties_llm,
     extract_website_properties_llm,
+    no_sources,
     no_websites,
     normalize_properties,
     parse_query,
@@ -52,12 +53,15 @@ def build_graph(checkpointer: BaseCheckpointSaver[Any] | None = None) -> Any:  #
     g.add_node('extract_instagram_properties_llm', extract_instagram_properties_llm)
     g.add_node('save_instagram_properties', save_instagram_properties)
     g.add_node('no_websites', no_websites)
+    g.add_node('no_sources', no_sources)
 
     # ── Edges ─────────────────────────────────────────────────────────────────
     g.add_edge(START, 'parse_query')
     g.add_conditional_edges('parse_query', route_after_parse,
-                            ['run_portal_scraper', 'discover_agencies', 'clarification'])
+                            ['run_portal_scraper', 'discover_agencies', 'clarification',
+                             'aggregate_phase1', 'no_sources'])
     g.add_edge('clarification', END)
+    g.add_edge('no_sources', END)
 
     g.add_edge('run_portal_scraper', 'aggregate_phase1')
     g.add_edge('discover_agencies', 'aggregate_phase1')

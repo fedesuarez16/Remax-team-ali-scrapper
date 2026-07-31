@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncio
@@ -32,6 +33,7 @@ async def list_properties(
     m2_min: float | None = None,
     m2_max: float | None = None,
     q: str | None = None,
+    enviada: bool | None = None,
 ) -> dict[str, Any]:
     """List properties from Supabase, most recent first, with pagination.
 
@@ -39,6 +41,9 @@ async def list_properties(
     as exact matches, precio and m2_total as ranges, ambientes/banos/cocheras
     as minimums. When ``q`` is provided, matches it (case-insensitive, partial)
     against the free-text columns ``titulo``, ``direccion`` and ``direccion_norm``.
+    ``enviada`` splits the list by the "ya se la mandé al cliente" mark
+    (``enviada_at``): ``true`` keeps only the sent ones, ``false`` only the
+    pending ones.
     """
     sb = request.app.state.supabase
     if sb is None:
@@ -70,6 +75,11 @@ async def list_properties(
         for column, value in (('precio', precio_max), ('m2_total', m2_max)):
             if value is not None:
                 query = query.lte(column, value)
+        if enviada is not None:
+            query = (
+                query.not_.is_('enviada_at', 'null') if enviada
+                else query.is_('enviada_at', 'null')
+            )
         if q:
             term = _sanitize_term(q)
             if term:
@@ -98,7 +108,10 @@ async def properties_map(request: Request, limit: int = 2000) -> dict[str, Any]:
     try:
         located = await (
             sb.table('properties')
-            .select('id,titulo,precio,moneda,direccion,tipo_operacion,tipo_propiedad,imagenes,lat,lng')
+            .select(
+                'id,titulo,precio,moneda,direccion,tipo_operacion,tipo_propiedad,'
+                'imagenes,lat,lng,fuente,ambientes,banos,cocheras,m2_total,enviada_at'
+            )
             .not_.is_('lat', 'null')
             .not_.is_('lng', 'null')
             .limit(limit)
@@ -192,6 +205,39 @@ async def import_properties(request: Request, body: dict) -> dict[str, Any]:
         except Exception as e:
             results.append({'url': u, 'status': 'error', 'error': str(e)})
     return {'results': results}
+
+
+@router.post('/mark-sent')
+async def mark_properties_sent(request: Request, body: dict) -> dict[str, Any]:
+    """Marcar (o desmarcar) propiedades como ENVIADAS al cliente.
+
+    Body: ``{"ids": ["..."], "enviada": true}``. Se llama cuando el usuario
+    selecciona propiedades y toca "Preparar y enviar": sella ``enviada_at`` con
+    el instante del envío para que, al volver a la misma búsqueda, se distingan
+    de las que todavía no mandó. ``enviada: false`` limpia la marca.
+
+    NOTE: declarado antes del catch-all `/{property_id}`, igual que `/map`.
+    """
+    sb = request.app.state.supabase
+    if sb is None:
+        return {'updated': 0, 'properties': [], 'error': 'Supabase no configurado'}
+
+    raw = body.get('ids') or []
+    ids = list(dict.fromkeys(
+        i.strip() for i in raw if isinstance(i, str) and i.strip()
+    ))
+    if not ids:
+        raise HTTPException(status_code=400, detail='ids requerido')
+
+    enviada = body.get('enviada', True)
+    stamp = datetime.now(timezone.utc).isoformat() if enviada else None
+
+    try:
+        res = await sb.table('properties').update({'enviada_at': stamp}).in_('id', ids).execute()
+    except Exception as e:
+        return {'updated': 0, 'properties': [], 'error': str(e)}
+    rows = res.data or []
+    return {'updated': len(rows), 'properties': rows}
 
 
 @router.get('/{property_id}')

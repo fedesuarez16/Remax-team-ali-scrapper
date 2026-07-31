@@ -113,6 +113,52 @@ async def test_stream_chat_path_job_row_missing_leaves_inputs_unchanged(monkeypa
     assert captured['inputs'] == {'query': 'Propiedades en Palermo', 'job_id': 'job-1'}
 
 
+# ── source_selection: same job-row → graph-inputs injection as localidades ────
+
+
+async def test_stream_injects_source_selection_from_job_row(monkeypatch) -> None:
+    from app.api.v1 import scraping
+
+    selection = {
+        'buscar_portales': True,
+        'portales': ['zonaprop'],
+        'buscar_inmobiliarias': True,
+        'zona_inmobiliarias': 'City Bell',
+    }
+    fake_sb = _FakeSupabase(jobs={
+        'job-1': {'id': 'job-1', 'localidades': None, 'polygon': None,
+                  'source_selection': selection},
+    })
+    captured: dict = {}
+    monkeypatch.setattr(scraping, 'build_graph', lambda checkpointer=None: _FakeGraph(captured))
+    app = _make_app(fake_sb)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        async with client.stream('GET', '/job-1/stream', params={'query': 'Casa en City Bell'}) as resp:
+            async for _ in resp.aiter_lines():
+                pass
+
+    assert captured['inputs'].get('source_selection') == selection
+
+
+async def test_stream_job_row_without_source_selection_omits_it(monkeypatch) -> None:
+    """Legacy job rows (persisted before the column existed) must leave
+    `inputs` free of the key so the graph falls back to its own defaults."""
+    from app.api.v1 import scraping
+
+    fake_sb = _FakeSupabase(jobs={'job-1': {'id': 'job-1', 'localidades': None, 'polygon': None}})
+    captured: dict = {}
+    monkeypatch.setattr(scraping, 'build_graph', lambda checkpointer=None: _FakeGraph(captured))
+    app = _make_app(fake_sb)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://test') as client:
+        async with client.stream('GET', '/job-1/stream', params={'query': 'Casa en City Bell'}) as resp:
+            async for _ in resp.aiter_lines():
+                pass
+
+    assert 'source_selection' not in captured['inputs']
+
+
 async def test_stream_no_supabase_leaves_inputs_unchanged(monkeypatch) -> None:
     from app.api.v1 import scraping
 

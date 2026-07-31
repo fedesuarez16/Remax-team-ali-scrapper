@@ -2,8 +2,9 @@
 import { Suspense, useEffect, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { useSearchParams } from 'next/navigation'
-import { Loader2, MapPin } from 'lucide-react'
+import { Loader2, MapPin, SlidersHorizontal } from 'lucide-react'
 import type { CarteraProperty, MapProperty } from '@/components/map/PropertyMap'
+import { EMPTY_FILTER, FilterBar, hasActiveFilters, type Filter } from '@/lib/propertyFilters'
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
@@ -25,6 +26,8 @@ function MapPage() {
   const [missing, setMissing] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [filter, setFilter] = useState<Filter>(EMPTY_FILTER)
+  const [filtersOpen, setFiltersOpen] = useState(false)
 
   useEffect(() => {
     const load = async () => {
@@ -51,19 +54,39 @@ function MapPage() {
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
       <header className="border-b border-border px-6 py-4">
-        <div className="flex items-center gap-3">
-          <div className="flex size-8 items-center justify-center rounded-lg bg-foreground">
-            <MapPin className="size-4 text-background" />
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="flex size-8 items-center justify-center rounded-lg bg-foreground">
+              <MapPin className="size-4 text-background" />
+            </div>
+            <div>
+              <h1 className="text-sm font-semibold">Mapa</h1>
+              <p className="text-xs text-muted-foreground">
+                {loading
+                  ? 'Cargando...'
+                  : `${properties.length} scrapeadas · ${cartera.length} cartera · ${missing} sin ubicación`}
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-sm font-semibold">Mapa</h1>
-            <p className="text-xs text-muted-foreground">
-              {loading
-                ? 'Cargando...'
-                : `${properties.length} scrapeadas · ${cartera.length} cartera · ${missing} sin ubicación`}
-            </p>
-          </div>
+
+          <button
+            onClick={() => setFiltersOpen((v) => !v)}
+            className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
+              filtersOpen || hasActiveFilters(filter)
+                ? 'border-foreground bg-foreground text-background'
+                : 'border-border bg-card text-foreground hover:bg-muted'
+            }`}
+          >
+            <SlidersHorizontal className="size-3.5" />
+            Filtros{hasActiveFilters(filter) ? ' · activos' : ''}
+          </button>
         </div>
+
+        {filtersOpen && (
+          <div className="mt-4">
+            <FilterBar filter={filter} onChange={setFilter} />
+          </div>
+        )}
       </header>
 
       <div className="relative flex-1">
@@ -77,7 +100,7 @@ function MapPage() {
             <Loader2 className="size-6 animate-spin text-muted-foreground" />
           </div>
         ) : (
-          <PropertyMap properties={properties} cartera={cartera} focusId={focusId ?? undefined} />
+          <PropertyMap properties={properties} cartera={cartera} focusId={focusId ?? undefined} filter={filter} />
         )}
       </div>
     </div>

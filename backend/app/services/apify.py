@@ -272,20 +272,63 @@ def _argenprop_search_urls(
     return [base_url] + [f'{base_url}?pagina-{page}' for page in range(2, capped + 1)]
 
 
+def _argenprop_feature_list(card: Any) -> Any:
+    """The `<ul>` holding m²/dorms/antigüedad.
+
+    In raw HTML the card's first `<ul>` is the photo carousel, so a positional
+    `card.find('ul')` reads photos and silently drops every feature. Prefer the
+    class, then fall back to the first non-carousel `<ul>` — that fallback is
+    what keeps Readability output (classes stripped, carousel gone) working.
+    """
+    if (by_class := card.select_one('ul.card__main-features')) is not None:
+        return by_class
+    for ul in card.find_all('ul'):
+        classes = ul.get('class') or []
+        if ul.get('data-carousel') is None and 'card__photos' not in classes:
+            return ul
+    return None
+
+
+def _argenprop_card_images(card: Any) -> list[str]:
+    """The card's photo carousel, from raw (pre-Readability) HTML.
+
+    Argenprop server-renders every carousel photo into the search results —
+    the first `<img>` eagerly via `src`, the rest lazily via `data-src`. Both
+    are read here. The scope is deliberately the carousel `<ul>` and not the
+    card: the agency logo `<img>` sits in a sibling `div.card__agent` and must
+    never be mistaken for a property photo.
+
+    Cards serve `_u_small`; the ficha serves the same asset ids at
+    `_u_medium` (verified live), so the suffix is upgraded for free quality.
+    """
+    urls: list[str] = []
+    for img in card.select('ul[data-carousel] img, ul.card__photos img'):
+        src = str(img.get('src') or img.get('data-src') or '').strip()
+        # Cards with no photos render the local placeholder SVG instead.
+        if not src.startswith('http') or 'photo_placeholder' in src:
+            continue
+        url = src.replace('_u_small.', '_u_medium.')
+        if url not in urls:
+            urls.append(url)
+    return urls[:_MAX_GALLERY]
+
+
 def _parse_argenprop_page(html: str, filters: ScrapingFilters) -> list[RawProperty]:
     """Argenprop's search-results HTML, parsed deterministically (no LLM).
 
-    `saveHtml: true` on the website-content-crawler actor does NOT return raw
-    DOM — it's run through Readability (reader-mode extraction) first, which
-    strips every `class` attribute site-wide. Verified against a real captured
-    run: what survives per card is the bare (non-`data-`) attributes Argenprop
-    puts on its `<a idaviso=... montonormalizado=... dormitorios=...>` card
-    link, plus a few `data-*` attributes and stable sibling ordering of the
-    `<p>`/`<ul>`/`<h2>` content underneath it — so cards are matched via
-    `a[idaviso]` and fields via those attributes / sibling position, not CSS
-    classes. The photo carousel is stripped entirely by Readability (only the
-    agency logo `<img>` survives), so galleries are NOT extracted here — the
-    ficha-level harvester (`harvest_page_images`) fills them in on demand.
+    The website-content-crawler actor runs with `htmlTransformer: 'none'` so
+    this receives the RAW server DOM. It used to receive the actor's default
+    Readability (reader-mode) output, which strips every `class` attribute
+    site-wide AND the entire photo carousel — that's why Argenprop results
+    reached the UI photoless.
+
+    The selectors below stay tolerant of BOTH shapes, so a transformer change
+    upstream degrades (no photos) instead of returning zero properties: cards
+    are matched via `a[idaviso]` and most fields via bare attributes plus
+    stable `<p>`/`<ul>`/`<h2>` sibling ordering, which Readability preserves.
+
+    One trap the raw shape introduces: the card's FIRST `<ul>` is the photo
+    carousel, not the feature list — see `_argenprop_feature_list`.
     """
     from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 
@@ -330,7 +373,7 @@ def _parse_argenprop_page(html: str, filters: ScrapingFilters) -> list[RawProper
         m2_cubiertos: float | None = None
         ambientes: int | None = None
         antiguedad: int | None = None
-        features_ul = card.find('ul')
+        features_ul = _argenprop_feature_list(card)
         if features_ul is not None:
             for feat_span in features_ul.select('li span'):
                 feat = feat_span.get_text(strip=True)
@@ -379,7 +422,7 @@ def _parse_argenprop_page(html: str, filters: ScrapingFilters) -> list[RawProper
             m2_cubiertos=m2_cubiertos,
             antiguedad=antiguedad,
             amenities=[],
-            imagenes=[],
+            imagenes=_argenprop_card_images(card),
             url_origen=url_origen,
         ))
 
@@ -515,6 +558,39 @@ async def _scrape_mercadolibre_api(
     return results
 
 
+_REMAX_CDN = 'https://d1acdg20u0pmxj.cloudfront.net'
+_REMAX_PHOTO_SIZE = '1080xAUTO'
+_MAX_GALLERY = 20  # what the property card/detail UI ever shows
+
+
+def _remax_photo_urls(item: dict[str, Any]) -> list[str]:
+    """`photos[].rawValue` → browsable CDN URLs.
+
+    The API ships each photo as a bare path with no size segment and no
+    extension (`listings/<listingId>/<photoId>`); the rendered ficha requests
+    that same asset with a size segment spliced in before the file name and a
+    `.jpg` suffix appended — verified live, resolves `200 image/jpg`:
+
+        {cdn}/listings/<listingId>/1080xAUTO/<photoId>.jpg
+
+    A rawValue with no directory part has nowhere to splice the size into, so
+    it's dropped rather than guessed into a broken `<img>`.
+    """
+    urls: list[str] = []
+    for photo in item.get('photos') or []:
+        raw = str((photo or {}).get('rawValue') or '').strip('/ ')
+        if not raw:
+            continue
+        if raw.startswith('http'):
+            urls.append(raw)
+            continue
+        directory, _, filename = raw.rpartition('/')
+        if not directory:
+            continue
+        urls.append(f'{_REMAX_CDN}/{directory}/{_REMAX_PHOTO_SIZE}/{filename}.jpg')
+    return urls[:_MAX_GALLERY]
+
+
 def _norm_remax(item: dict[str, Any], zona: str) -> RawProperty | None:
     precio = item.get('price')
     if not precio:
@@ -540,7 +616,7 @@ def _norm_remax(item: dict[str, Any], zona: str) -> RawProperty | None:
         m2_total=item.get('dimensionTotalBuilt') or None,
         m2_cubiertos=item.get('dimensionCovered') or None,
         amenities=[],
-        imagenes=[],
+        imagenes=_remax_photo_urls(item),
         url_origen=f'https://www.remax.com.ar/listings/{item.get("slug", "")}',
     )
 
@@ -1274,6 +1350,11 @@ class ApifyService(BaseApifyService):
             'maxCrawlPages': len(urls),
             'crawlerType': 'playwright:chrome',
             'saveHtml': True,
+            # Without this the actor hands back Readability (reader-mode) DOM,
+            # which strips the whole `ul.card__photos` carousel — every result
+            # then reaches the UI photoless. The raw server HTML already has
+            # the full gallery rendered, so no per-ficha fetch is needed.
+            'htmlTransformer': 'none',
         }
         raw_pages = await self._run_actor('argenprop', _ACTORS['argenprop'], input_data)
 

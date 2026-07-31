@@ -1,4 +1,4 @@
-import { ImageIcon, MapPin } from 'lucide-react'
+import { CheckCircle2, ImageIcon, MapPin } from 'lucide-react'
 import type { Property } from '@/hooks/useSSEStream'
 import { operacionLabel } from '@/lib/operacion'
 
@@ -45,12 +45,30 @@ function ConfidenceDot({ value }: { value: number }) {
   )
 }
 
+/** Fecha corta del envío, p. ej. "1 ago". Vacío si la marca no es parseable. */
+function fmtEnviada(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return new Intl.DateTimeFormat('es-AR', { day: 'numeric', month: 'short' }).format(d)
+}
+
 export function PropertyCard({ p }: { p: Property }) {
   const fuente = p.fuente ?? ''
   const conf = p.confianza_extraccion ?? 0
+  const enviadaEl = p.enviada_at ? fmtEnviada(p.enviada_at) : ''
 
   return (
     <div className="group relative overflow-hidden rounded-2xl border border-border bg-card transition-all duration-200 hover:border-foreground/20 hover:bg-muted/30 hover:shadow-lg hover:shadow-black/5" onClick={() => p.url_origen && window.open(p.url_origen, '_blank', 'noopener')} style={p.url_origen ? {cursor: 'pointer'} : undefined}>
+
+      {/* Ya se le mandó al cliente — la señal más importante al volver a una búsqueda */}
+      {p.enviada_at && (
+        <div className="flex items-center gap-1.5 border-b border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5">
+          <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+          <span className="text-xs font-medium text-emerald-700 dark:text-emerald-400">
+            Enviada{enviadaEl && ` · ${enviadaEl}`}
+          </span>
+        </div>
+      )}
 
       {/* Match bar — only present when ranked against a search query */}
       {p.match_score != null && <MatchBar score={p.match_score} />}

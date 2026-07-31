@@ -52,6 +52,34 @@ async def parse_query(state: ScrapingState, config: RunnableConfig) -> dict[str,
     return {'clarification_needed': False, 'filters': filters}
 
 
+def _read_selection(state: ScrapingState) -> dict[str, Any]:
+    """Normalize the user's pre-search source pick (`POST /scraping/start` →
+    `source_selection` on the job row → graph `inputs`).
+
+    An absent key means "search everything", which is what every caller did
+    before the selector existed — so legacy job rows and the map flow behave
+    exactly as they always did."""
+    sel = state.get('source_selection') or {}
+    zona = (sel.get('zona_inmobiliarias') or '').strip()
+    return {
+        'buscar_portales': bool(sel.get('buscar_portales', True)),
+        'portales': [str(p) for p in (sel.get('portales') or [])],
+        'buscar_inmobiliarias': bool(sel.get('buscar_inmobiliarias', True)),
+        'zona_inmobiliarias': zona or None,
+    }
+
+
+def _env_allowed_sources() -> tuple[str, ...]:
+    """Portals this deployment is allowed to hit at all, before the user's pick."""
+    if settings.APIFY_DISABLED:
+        return ('mercadolibre',)  # direct httpx, no Apify actor
+    if settings.SCRAPE_GOOGLEMAPS_ONLY:
+        return ()
+    if settings.SCRAPE_ZONAPROP_ONLY:
+        return ('zonaprop',)
+    return PORTAL_SOURCES
+
+
 def route_after_parse(state: ScrapingState) -> str | list[Any]:
     if state.get('clarification_needed'):
         return 'clarification'
@@ -61,14 +89,22 @@ def route_after_parse(state: ScrapingState) -> str | list[Any]:
     # Fan-out unit: localidad when present (polygon search — portal-known slug,
     # ADR-1), else per-barrio exactly as before (chat path / legacy callers).
     fanout_units = localidades or filters.zonas or ([filters.zona] if filters.zona else [])
-    if settings.APIFY_DISABLED:
-        sources: tuple[str, ...] = ('mercadolibre',)  # direct httpx, no Apify actor
-    elif settings.SCRAPE_GOOGLEMAPS_ONLY:
-        sources = ()
-    elif settings.SCRAPE_ZONAPROP_ONLY:
-        sources = ('zonaprop',)
-    else:
-        sources = PORTAL_SOURCES
+
+    # The user's pre-search pick narrows what the deployment already allows —
+    # env gates are a hard ceiling, the selection can only subtract from it.
+    selection = _read_selection(state)
+    sources: tuple[str, ...] = _env_allowed_sources() if selection['buscar_portales'] else ()
+    if picked := selection['portales']:
+        sources = tuple(s for s in sources if s in set(picked))
+    buscar_inmobiliarias = selection['buscar_inmobiliarias']
+    # A zona-scoped run consults ONLY the inmobiliarias we filed under that
+    # zona, so Google-Maps discovery (which surfaces agencies belonging to no
+    # curated zona) is skipped entirely — the curated registry, fetched in
+    # `review_agencies`, becomes the single inmobiliaria source. "Todas las
+    # zonas" keeps discovery on: it's the broadest search, unchanged from
+    # before the selector existed.
+    descubrir_agencias = buscar_inmobiliarias and not selection['zona_inmobiliarias']
+
     # Fan-out: one portal-scraper + agency-discovery branch per (unit × source)
     sends: list[Any] = []
     for unit in fanout_units:
@@ -83,9 +119,23 @@ def route_after_parse(state: ScrapingState) -> str | list[Any]:
             zfilters = filters.model_copy(update={'zona': unit})
         for src in sources:
             sends.append(Send('run_portal_scraper', {'__source': src, 'filters': zfilters, 'job_id': job_id}))
-        if not settings.SCRAPE_ZONAPROP_ONLY and not settings.APIFY_DISABLED:
+        if descubrir_agencias and not settings.SCRAPE_ZONAPROP_ONLY and not settings.APIFY_DISABLED:
             sends.append(Send('discover_agencies', {'filters': zfilters, 'job_id': job_id}))
-    return sends
+    if sends:
+        return sends
+
+    if buscar_inmobiliarias:
+        # Nothing to scrape in phase 1 (zona-scoped inmobiliarias, no portales),
+        # but the curated registry is only read downstream in `review_agencies`.
+        # Pass through the aggregation chain so the graph actually gets there
+        # instead of terminating on an empty fan-out.
+        return [Send('aggregate_phase1', {'job_id': job_id})]
+
+    # Everything the user picked is unavailable here (e.g. a portal this
+    # deployment gates off, with inmobiliarias unchecked). Route to a terminal
+    # node instead of returning an empty Send list, which would leave the SSE
+    # stream hanging without a `done`.
+    return 'no_sources'
 
 
 def clarification(state: ScrapingState) -> dict[str, Any]:
@@ -335,11 +385,73 @@ async def _upsert_agencies(sb: Any, agencies: list[Agency], zona_norm: str) -> N
     ).execute()
 
 
+def _dedup_triple(
+    direccion: Any, precio: Any, tipo_operacion: Any,
+) -> tuple[Any, float | None, Any]:
+    """The `properties_dedup_idx (direccion, precio, tipo_operacion)` key, with
+    `precio` coerced so a Decimal from Postgres and a float from the scraper
+    compare equal."""
+    return (direccion, float(precio) if precio is not None else None, tipo_operacion)
+
+
+async def _fill_missing_images(sb: Any, props: list[NormalizedProperty]) -> None:
+    """Backfill galleries onto already-stored rows that still have none.
+
+    `_upsert_properties` writes insert-ignore, so it can never touch an
+    existing row — deliberately, because a blind `DO UPDATE` would wipe the
+    manual curation `PATCH /properties/{id}` exists to support. The side effect
+    was that any property first stored before its portal had gallery extraction
+    stayed photoless forever: the conflicting insert does nothing, so a
+    re-scrape produced correct photos and discarded them.
+
+    This pass closes that hole from the other side — it writes ONLY where the
+    stored gallery is empty, so a curated row (non-empty by definition) is
+    never overwritten. Best-effort: a failure here must not fail the run.
+    """
+    scraped = {
+        _dedup_triple(p.direccion, p.precio, p.tipo_operacion): p.imagenes
+        for p in props if p.imagenes
+    }
+    if sb is None or not scraped:
+        return
+    try:
+        res = await sb.table('properties').select(
+            'id,direccion,precio,tipo_operacion,imagenes'
+        ).in_('direccion', list({d for d, _, _ in scraped})).execute()
+
+        pending: list[tuple[str, list[str]]] = []
+        for row in (res.data or []):
+            if row.get('imagenes'):  # curated or already filled — hands off
+                continue
+            imgs = scraped.get(_dedup_triple(
+                row.get('direccion'), row.get('precio'), row.get('tipo_operacion'),
+            ))
+            if imgs:
+                pending.append((row['id'], imgs))
+        if not pending:
+            return
+
+        sem = asyncio.Semaphore(5)
+
+        async def _write(prop_id: str, imgs: list[str]) -> None:
+            async with sem:
+                await sb.table('properties').update(
+                    {'imagenes': imgs}
+                ).eq('id', prop_id).execute()
+
+        await asyncio.gather(*(_write(pid, imgs) for pid, imgs in pending))
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning('_fill_missing_images failed: %s', exc)
+
+
 async def _upsert_properties(sb: Any, props: list[NormalizedProperty], job_id: str | None) -> None:
     if sb is None or not props:
         return
     data = [_prop_to_dict(p, job_id) for p in props]
     try:
+        # insert-ignore: existing rows keep whatever the ficha editor curated.
+        # `_fill_missing_images` then covers the rows that have no gallery yet.
         await sb.table('properties').upsert(
             data, on_conflict='direccion,precio,tipo_operacion', ignore_duplicates=True
         ).execute()
@@ -347,6 +459,8 @@ async def _upsert_properties(sb: Any, props: list[NormalizedProperty], job_id: s
         import logging
         logging.getLogger(__name__).exception('property upsert failed (%d rows, job %s)', len(data), job_id)
         return
+
+    await _fill_missing_images(sb, props)
 
     # Best-effort geocoding of newly ingested rows — fire-and-forget so it never
     # delays the SSE `done` event or fails the scraping run. The backfill lock
@@ -452,15 +566,24 @@ async def save_portal_properties(state: dict[str, Any], config: RunnableConfig) 
 
 # ── Phase 1 → Phase 2 bridge: agency review interrupt ─────────────────────────
 
-async def _fetch_active_manual_sources(sb: Any) -> list[dict]:
+async def _fetch_active_manual_sources(sb: Any, zona: str | None = None) -> list[dict]:
     """Manually-registered sources (backend/app/api/v1/manual_sources.py) —
     e.g. a RE/MAX office or small inmobiliaria not surfaced by the Google
-    Maps 'inmobiliarias en {zona}' search. Best-effort: an empty list on any
-    failure just means no manual sources get folded in this run."""
+    Maps 'inmobiliarias en {zona}' search.
+
+    `zona` scopes the fetch to the inmobiliarias WE classified into that zona
+    (matched on `zona_norm`, so 'city bell, La Plata' finds 'City Bell').
+    None/blank means every registered source ("todas las zonas").
+
+    Best-effort: an empty list on any failure just means no manual sources get
+    folded in this run."""
     if sb is None:
         return []
     try:
-        res = await sb.table('manual_sources').select('nombre,url').eq('activo', True).execute()
+        query = sb.table('manual_sources').select('nombre,url').eq('activo', True)
+        if zona and zona.strip():
+            query = query.eq('zona_norm', _normalize_zona(zona))
+        res = await query.execute()
         return res.data or []
     except Exception:
         return []
@@ -469,7 +592,12 @@ async def _fetch_active_manual_sources(sb: Any) -> list[dict]:
 async def review_agencies(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
     agencies = state.get('agencies', [])
     sb = config['configurable'].get('supabase')
-    manual_sources = await _fetch_active_manual_sources(sb)
+    selection = _read_selection(state)
+    # Portales-only search: the inmobiliarias registry is never consulted.
+    manual_sources = (
+        await _fetch_active_manual_sources(sb, selection['zona_inmobiliarias'])
+        if selection['buscar_inmobiliarias'] else []
+    )
 
     if not agencies and not manual_sources:
         # No agencies found, no manual sources registered → skip Instagram, emit done
@@ -855,6 +983,23 @@ async def save_instagram_properties(state: dict[str, Any], config: RunnableConfi
     await adispatch_custom_event('done', {
         'event': 'done', 'job_id': job_id, 'total_count': total,
         'sources': [*list(PORTAL_SOURCES), 'local', 'instagram'],
+    }, config=config)
+    return {}
+
+
+async def no_sources(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
+    """Terminal node for a source selection that leaves nothing to scrape —
+    keeps the SSE stream well-formed (message + `done`) instead of ending on an
+    empty fan-out."""
+    await adispatch_custom_event('agent_message', {
+        'event': 'agent_message',
+        'message': 'Ninguna de las fuentes que elegiste está disponible para esta búsqueda.',
+    }, config=config)
+    await adispatch_custom_event('done', {
+        'event': 'done',
+        'job_id': state.get('job_id'),
+        'total_count': 0,
+        'sources': [],
     }, config=config)
     return {}
 

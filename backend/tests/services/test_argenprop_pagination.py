@@ -78,6 +78,28 @@ async def test_single_actor_run_carries_all_start_urls(
     assert calls[0]['saveHtml'] is True
 
 
+async def test_run_requests_raw_html_so_the_photo_carousel_survives(
+    service: ApifyService, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `saveHtml: true` alone returns Readability-transformed DOM, which strips
+    # the whole `ul.card__photos` carousel — every Argenprop result then reaches
+    # the UI photoless. `htmlTransformer: 'none'` keeps the raw server HTML,
+    # where the gallery is already fully rendered (no JS needed).
+    from app.core.config import settings
+    monkeypatch.setattr(settings, 'ARGENPROP_MAX_PAGES', 1)
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_run(src: str, actor: str, input_data: dict[str, Any]) -> list[dict[str, Any]]:
+        calls.append(input_data)
+        return []
+
+    monkeypatch.setattr(service, '_run_actor', fake_run)
+    await service.scrape_source('argenprop', _filters(), _noop_progress)
+
+    assert calls[0]['htmlTransformer'] == 'none'
+
+
 async def test_resolved_portal_slug_overrides_naive_slugify(
     service: ApifyService, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -15,9 +15,18 @@ import {
 } from 'react-leaflet'
 import { pointInPolygon } from '@/lib/geo'
 import { operacionLabel, sortVentaFirst } from '@/lib/operacion'
+import { EMPTY_FILTER, matchesFilter, type Filter } from '@/lib/propertyFilters'
 import { AgencySelector } from '@/components/chat/AgencySelector'
 import { ProgressBubble } from '@/components/chat/ProgressBubble'
+import { SourceSelector } from '@/components/chat/SourceSelector'
+import { SaveSearchPanel } from '@/components/map/SaveSearchPanel'
 import { useZoneSearch } from '@/hooks/useZoneSearch'
+import {
+  DEFAULT_SELECTION,
+  describeSelection,
+  isSelectionEmpty,
+  type SourceSelection,
+} from '@/lib/sources'
 
 export type MapProperty = {
   id: string
@@ -30,6 +39,16 @@ export type MapProperty = {
   imagenes: string[]
   lat: number
   lng: number
+  // Attribute-filter columns — served by GET /properties/map so the map can
+  // filter markers client-side (see matchesFilter). Optional: legacy payloads
+  // and the job overlay may omit them, in which case range filters exclude them.
+  fuente?: string | null
+  ambientes?: number | null
+  banos?: number | null
+  cocheras?: number | null
+  m2_total?: number | null
+  /** Marca de envío al cliente (ver filtro "Envío"). null = todavía no enviada. */
+  enviada_at?: string | null
   // Server-classified (GET /{job_id}/properties) inside/outside tag for
   // zone-search job results — the single source of truth, no client
   // re-derivation. Undefined/null for properties outside the job-results flow.
@@ -111,13 +130,18 @@ export default function PropertyMap({
   properties,
   cartera = [],
   focusId,
+  filter = EMPTY_FILTER,
 }: {
   properties: MapProperty[]
   cartera?: CarteraProperty[]
   focusId?: string
+  filter?: Filter
 }) {
   const [drawState, setDrawState] = useState<DrawState>('idle')
   const [vertices, setVertices] = useState<[number, number][]>([])
+  // Where to scrape this zone. Chosen in the confirm modal, defaults to
+  // "search everything" so behaviour matches the pre-selector map.
+  const [selection, setSelection] = useState<SourceSelection>(DEFAULT_SELECTION)
   const zone = useZoneSearch()
   const focusMarkerRef = useRef<LeafletCircleMarker | null>(null)
   const focused = useMemo(
@@ -125,12 +149,24 @@ export default function PropertyMap({
     [focusId, properties]
   )
 
+  // Attribute filters narrow which markers render; they compose with the drawn
+  // zone (filter first, then the polygon dims what's left outside it). Cartera
+  // has a different shape (no numeric precio/ambientes) so it stays unfiltered.
+  const visibleProperties = useMemo(
+    () => properties.filter((p) => matchesFilter(p, filter)),
+    [properties, filter]
+  )
+  const visibleJobProperties = useMemo(
+    () => zone.jobProperties.filter((p) => matchesFilter(p, filter)),
+    [zone.jobProperties, filter]
+  )
+
   const zoneActive = drawState === 'closed' && vertices.length >= 3
   const jobOverlayActive = zone.phase !== 'idle'
 
   const insideProps = useMemo(
-    () => (zoneActive ? properties.filter((p) => pointInPolygon(p.lat, p.lng, vertices)) : []),
-    [zoneActive, properties, vertices]
+    () => (zoneActive ? visibleProperties.filter((p) => pointInPolygon(p.lat, p.lng, vertices)) : []),
+    [zoneActive, visibleProperties, vertices]
   )
   const insideCartera = useMemo(
     () => (zoneActive ? cartera.filter((c) => pointInPolygon(c.lat, c.lng, vertices)) : []),
@@ -144,9 +180,9 @@ export default function PropertyMap({
   const jobInsideIds = useMemo(() => {
     if (zone.phase !== 'done') return new Set<string>()
     return new Set(
-      zone.jobProperties.filter((p) => p.in_polygon !== false).map((p) => p.id)
+      visibleJobProperties.filter((p) => p.in_polygon !== false).map((p) => p.id)
     )
-  }, [zone.phase, zone.jobProperties])
+  }, [zone.phase, visibleJobProperties])
 
   const startDrawing = () => {
     setVertices([])
@@ -186,7 +222,7 @@ export default function PropertyMap({
       {focused && (
         <FocusHandler target={[focused.lat, focused.lng]} markerRef={focusMarkerRef} />
       )}
-      {ventaOnTop(properties).map((p) => (
+      {ventaOnTop(visibleProperties).map((p) => (
         <CircleMarker
           key={p.id}
           ref={p.id === focusId ? focusMarkerRef : undefined}
@@ -258,7 +294,7 @@ export default function PropertyMap({
         </CircleMarker>
       ))}
       {zone.phase === 'done' &&
-        ventaOnTop(zone.jobProperties).map((p) => (
+        ventaOnTop(visibleJobProperties).map((p) => (
           <CircleMarker
             key={`job-${p.id}`}
             center={[p.lat, p.lng]}
@@ -407,14 +443,25 @@ export default function PropertyMap({
     </div>
 
     {zone.phase === 'confirm' && (
-      <div className="absolute inset-0 z-[1100] flex items-center justify-center bg-black/30">
-        <div className="w-80 space-y-3 rounded-2xl border border-border bg-background p-4 shadow-lg">
+      <div className="absolute inset-0 z-[1100] flex items-center justify-center bg-black/30 p-4">
+        <div className="max-h-[85vh] w-96 max-w-full space-y-3 overflow-y-auto rounded-2xl border border-border bg-background p-4 shadow-lg">
           <p className="text-sm font-semibold text-foreground">Zonas detectadas</p>
-          <ul className="max-h-40 space-y-1 overflow-y-auto text-xs text-muted-foreground">
+          <ul className="max-h-28 space-y-1 overflow-y-auto text-xs text-muted-foreground">
             {zone.zonas.map((z) => (
               <li key={z}>{z}</li>
             ))}
           </ul>
+
+          <div className="space-y-1.5 border-t border-border pt-3">
+            <p className="text-xs font-medium text-foreground">¿Dónde buscamos?</p>
+            <SourceSelector value={selection} onChange={setSelection} />
+            <p className="text-[11px] text-muted-foreground">
+              {isSelectionEmpty(selection)
+                ? 'Elegí al menos una fuente para buscar'
+                : `Buscando en: ${describeSelection(selection)}`}
+            </p>
+          </div>
+
           <p className="text-xs text-muted-foreground">
             hasta ~{zone.estimatedActors} actores
           </p>
@@ -426,8 +473,9 @@ export default function PropertyMap({
               Cancelar
             </button>
             <button
-              onClick={() => zone.confirmRun(vertices)}
-              className="rounded-lg bg-foreground px-3 py-1.5 text-xs font-medium text-background shadow-sm"
+              onClick={() => zone.confirmRun(vertices, selection)}
+              disabled={isSelectionEmpty(selection)}
+              className="rounded-lg bg-foreground px-3 py-1.5 text-xs font-medium text-background shadow-sm disabled:opacity-40"
             >
               Buscar (~{zone.estimatedActors} actores)
             </button>
@@ -479,6 +527,9 @@ export default function PropertyMap({
               >
                 Ver grilla completa
               </a>
+            )}
+            {zone.savedEntryId && (
+              <SaveSearchPanel entryId={zone.savedEntryId} defaultName={zone.runQuery} />
             )}
           </div>
         )}

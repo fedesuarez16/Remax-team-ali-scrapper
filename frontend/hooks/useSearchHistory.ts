@@ -86,9 +86,9 @@ export async function addSearch(
   zona?: string,
   job_id?: string,
   folder_id?: string | null,
-): Promise<void> {
+): Promise<string | null> {
   const trimmed = query.trim()
-  if (!trimmed) return
+  if (!trimmed) return null
 
   try {
     const body: Record<string, unknown> = { query: trimmed, zona, job_id }
@@ -98,11 +98,16 @@ export async function addSearch(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-    if (!res.ok) return
+    if (!res.ok) return null
+    const data = await res.json()
     await fetchHistory()
     notify()
+    // Returned so callers (the map's inline save panel) can PATCH label/folder
+    // on the just-saved row. Upsert-by-query returns the same id on re-runs.
+    return (data.entry?.id as string) ?? null
   } catch {
     // Swallow — sidebar keeps its last known list, submit flow is unaffected.
+    return null
   }
 }
 
