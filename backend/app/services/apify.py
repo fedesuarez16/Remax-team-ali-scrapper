@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import re
 import random
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any, Awaitable, Callable, Iterable, Iterator, Mapping
 
 import httpx
 
@@ -33,8 +35,10 @@ _ML_MAX_PAGES = 5           # 5 × 50 = 250 results max
 # ── RE/MAX public REST API (no Apify) — same undocumented-but-open API its own
 # Angular frontend calls (confirmed via live requests, no auth required) ──────
 _REMAX_API_BASE = 'https://api-ar.redremax.com/remaxweb-ar/api'
-_REMAX_MAX_PAGES = 5   # 5 × 20 = 100 results max
-_REMAX_PAGE_SIZE = 20
+# Paging depth is a cost/latency knob, not a portal constraint (RE/MAX serves
+# far more than 5 pages) — see `settings.REMAX_MAX_PAGES` / `REMAX_PAGE_SIZE`.
+# Unlike Argenprop there is no robots.txt page ceiling, so `0` means uncapped:
+# page until `totalPages` is exhausted.
 # Location autocomplete (what remax.com.ar's own search box calls — public,
 # verified live) + resolved `locations` filter cache.
 _REMAX_LOCATION_CACHE: dict[str, str | None] = {}
@@ -97,6 +101,53 @@ _ARGENPROP_URL_SLUG: dict[str, str] = {
 _APIFY_BASE = 'https://api.apify.com/v2'
 _POLL_INTERVAL = 3.0   # seconds between status checks
 _TIMEOUT = 300         # max seconds to wait for a run
+
+# ── Per-search spend ledger ────────────────────────────────────────────────────
+#
+# Apify puts `usageTotalUsd` on every run object; we book it while polling so no
+# extra request is needed. The tally CANNOT live on the service instance:
+# `get_apify_service()` builds a fresh `ApifyService` on every call and one job
+# calls it several times (portales, agencias, instagram). So it lives in a
+# ContextVar set once per search — child tasks inherit the same dict object, so
+# parallel/nested scrapes all land in one tally.
+#
+# Shape: {source: {'usd': float, 'runs': int}}. A source that never hit an actor
+# (mercadolibre and remax go direct; agency cache hits skip Apify) has NO entry —
+# that absence is precisely what makes a free search readable as free.
+
+_COST_LEDGER: contextvars.ContextVar[dict[str, dict[str, Any]] | None] = contextvars.ContextVar(
+    'apify_cost_ledger', default=None,
+)
+
+
+@contextmanager
+def use_cost_ledger(ledger: dict[str, dict[str, Any]]) -> Iterator[None]:
+    """Book every actor run started inside this block into `ledger`.
+
+    The caller owns the dict so it can read the tally from a different task
+    (the SSE generator writes the job row, the graph task spends the money).
+    """
+    token = _COST_LEDGER.set(ledger)
+    try:
+        yield
+    finally:
+        _COST_LEDGER.reset(token)
+
+
+def record_run_cost(source: str, usd: float | None) -> None:
+    """Book one finished actor run. No-op outside a search (ficha/importer paths)."""
+    ledger = _COST_LEDGER.get()
+    if ledger is None:
+        return
+    entry = ledger.setdefault(source, {'usd': 0.0, 'runs': 0})
+    entry['runs'] += 1
+    entry['usd'] = round(entry['usd'] + float(usd or 0.0), 6)
+
+
+def ledger_total_usd(ledger: Mapping[str, Mapping[str, Any]]) -> float:
+    """Total USD across sources, rounded to the job column's 4 decimals."""
+    return round(sum(float(e.get('usd') or 0.0) for e in ledger.values()), 4)
+
 
 # ── Normalisation helpers ──────────────────────────────────────────────────────
 
@@ -689,6 +740,8 @@ async def _scrape_remax_api(
     filters: ScrapingFilters,
     on_progress: ProgressCb,
 ) -> list[RawProperty]:
+    from app.core.config import settings
+
     zona = filters.zona or 'Buenos Aires'
     op_id = 2 if filters.tipo_operacion == 'alquiler' else 1
     tipos = filters.tipos_propiedad or []
@@ -705,11 +758,15 @@ async def _scrape_remax_api(
 
     await on_progress('remax', 'running', 0)
 
+    max_pages = settings.REMAX_MAX_PAGES   # 0 = uncapped
+    page_size = max(1, settings.REMAX_PAGE_SIZE)
+
     results: list[RawProperty] = []
     async with httpx.AsyncClient(timeout=20) as client:
-        for page in range(_REMAX_MAX_PAGES):
+        page = 0
+        while max_pages <= 0 or page < max_pages:
             params: dict[str, Any] = {
-                'page': page, 'pageSize': _REMAX_PAGE_SIZE,
+                'page': page, 'pageSize': page_size,
                 'sort': '-createdAt', 'in': in_params,
             }
             if location:
@@ -741,8 +798,8 @@ async def _scrape_remax_api(
 
             if page + 1 >= paging.get('totalPages', 0):
                 break
-            if page < _REMAX_MAX_PAGES - 1:
-                await on_progress('remax', 'running', len(results))
+            page += 1
+            await on_progress('remax', 'running', len(results))
 
     await on_progress('remax', 'done', len(results))
     return results
@@ -1209,19 +1266,28 @@ class ApifyService(BaseApifyService):
         resp.raise_for_status()
         run_id = resp.json()['data']['id']
 
-        # Poll until done
+        # Poll until done. The run object we poll already carries `usageTotalUsd`,
+        # so booking the spend costs no extra request — just don't discard it.
         status_url = f'{_APIFY_BASE}/actor-runs/{run_id}'
         elapsed = 0.0
+        run_data: dict[str, Any] = {}
         while elapsed < _TIMEOUT:
             await asyncio.sleep(_POLL_INTERVAL)
             elapsed += _POLL_INTERVAL
             status_resp = await self._client.get(status_url, params=params)
             status_resp.raise_for_status()
-            status = status_resp.json()['data']['status']
+            run_data = status_resp.json()['data']
+            status = run_data['status']
             if status == 'SUCCEEDED':
                 break
             if status in ('FAILED', 'ABORTED', 'TIMED-OUT'):
+                # Apify bills failed runs too — book the spend before bailing out.
+                record_run_cost(source, run_data.get('usageTotalUsd'))
                 raise RuntimeError(f'Apify run {run_id} ended with status {status}')
+
+        # Reached on SUCCEEDED and on poll-timeout alike; on timeout this books
+        # the usage as of the last poll, which is the truest number we have.
+        record_run_cost(source, run_data.get('usageTotalUsd'))
 
         # Fetch dataset
         dataset_url = f'{_APIFY_BASE}/actor-runs/{run_id}/dataset/items'

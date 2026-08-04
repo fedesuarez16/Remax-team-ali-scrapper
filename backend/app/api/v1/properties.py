@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -178,8 +179,11 @@ _IMPORT_MAX_URLS = 10
 async def import_properties(request: Request, body: dict) -> dict[str, Any]:
     """Ficha Propio — import portal listing URLs into the own-brand catalog.
 
-    Body: ``{"urls": ["https://..."]}``. Each URL is processed independently;
-    a failing page yields a per-URL error without aborting the batch.
+    Body: ``{"urls": ["https://..."], "agente_email": "..."}``. Each URL is
+    processed independently; a failing page yields a per-URL error without
+    aborting the batch. ``agente_email`` (optional) is the team agent the ficha
+    is generated under — it is stamped on every property of the batch, also on
+    re-imports, because re-generating a ficha means re-assigning its agent.
 
     NOTE: declared before the `/{property_id}` catch-all, like `/map`.
     """
@@ -194,13 +198,34 @@ async def import_properties(request: Request, body: dict) -> dict[str, Any]:
     if len(urls) > _IMPORT_MAX_URLS:
         raise HTTPException(status_code=400, detail=f'Máximo {_IMPORT_MAX_URLS} links por vez')
 
+    agente_email = body.get('agente_email')
+    if not isinstance(agente_email, str) or not agente_email.strip():
+        agente_email = None
+    else:
+        agente_email = agente_email.strip()
+
     results: list[dict[str, Any]] = []
     for u in urls:
         try:
             r = await _import_property(sb, u)
+            prop = r['property']
+            if agente_email and prop.get('id') and prop.get('agente_email') != agente_email:
+                try:
+                    upd = await (
+                        sb.table('properties')
+                        .update({'agente_email': agente_email})
+                        .eq('id', prop['id'])
+                        .execute()
+                    )
+                    if upd.data:
+                        prop = upd.data[0]
+                except Exception as exc:
+                    # Columna sin migrar o tabla caída: la ficha sale igual,
+                    # con el titular por defecto en vez del agente elegido.
+                    logging.getLogger(__name__).warning('agente_email update failed: %s', exc)
             results.append({
                 'url': u, 'status': 'ok',
-                'created': r['created'], 'property': r['property'],
+                'created': r['created'], 'property': prop,
             })
         except Exception as e:
             results.append({'url': u, 'status': 'error', 'error': str(e)})
@@ -240,6 +265,49 @@ async def mark_properties_sent(request: Request, body: dict) -> dict[str, Any]:
     return {'updated': len(rows), 'properties': rows}
 
 
+@router.get('/ficha-propio/stats')
+async def ficha_propio_stats(request: Request) -> dict[str, Any]:
+    """Contadores automáticos de la solapa Ficha Propio.
+
+    Ambos números son DERIVADOS, nunca mantenidos a mano, así que no pueden
+    quedar desfasados: la cantidad sale de contar las propiedades `fuente='manual'`
+    y el gasto de sumar `llm_usage` con scope `ficha_propio`. Cada generación los
+    mueve sola.
+
+    NOTE: declarado antes del catch-all `/{property_id}` — si no, FastAPI
+    resolvería 'ficha-propio' como un id de propiedad.
+    """
+    sb = request.app.state.supabase
+    if sb is None:
+        return {'total_fichas': 0, 'gasto_usd': 0.0, 'llamadas': 0}
+
+    total_fichas = 0
+    try:
+        res = await (
+            sb.table('properties')
+            .select('id', count='exact')
+            .eq('fuente', 'manual')
+            .execute()
+        )
+        # PostgREST devuelve `count` con count='exact'; si no viene, contamos filas.
+        total_fichas = res.count if getattr(res, 'count', None) is not None else len(res.data or [])
+    except Exception as exc:
+        logging.getLogger(__name__).warning('ficha propio count failed: %s', exc)
+
+    gasto = 0.0
+    llamadas = 0
+    try:
+        res = await sb.table('llm_usage').select('cost_usd').eq('scope', 'ficha_propio').execute()
+        rows = res.data or []
+        llamadas = len(rows)
+        gasto = round(sum(float(r.get('cost_usd') or 0.0) for r in rows), 6)
+    except Exception as exc:
+        # Migración sin aplicar o tabla caída: el contador de fichas igual se muestra.
+        logging.getLogger(__name__).warning('ficha propio spend failed: %s', exc)
+
+    return {'total_fichas': total_fichas, 'gasto_usd': gasto, 'llamadas': llamadas}
+
+
 @router.get('/{property_id}')
 async def get_property(property_id: str, request: Request) -> dict[str, Any]:
     """Fetch a single property by id — backs the shareable per-property ficha page."""
@@ -261,7 +329,7 @@ _EDITABLE_FIELDS = {
     'titulo', 'descripcion', 'direccion', 'precio', 'moneda',
     'tipo_operacion', 'tipo_propiedad', 'ambientes', 'banos', 'cocheras',
     'piso', 'expensas', 'm2_total', 'antiguedad', 'amenities', 'imagenes',
-    'destacados',
+    'destacados', 'agente_email',
 }
 
 

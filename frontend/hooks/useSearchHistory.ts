@@ -4,6 +4,11 @@ const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 const HISTORY_URL = `${API}/api/v1/search-history`
 const FOLDERS_URL = `${HISTORY_URL}/folders`
 
+/** Per-source Apify tally: `{ zonaprop: { usd, runs } }`. ZonaProp runs one
+ *  actor per listing page, so `runs` > 1 is normal. A source missing from the
+ *  object never reached Apify (direct scrape or cache hit). */
+export type ApifyCostBreakdown = Record<string, { usd: number; runs: number }>
+
 export type SearchEntry = {
   id: string
   query: string
@@ -12,6 +17,10 @@ export type SearchEntry = {
   label?: string | null
   folder_id?: string | null
   date: string
+  /** USD billed by Apify for this search. `0` means it really was free;
+   *  `null`/undefined means unknown (chat entry, or job predates the column). */
+  apify_cost_usd?: number | null
+  apify_cost_breakdown?: ApifyCostBreakdown | null
 }
 
 export type Folder = {
@@ -28,9 +37,14 @@ type SearchHistoryRow = {
   label?: string | null
   folder_id?: string | null
   created_at: string
+  apify_cost_usd?: number | string | null
+  apify_cost_breakdown?: ApifyCostBreakdown | null
 }
 
 function mapRow(row: SearchHistoryRow): SearchEntry {
+  // Postgres `numeric` arrives as a string over PostgREST — coerce, but keep
+  // null/undefined distinct from 0 ("unknown" vs "this search was free").
+  const cost = row.apify_cost_usd
   return {
     id: row.id,
     query: row.query,
@@ -39,6 +53,8 @@ function mapRow(row: SearchHistoryRow): SearchEntry {
     label: row.label ?? null,
     folder_id: row.folder_id ?? null,
     date: row.created_at,
+    apify_cost_usd: cost === null || cost === undefined ? null : Number(cost),
+    apify_cost_breakdown: row.apify_cost_breakdown ?? null,
   }
 }
 

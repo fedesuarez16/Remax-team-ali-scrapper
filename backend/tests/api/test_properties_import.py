@@ -107,8 +107,10 @@ def patched_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_fetch(url: str) -> tuple[str, list[str]]:
         return 'texto de la ficha ' * 20, [f'{url}/foto1.jpg', f'{url}/foto2.jpg']
 
-    async def fake_llm(url: str, text: str) -> dict[str, Any] | None:
-        return dict(_EXTRACTED)
+    async def fake_llm(url: str, text: str) -> tuple[dict[str, Any] | None, Any]:
+        # `(data, usage)`: el import bookea el gasto de la llamada aparte de usar
+        # el resultado. usage=None ⇒ se bookea 0 y no ensucia estos asserts.
+        return dict(_EXTRACTED), None
 
     async def fake_harvest(urls: list[str], render_budget: int = 8) -> dict[str, list[str]]:
         return {u: [f'{u}/g{i}.jpg' for i in range(6)] for u in urls}
@@ -196,8 +198,10 @@ async def test_import_rejects_non_http_urls(patched_seams: None) -> None:
 async def test_import_errors_when_page_has_no_property(
     patched_seams: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def no_prop(url: str, text: str) -> dict[str, Any] | None:
-        return None
+    async def no_prop(url: str, text: str) -> tuple[dict[str, Any] | None, Any]:
+        # La página no tiene propiedad, pero Anthropic ya cobró la llamada: por eso
+        # el seam devuelve usage igual que en el camino feliz.
+        return None, None
 
     monkeypatch.setattr(importer, '_extract_llm', no_prop)
     fake_sb = _FakeSupabase()

@@ -21,6 +21,7 @@ from anthropic import AsyncAnthropic
 from app.core.config import settings
 from app.models.property import NormalizedProperty
 from app.services.apify import _extract_images_from_html, harvest_page_images
+from app.services.llm_costs import record_llm_usage
 from app.services.zona import normalize_address
 
 MODEL = 'claude-haiku-4-5-20251001'
@@ -98,8 +99,13 @@ async def _fetch_page(url: str) -> tuple[str, list[str]]:
     return text[:8000], imgs
 
 
-async def _extract_llm(url: str, text: str) -> dict[str, Any] | None:
-    """LLM-extract the single property described by ``text``; None if absent."""
+async def _extract_llm(url: str, text: str) -> tuple[dict[str, Any] | None, Any]:
+    """LLM-extract the single property described by ``text``.
+
+    Returns ``(data, usage)`` — data is None when the page holds no property, but
+    the usage comes back either way: Anthropic bills the call whether or not we
+    found something, so the caller books it regardless.
+    """
     msg = await _client.messages.create(  # type: ignore[call-overload]
         model=MODEL,
         max_tokens=1024,
@@ -108,10 +114,11 @@ async def _extract_llm(url: str, text: str) -> dict[str, Any] | None:
         tool_choice={'type': 'tool', 'name': 'extract_property_ficha'},
         messages=[{'role': 'user', 'content': f'Ficha: {url}\n\n{text}'}],
     )
+    usage = getattr(msg, 'usage', None)
     tool_use = next((b for b in msg.content if b.type == 'tool_use'), None)
     if not tool_use or not tool_use.input.get('encontrada'):
-        return None
-    return dict(tool_use.input)
+        return None, usage
+    return dict(tool_use.input), usage
 
 
 def _normalize_tipo_propiedad(valor: str | None) -> str:
@@ -140,7 +147,10 @@ async def import_property_from_url(sb: Any, url: str) -> dict[str, Any]:
     if len(text) < 100:
         raise RuntimeError('La página no tiene contenido legible')
 
-    data = await _extract_llm(url, text)
+    data, usage = await _extract_llm(url, text)
+    # Se bookea SIEMPRE, encuentre o no la propiedad: Anthropic cobra la llamada
+    # igual, y un contador que sólo suma los aciertos subestima el gasto real.
+    await record_llm_usage(sb, scope='ficha_propio', model=MODEL, usage=usage, url=url)
     if not data:
         raise RuntimeError('No se encontró una propiedad en esa página')
 

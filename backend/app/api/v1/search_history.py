@@ -13,6 +13,38 @@ router = APIRouter()
 CAP = 20
 
 
+async def _attach_apify_costs(sb: Any, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Decorate each entry with what its search cost on Apify.
+
+    Best-effort by design: cost is a nice-to-have, the history listing is not.
+    A missing migration, an unreadable job or a chat-originated entry (no
+    `job_id`) leaves the entry untouched — the UI reads that as "sin dato",
+    which is NOT the same as the meaningful `0.0` a cache-served search stores.
+    """
+    job_ids = [h['job_id'] for h in history if h.get('job_id')]
+    if not job_ids:
+        return history
+
+    try:
+        res = await (
+            sb.table('scraping_jobs')
+            .select('id,apify_cost_usd,apify_cost_breakdown')
+            .in_('id', job_ids)
+            .execute()
+        )
+    except Exception:
+        return history
+
+    jobs = {row['id']: row for row in (res.data or [])}
+    for entry in history:
+        job = jobs.get(entry.get('job_id') or '')
+        if job is None:
+            continue
+        entry['apify_cost_usd'] = job.get('apify_cost_usd')
+        entry['apify_cost_breakdown'] = job.get('apify_cost_breakdown')
+    return history
+
+
 @router.get('')
 async def list_search_history(request: Request) -> dict[str, Any]:
     """List saved search-history entries, most-recent-first, capped at CAP."""
@@ -29,6 +61,7 @@ async def list_search_history(request: Request) -> dict[str, Any]:
             .execute()
         )
         history = res.data or []
+        history = await _attach_apify_costs(sb, history)
         return {'history': history, 'total': len(history)}
     except Exception as e:
         return {'history': [], 'total': 0, 'error': str(e)}

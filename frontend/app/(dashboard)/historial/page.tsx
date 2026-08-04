@@ -4,6 +4,40 @@ import { useRouter } from 'next/navigation'
 import { Folder as FolderIcon, FolderPlus, Pencil, Search, Trash2 } from 'lucide-react'
 import { useSearchHistory, type SearchEntry } from '@/hooks/useSearchHistory'
 
+const usd = (n: number) => `US$ ${n.toFixed(4)}`
+
+/** Hover detail: which portal burned the credits, and over how many actor runs. */
+const costTitle = (entry: SearchEntry) => {
+  const rows = Object.entries(entry.apify_cost_breakdown ?? {})
+  if (rows.length === 0) {
+    return 'Sin runs de Apify: servida desde caché o desde fuentes directas (MercadoLibre, RE/MAX)'
+  }
+  return rows
+    .map(([source, { usd: u, runs }]) => `${source}: ${usd(u)} (${runs} run${runs === 1 ? '' : 's'})`)
+    .join('\n')
+}
+
+const sumCost = (entries: SearchEntry[]) =>
+  entries.reduce((acc, e) => acc + (e.apify_cost_usd ?? 0), 0)
+
+const CostChip = ({ entry }: { entry: SearchEntry }) => {
+  const cost = entry.apify_cost_usd
+  // null/undefined = unknown (entrada de chat, o job anterior a la columna).
+  // Mostrar "US$ 0" ahí sería mentir; mejor no mostrar nada.
+  if (cost === null || cost === undefined) return null
+  const free = cost === 0
+  return (
+    <span
+      title={costTitle(entry)}
+      className={`shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[11px] tabular-nums ${
+        free ? 'bg-muted text-muted-foreground' : 'bg-amber-500/10 text-amber-700 dark:text-amber-400'
+      }`}
+    >
+      {free ? 'US$ 0' : usd(cost)}
+    </span>
+  )
+}
+
 export default function HistorialPage() {
   const { searches, folders, updateEntry, deleteEntry, createFolder, loading } = useSearchHistory()
   const router = useRouter()
@@ -59,6 +93,7 @@ export default function HistorialPage() {
           <button onClick={() => navigate(entry)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
             <Search className="size-3.5 shrink-0 text-muted-foreground" />
             <span className="truncate text-sm text-foreground">{displayLabel}</span>
+            <CostChip entry={entry} />
           </button>
         )}
         <div className="hidden shrink-0 items-center gap-1 group-hover:flex">
@@ -153,8 +188,13 @@ export default function HistorialPage() {
                       <FolderIcon className="size-4 text-muted-foreground" />
                       {f.name}
                     </span>
-                    <span className="text-xs text-muted-foreground">
-                      {entries.length} búsqueda{entries.length === 1 ? '' : 's'}
+                    <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span>
+                        {entries.length} búsqueda{entries.length === 1 ? '' : 's'}
+                      </span>
+                      <span className="font-mono tabular-nums" title="Gasto total en Apify de esta carpeta">
+                        {usd(sumCost(entries))}
+                      </span>
                     </span>
                   </button>
                   {isOpen && (
@@ -174,8 +214,13 @@ export default function HistorialPage() {
               <div className="rounded-2xl border border-border bg-card">
                 <div className="flex items-center justify-between px-4 py-3">
                   <span className="text-sm font-medium text-foreground">Sin carpeta</span>
-                  <span className="text-xs text-muted-foreground">
-                    {ungrouped.length} búsqueda{ungrouped.length === 1 ? '' : 's'}
+                  <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span>
+                      {ungrouped.length} búsqueda{ungrouped.length === 1 ? '' : 's'}
+                    </span>
+                    <span className="font-mono tabular-nums" title="Gasto total en Apify de estas búsquedas">
+                      {usd(sumCost(ungrouped))}
+                    </span>
                   </span>
                 </div>
                 <ul className="space-y-1.5 border-t border-border p-3">{ungrouped.map(renderEntry)}</ul>

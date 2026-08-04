@@ -6,7 +6,10 @@ import {
   Mail, MapPin, MessageCircle, Phone, Ruler, Share2, Sparkles,
 } from 'lucide-react'
 import type { Property } from '@/hooks/useSSEStream'
-import { AGENTE } from '@/lib/ficha'
+import {
+  AGENTE, DISCLAIMER_LEGAL, TEXTO_SELECCION,
+  agenteByEmail, facebookUrl, instagramUrl, whatsappUrl, type Agente,
+} from '@/lib/ficha'
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
@@ -17,11 +20,13 @@ function fmtPrice(p: Property) {
 }
 
 function Feature({ icon: Icon, value, label }: { icon: typeof Bath; value: string; label: string }) {
+  // min-w-0 + break-words: los "destacados" traen textos libres del LLM que
+  // pueden ser largos — tienen que envolver dentro de la card, nunca pisarse.
   return (
-    <div className="flex flex-col items-center gap-1 rounded-xl border border-border bg-card px-3 py-3 text-center">
-      <Icon className="size-5 text-foreground" />
-      <span className="text-sm font-semibold text-foreground">{value}</span>
-      <span className="text-[11px] text-muted-foreground">{label}</span>
+    <div className="flex min-w-0 flex-col items-center justify-center gap-1 rounded-xl border border-border bg-card px-2.5 py-3 text-center">
+      <Icon className="size-5 shrink-0 text-foreground" />
+      <span className="w-full break-words text-sm font-semibold leading-snug text-foreground">{value}</span>
+      <span className="w-full break-words text-[11px] leading-tight text-muted-foreground">{label}</span>
     </div>
   )
 }
@@ -63,24 +68,51 @@ function Gallery({ imgs, title }: { imgs: string[]; title: string }) {
   )
 }
 
-function ContactCard({ p }: { p: Property }) {
-  const waDigits = AGENTE.telefono.replace(/\D/g, '')
-  const waText = encodeURIComponent(`Hola ${AGENTE.nombre}, me interesa la propiedad "${p.titulo ?? p.direccion}" (${fmtPrice(p)}). ¿Sigue disponible?`)
+// lucide-react 1.x sacó los íconos de marca, así que van inline en vez de sumar
+// una dependencia sólo por dos glifos.
+function InstagramIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+      strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <rect width="20" height="20" x="2" y="2" rx="5" />
+      <circle cx="12" cy="12" r="4" />
+      <circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
+function FacebookIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+      strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3z" />
+    </svg>
+  )
+}
+
+function AgenteCard({ a, p }: { a: Agente; p: Property }) {
+  const waDigits = a.telefono.replace(/\D/g, '')
+  const waUrl = whatsappUrl(
+    a.telefono,
+    `Hola ${a.nombre}, me interesa la propiedad "${p.titulo ?? p.direccion}" (${fmtPrice(p)}). ¿Sigue disponible?`,
+  )
 
   return (
-    <div className="space-y-4 rounded-2xl border border-border bg-card p-5">
+    <div className="space-y-3 rounded-2xl border border-border bg-card p-5">
       <div className="flex items-center gap-3">
         <div className="flex size-11 items-center justify-center rounded-xl bg-foreground">
           <Building2 className="size-5 text-background" />
         </div>
-        <div>
-          <p className="text-sm font-semibold text-foreground">{AGENTE.inmobiliaria}</p>
-          <p className="text-xs text-muted-foreground">{AGENTE.nombre} · {AGENTE.matricula}</p>
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-foreground">
+            {a.nombre} <span className="font-normal text-muted-foreground">| {a.inmobiliaria}</span>
+          </p>
+          <p className="truncate text-xs text-muted-foreground">{a.cargo}</p>
         </div>
       </div>
 
       <a
-        href={`https://wa.me/${waDigits}?text=${waText}`}
+        href={waUrl}
         target="_blank"
         rel="noopener"
         className="flex w-full items-center justify-center gap-2 rounded-xl bg-foreground px-4 py-2.5 text-sm font-medium text-background transition hover:bg-foreground/85"
@@ -89,14 +121,54 @@ function ContactCard({ p }: { p: Property }) {
         Consultar por WhatsApp
       </a>
 
-      <div className="space-y-2 text-sm">
+      {a.redes && (
+        <div className="flex gap-2">
+          <a
+            href={instagramUrl(a)}
+            target="_blank"
+            rel="noopener"
+            title={`Instagram de ${a.nombre}`}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition hover:bg-muted"
+          >
+            <InstagramIcon className="size-3.5" />
+            Instagram
+          </a>
+          <a
+            href={facebookUrl(a)}
+            target="_blank"
+            rel="noopener"
+            title={`Facebook de ${a.nombre}`}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition hover:bg-muted"
+          >
+            <FacebookIcon className="size-3.5" />
+            Facebook
+          </a>
+        </div>
+      )}
+
+      <div className="space-y-1.5 text-sm">
         <a href={`tel:${waDigits}`} className="flex items-center gap-2 text-foreground transition hover:text-muted-foreground">
-          <Phone className="size-4 text-muted-foreground" />{AGENTE.telefono}
+          <Phone className="size-4 shrink-0 text-muted-foreground" />
+          {a.telefono}
         </a>
-        <a href={`mailto:${AGENTE.email}`} className="flex items-center gap-2 text-foreground transition hover:text-muted-foreground">
-          <Mail className="size-4 text-muted-foreground" />{AGENTE.email}
+        <a href={`mailto:${a.email}`} className="flex items-center gap-2 text-foreground transition hover:text-muted-foreground">
+          <Mail className="size-4 shrink-0 text-muted-foreground" />
+          <span className="truncate">{a.email}</span>
         </a>
       </div>
+    </div>
+  )
+}
+
+function ContactColumn({ p }: { p: Property }) {
+  // Un único contacto: el agente a cuyo nombre se generó esta ficha.
+  const a = agenteByEmail(p.agente_email)
+  return (
+    <div className="space-y-4">
+      <div className="rounded-2xl border border-border bg-muted/40 p-4">
+        <p className="text-sm leading-relaxed text-foreground">{TEXTO_SELECCION}</p>
+      </div>
+      <AgenteCard a={a} p={p} />
     </div>
   )
 }
@@ -227,7 +299,9 @@ export default function PublicListingPage() {
             <Gallery imgs={p.imagenes ?? []} title={p.titulo ?? p.direccion} />
 
             {features.length > 0 && (
-              <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+              /* auto-fit: las cards se reparten según cuántas haya y ninguna
+                 queda tan angosta como para que el texto desborde. */
+              <div className="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(6.5rem,1fr))]">
                 {features.map((f) => <Feature key={f.label} {...f} />)}
               </div>
             )}
@@ -256,17 +330,24 @@ export default function PublicListingPage() {
           {/* Contact column */}
           <aside className="lg:col-span-1">
             <div className="lg:sticky lg:top-20">
-              <ContactCard p={p} />
+              <ContactColumn p={p} />
             </div>
           </aside>
         </div>
       </main>
 
       <footer className="mt-8 border-t border-border">
-        <div className="mx-auto max-w-5xl px-4 py-6 text-xs text-muted-foreground">
-          <p className="font-medium text-foreground">{AGENTE.inmobiliaria}</p>
-          <p className="mt-0.5">{AGENTE.nombre} · {AGENTE.matricula} · {AGENTE.telefono}</p>
-          <p className="mt-2">Publicación generada por {AGENTE.inmobiliaria}. La información puede estar sujeta a modificaciones sin previo aviso.</p>
+        <div className="mx-auto max-w-5xl space-y-3 px-4 py-6 text-xs text-muted-foreground">
+          <div>
+            <p className="font-medium text-foreground">{AGENTE.firma}</p>
+            <p className="mt-0.5">{AGENTE.colegiatura}</p>
+          </div>
+          {/* Descargo normativo — obligatorio en toda Ficha Propio. */}
+          <p className="leading-relaxed">{DISCLAIMER_LEGAL}</p>
+          <p>
+            Publicación generada por {AGENTE.inmobiliaria}. La información puede estar sujeta a
+            modificaciones sin previo aviso.
+          </p>
         </div>
       </footer>
     </div>

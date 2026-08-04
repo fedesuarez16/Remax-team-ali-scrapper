@@ -19,6 +19,8 @@ export type Property = {
   lat?: number | null; lng?: number | null
   /** Instante en que se preparó/envió al cliente. null = todavía no enviada. */
   enviada_at?: string | null
+  /** Email del agente del equipo a cuyo nombre se generó la Ficha Propio. */
+  agente_email?: string | null
 }
 export type SourceStatus = 'pending' | 'running' | 'done' | 'error'
 export type ProgressMap = Record<string, { status: SourceStatus; count: number; message: string }>

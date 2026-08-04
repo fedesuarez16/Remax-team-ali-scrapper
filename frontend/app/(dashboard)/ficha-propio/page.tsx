@@ -1,11 +1,11 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   Check, ChevronDown, ChevronUp, Copy, ExternalLink, FileText, Link2, Loader2,
-  Pencil, Send, Sparkles,
+  Pencil, Send, Sparkles, UserRound,
 } from 'lucide-react'
 import type { Property } from '@/hooks/useSSEStream'
-import { AGENTE, enrichFicha, fichaUrl } from '@/lib/ficha'
+import { AGENTES, agenteByEmail, enrichFicha, fichaUrl } from '@/lib/ficha'
 import { PropertyFicha, fmtPrice } from '@/components/ficha/PropertyFicha'
 import { FichaEditor } from '@/components/ficha/FichaEditor'
 
@@ -14,6 +14,98 @@ const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 type ImportResult =
   | { url: string; status: 'ok'; created: boolean; property: Property }
   | { url: string; status: 'error'; error: string }
+
+type Stats = { total_fichas: number; gasto_usd: number; llamadas: number }
+
+/** Contadores automáticos: ambos números los deriva el backend (fichas =
+ *  propiedades `fuente='manual'`, gasto = suma real de tokens facturados), así
+ *  que no hay nada que mantener a mano ni que se pueda desfasar. */
+function StatsBar({ stats, loading }: { stats: Stats | null; loading: boolean }) {
+  const cells: { label: string; value: string; hint?: string }[] = [
+    {
+      label: 'Fichas Propio generadas',
+      value: loading || !stats ? '—' : String(stats.total_fichas),
+    },
+    {
+      label: 'Gasto acumulado',
+      value: loading || !stats ? '—' : `US$ ${stats.gasto_usd.toFixed(4)}`,
+      hint: stats ? `${stats.llamadas} llamada${stats.llamadas === 1 ? '' : 's'} al modelo` : undefined,
+    },
+  ]
+
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      {cells.map((c) => (
+        <div key={c.label} className="rounded-2xl border border-border bg-card p-4">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            {c.label}
+          </p>
+          <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-foreground">
+            {c.value}
+          </p>
+          {c.hint && <p className="mt-0.5 text-[11px] text-muted-foreground">{c.hint}</p>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** Selector del agente a cuyo nombre sale la ficha. Es EXCLUYENTE (uno solo):
+ *  la ficha pública muestra el contacto de un único agente del equipo. */
+function AgenteSelector({
+  selected,
+  onSelect,
+  disabled,
+}: {
+  selected: string
+  onSelect: (email: string) => void
+  disabled: boolean
+}) {
+  return (
+    <fieldset disabled={disabled}>
+      <legend className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Agente de la ficha
+      </legend>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {AGENTES.map((a) => {
+          const active = a.email === selected
+          return (
+            <button
+              key={a.email}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              onClick={() => onSelect(a.email)}
+              className={`relative flex items-start gap-2.5 rounded-xl border p-3 text-left transition disabled:opacity-60 ${
+                active
+                  ? 'border-foreground bg-foreground/5 ring-1 ring-foreground'
+                  : 'border-border bg-background hover:bg-muted/50'
+              }`}
+            >
+              <div
+                className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${
+                  active ? 'bg-foreground text-background' : 'bg-muted text-muted-foreground'
+                }`}
+              >
+                <UserRound className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-foreground">{a.nombre}</p>
+                <p className="truncate text-[11px] text-muted-foreground">{a.cargo}</p>
+                <p className="truncate text-[11px] text-muted-foreground">{a.telefono}</p>
+              </div>
+              {active && (
+                <span className="absolute right-2 top-2 flex size-4 items-center justify-center rounded-full bg-foreground">
+                  <Check className="size-3 text-background" />
+                </span>
+              )}
+            </button>
+          )
+        })}
+      </div>
+    </fieldset>
+  )
+}
 
 function FichaRow({
   p,
@@ -39,8 +131,11 @@ function FichaRow({
     }
   }
 
+  // Firma del mensaje = el agente asignado a ESTA ficha, no el titular global.
+  const agente = agenteByEmail(p.agente_email)
+
   const enviarWhatsApp = () => {
-    const texto = `Hola! Te comparto esta propiedad:\n\n• ${p.titulo ?? p.direccion} — ${fmtPrice(p)}\n  ${url}\n\n${AGENTE.nombre} · ${AGENTE.inmobiliaria}\n${AGENTE.telefono}`
+    const texto = `Hola! Te comparto esta propiedad:\n\n• ${p.titulo ?? p.direccion} — ${fmtPrice(p)}\n  ${url}\n\n${agente.nombre} · ${agente.inmobiliaria}\n${agente.telefono}`
     window.open(`https://wa.me/?text=${encodeURIComponent(texto)}`, '_blank', 'noopener')
   }
 
@@ -57,6 +152,10 @@ function FichaRow({
             {p.direccion ? ` · ${p.direccion}` : ''}
           </p>
         </div>
+        <span className="hidden shrink-0 items-center gap-1 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[11px] text-muted-foreground sm:flex">
+          <UserRound className="size-3" />
+          {agente.nombre}
+        </span>
         <button
           onClick={enviarWhatsApp}
           className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground transition hover:bg-muted"
@@ -151,8 +250,25 @@ export default function FichaPropioPage() {
   const [newIds, setNewIds] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
   const [raw, setRaw] = useState('')
+  // Agente a cuyo nombre se genera la ficha. Titular por defecto.
+  const [agenteEmail, setAgenteEmail] = useState<string>(AGENTES[0].email)
   const [importing, setImporting] = useState(false)
   const [errors, setErrors] = useState<{ url: string; error: string }[]>([])
+  const [stats, setStats] = useState<Stats | null>(null)
+  const [statsLoading, setStatsLoading] = useState(true)
+
+  // Se llama al montar y después de cada generación: así los contadores se
+  // actualizan solos, sin que el usuario tenga que refrescar.
+  const refreshStats = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/api/v1/properties/ficha-propio/stats`)
+      if (res.ok) setStats((await res.json()) as Stats)
+    } catch {
+      /* backend no disponible — el contador queda con el último valor conocido */
+    } finally {
+      setStatsLoading(false)
+    }
+  }, [])
 
   useEffect(() => {
     const load = async () => {
@@ -169,7 +285,8 @@ export default function FichaPropioPage() {
       }
     }
     load()
-  }, [])
+    refreshStats()
+  }, [refreshStats])
 
   const urls = Array.from(
     new Set(
@@ -188,7 +305,7 @@ export default function FichaPropioPage() {
       const res = await fetch(`${API}/api/v1/properties/import`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urls: urls.slice(0, 10) }),
+        body: JSON.stringify({ urls: urls.slice(0, 10), agente_email: agenteEmail }),
       })
       if (!res.ok) {
         const detail = (await res.json().catch(() => null))?.detail
@@ -213,6 +330,9 @@ export default function FichaPropioPage() {
       })
       setNewIds(new Set(enriched.map((p) => p.id).filter((id): id is string => !!id)))
       if (failed.length === 0) setRaw('')
+      // El import y el enrich ya gastaron tokens: recontamos para que el gasto
+      // que se muestra sea el de recién, no el de la carga de página.
+      refreshStats()
     } catch {
       setErrors([{ url: '', error: 'No se pudo conectar con el servidor.' }])
     } finally {
@@ -233,8 +353,11 @@ export default function FichaPropioPage() {
       </header>
 
       <div className="mx-auto w-full max-w-3xl flex-1 space-y-6 p-6">
+        <StatsBar stats={stats} loading={statsLoading} />
+
         {/* Carga de links */}
-        <div className="space-y-2 rounded-2xl border border-border bg-card p-4 shadow-sm">
+        <div className="space-y-3 rounded-2xl border border-border bg-card p-4 shadow-sm">
+          <AgenteSelector selected={agenteEmail} onSelect={setAgenteEmail} disabled={importing} />
           <textarea
             value={raw}
             onChange={(e) => setRaw(e.target.value)}
@@ -256,7 +379,7 @@ export default function FichaPropioPage() {
             {importing ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
             {importing
               ? `Generando ${urls.length === 1 ? 'ficha' : `${urls.length} fichas`}… puede tardar unos segundos`
-              : `Generar Ficha Propio${urls.length > 1 ? ` (${urls.length})` : ''}`}
+              : `Generar Ficha Propio${urls.length > 1 ? ` (${urls.length})` : ''} · ${agenteByEmail(agenteEmail).nombre}`}
           </button>
         </div>
 

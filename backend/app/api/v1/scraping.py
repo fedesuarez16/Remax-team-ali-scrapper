@@ -108,19 +108,47 @@ async def start_scraping(body: StartScrapingRequest, request: Request) -> StartS
     return StartScrapingResponse(job_id=job_id)
 
 
-async def _write_job_terminal(sb: Any, job_id: str, estado: str, prop_count: int = 0) -> None:
+async def _write_job_terminal(
+    sb: Any,
+    job_id: str,
+    estado: str,
+    prop_count: int = 0,
+    cost_ledger: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    """Close the job row. When a `cost_ledger` is handed in, its tally lands on
+    the row too — including an explicit 0 for searches served from cache or from
+    the direct (non-Apify) sources, since "this search was free" is the number
+    that justifies the cache. NULL stays reserved for "unknown" (legacy rows)."""
     if sb is None:
         return
+    from datetime import datetime, timezone
+    payload: dict[str, Any] = {
+        'estado': estado,
+        'prop_count': prop_count,
+        'completado_at': datetime.now(timezone.utc).isoformat(),
+    }
+    if cost_ledger is not None:
+        from app.services.apify import ledger_total_usd
+        payload['apify_cost_usd'] = ledger_total_usd(cost_ledger)
+        payload['apify_cost_breakdown'] = cost_ledger
+
     try:
-        from datetime import datetime, timezone
-        await sb.table('scraping_jobs').update({
-            'estado': estado,
-            'prop_count': prop_count,
-            'completado_at': datetime.now(timezone.utc).isoformat(),
-        }).eq('id', job_id).execute()
+        await sb.table('scraping_jobs').update(payload).eq('id', job_id).execute()
     except Exception as exc:
         import logging
-        logging.getLogger(__name__).warning('job status write-back failed: %s', exc)
+        log = logging.getLogger(__name__)
+        if 'apify_cost_usd' not in payload:
+            log.warning('job status write-back failed: %s', exc)
+            return
+        # Cost migration not applied yet — never lose the estado/prop_count write
+        # over an optional column.
+        log.warning('job cost write-back failed (%s); retrying without cost columns', exc)
+        for key in ('apify_cost_usd', 'apify_cost_breakdown'):
+            payload.pop(key, None)
+        try:
+            await sb.table('scraping_jobs').update(payload).eq('id', job_id).execute()
+        except Exception as retry_exc:
+            log.warning('job status write-back failed: %s', retry_exc)
 
 
 async def _run_graph_into_queue(
@@ -130,11 +158,20 @@ async def _run_graph_into_queue(
     queue: asyncio.Queue[Any],
     sb: Any,
     job_id: str,
+    cost_ledger: dict[str, dict[str, Any]] | None = None,
 ) -> None:
-    """Run astream_events in a standalone task so client disconnects don't cancel it."""
+    """Run astream_events in a standalone task so client disconnects don't cancel it.
+
+    `cost_ledger` is owned by the caller: this task SPENDS (every Apify run
+    started under it books itself into the dict), while the SSE generator READS
+    it to close the job row. Same object, two tasks — which is why the ledger is
+    passed in rather than created here."""
+    from app.services.apify import use_cost_ledger
+
     try:
-        async for ev in graph.astream_events(inputs, config, version='v2'):
-            await queue.put(('event', ev))
+        with use_cost_ledger(cost_ledger if cost_ledger is not None else {}):
+            async for ev in graph.astream_events(inputs, config, version='v2'):
+                await queue.put(('event', ev))
         await queue.put(('done', None))
     except Exception as exc:
         import logging
@@ -183,7 +220,8 @@ async def stream_scraping(job_id: str, query: str, request: Request) -> Streamin
     inputs.update(await _read_job_inputs(sb, job_id))
 
     queue: asyncio.Queue[Any] = asyncio.Queue()
-    _spawn_graph_task(_run_graph_into_queue(graph, inputs, config, queue, sb, job_id))
+    cost_ledger: dict[str, dict[str, Any]] = {}
+    _spawn_graph_task(_run_graph_into_queue(graph, inputs, config, queue, sb, job_id, cost_ledger))
 
     async def event_generator() -> AsyncGenerator[str, None]:
         seq = 0
@@ -200,20 +238,37 @@ async def stream_scraping(job_id: str, query: str, request: Request) -> Streamin
                 name = ev['name']
                 data = ev['data']
                 if name == 'done':
-                    await _write_job_terminal(sb, job_id, 'done', data.get('total_count', 0))
+                    await _write_job_terminal(sb, job_id, 'done', data.get('total_count', 0), cost_ledger)
                 elif name == 'error' and not data.get('recoverable', True):
-                    await _write_job_terminal(sb, job_id, 'error')
+                    await _write_job_terminal(sb, job_id, 'error', 0, cost_ledger)
                 seq += 1
                 yield f'id: {seq}\nevent: {name}\ndata: {json.dumps(data)}\n\n'
         except GeneratorExit:
             # Client disconnected — graph task keeps running and will save the checkpoint
             return
         except Exception as exc:
-            await _write_job_terminal(sb, job_id, 'error')
+            await _write_job_terminal(sb, job_id, 'error', 0, cost_ledger)
             seq += 1
             yield f'id: {seq}\nevent: error\ndata: {json.dumps({"event":"error","message":str(exc),"recoverable":False})}\n\n'
 
     return StreamingResponse(event_generator(), media_type='text/event-stream', headers=_sse_headers())
+
+
+async def _seed_cost_ledger(sb: Any, job_id: str) -> dict[str, dict[str, Any]]:
+    """Resume is a SEPARATE request with a fresh ledger — starting it empty would
+    make the terminal write overwrite (and so lose) what the original run spent.
+    Seed it from what the row already booked so the total keeps accumulating
+    across every resume round. Best-effort: an unreadable row just starts at 0."""
+    if sb is None:
+        return {}
+    try:
+        res = await sb.table('scraping_jobs').select('apify_cost_breakdown').eq('id', job_id).execute()
+    except Exception:
+        return {}
+    if not res.data:
+        return {}
+    booked = res.data[0].get('apify_cost_breakdown')
+    return dict(booked) if isinstance(booked, dict) else {}
 
 
 @router.post('/{job_id}/resume')
@@ -225,8 +280,11 @@ async def resume_scraping(job_id: str, body: ResumeScrapingRequest, request: Req
     config = {'configurable': {'thread_id': job_id, 'supabase': sb}}
 
     queue: asyncio.Queue[Any] = asyncio.Queue()
+    cost_ledger = await _seed_cost_ledger(sb, job_id)
     _spawn_graph_task(
-        _run_graph_into_queue(graph, Command(resume=body.selected_agency_ids), config, queue, sb, job_id)
+        _run_graph_into_queue(
+            graph, Command(resume=body.selected_agency_ids), config, queue, sb, job_id, cost_ledger,
+        )
     )
 
     async def event_generator() -> AsyncGenerator[str, None]:
@@ -244,15 +302,15 @@ async def resume_scraping(job_id: str, body: ResumeScrapingRequest, request: Req
                 name = ev['name']
                 data = ev['data']
                 if name == 'done':
-                    await _write_job_terminal(sb, job_id, 'done', data.get('total_count', 0))
+                    await _write_job_terminal(sb, job_id, 'done', data.get('total_count', 0), cost_ledger)
                 elif name == 'error' and not data.get('recoverable', True):
-                    await _write_job_terminal(sb, job_id, 'error')
+                    await _write_job_terminal(sb, job_id, 'error', 0, cost_ledger)
                 seq += 1
                 yield f'id: {seq}\nevent: {name}\ndata: {json.dumps(data)}\n\n'
         except GeneratorExit:
             return
         except Exception as exc:
-            await _write_job_terminal(sb, job_id, 'error')
+            await _write_job_terminal(sb, job_id, 'error', 0, cost_ledger)
             seq += 1
             yield f'id: {seq}\nevent: error\ndata: {json.dumps({"event":"error","message":str(exc),"recoverable":False})}\n\n'
 

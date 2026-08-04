@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     MAX_WEBSITE_URLS: int = 10           # cap agency websites scraped per search
     ZONAPROP_MAX_RESULTS: int = 200      # cap items per ZonaProp run; 0 = no cap (actor default)
     ARGENPROP_MAX_PAGES: int = 3         # cap pages crawled per Argenprop search (hard-capped at 10, robots.txt)
+    REMAX_MAX_PAGES: int = 5             # cap pages per RE/MAX search (5 × 20 = 100 items); 0 = no cap (follow totalPages)
+    REMAX_PAGE_SIZE: int = 20            # items per RE/MAX API page
     GOOGLEMAPS_MAX_PLACES: int = 20      # cap billed places per zona in agency discovery (raise after testing)
     INSTAGRAM_RESULTS_LIMIT: int = 10    # cap posts per agency profile (raise after testing)
     AGENCY_CACHE_TTL_DAYS: int = 30      # reuse cached agencies per zona within N days (skip paid Google Maps actor)

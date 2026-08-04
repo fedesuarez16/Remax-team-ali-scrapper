@@ -70,11 +70,11 @@ export type CarteraProperty = {
 const BUENOS_AIRES_CENTER: [number, number] = [-34.6037, -58.3816]
 const INITIAL_ZOOM = 12
 
-const MARKER_STYLE = { color: '#111', fillColor: '#111', fillOpacity: 0.85, weight: 1 }
-// Alquiler: white fill with dark ring, so venta (solid) reads first at a glance.
-const ALQUILER_STYLE = { color: '#111', fillColor: '#fff', fillOpacity: 0.95, weight: 1.5 }
+// Verde: scrapeadas (venta) · Amarillo: alquiler · Rojo: cartera (propias).
+const MARKER_STYLE = { color: '#15803d', fillColor: '#16a34a', fillOpacity: 0.85, weight: 1 }
+const ALQUILER_STYLE = { color: '#a16207', fillColor: '#eab308', fillOpacity: 0.95, weight: 1.5 }
 const CARTERA_STYLE = { color: '#991b1b', fillColor: '#dc2626', fillOpacity: 0.9, weight: 1 }
-const DIMMED_STYLE = { color: '#111', fillColor: '#111', fillOpacity: 0.12, weight: 1, opacity: 0.25 }
+const DIMMED_STYLE = { color: '#15803d', fillColor: '#16a34a', fillOpacity: 0.12, weight: 1, opacity: 0.25 }
 const CARTERA_DIMMED_STYLE = { color: '#991b1b', fillColor: '#dc2626', fillOpacity: 0.12, weight: 1, opacity: 0.25 }
 const ZONE_STYLE = { color: '#111', weight: 2, fillColor: '#111', fillOpacity: 0.06, dashArray: '6 4' }
 const VERTEX_STYLE = { color: '#111', fillColor: '#fff', fillOpacity: 1, weight: 2 }
@@ -435,10 +435,13 @@ export default function PropertyMap({
 
     <div className="absolute bottom-4 left-4 z-[1000] flex flex-col gap-1 rounded-lg border border-border bg-background/90 px-3 py-2 text-xs text-foreground shadow-sm">
       <span className="flex items-center gap-2">
-        <span className="inline-block size-2.5 rounded-full bg-[#111]" /> Scrapeadas
+        <span className="inline-block size-2.5 rounded-full bg-[#16a34a]" /> Scrapeadas
       </span>
       <span className="flex items-center gap-2">
-        <span className="inline-block size-2.5 rounded-full bg-[#dc2626]" /> Cartera
+        <span className="inline-block size-2.5 rounded-full bg-[#dc2626]" /> Propias
+      </span>
+      <span className="flex items-center gap-2">
+        <span className="inline-block size-2.5 rounded-full bg-[#eab308]" /> Alquiler
       </span>
     </div>
 

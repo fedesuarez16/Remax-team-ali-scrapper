@@ -9,6 +9,7 @@ import httpx
 from anthropic import AsyncAnthropic
 
 from app.core.config import settings
+from app.services.llm_costs import record_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +325,18 @@ async def enrich_ficha(prop: dict[str, Any], sb: Any) -> dict[str, Any]:
     except Exception as exc:
         logger.warning('enrich_ficha LLM call failed for %s: %s', prop.get('id'), exc)
         return prop  # leave un-enriched; the ficha still renders the raw description
+
+    # El scope decide si este gasto entra en el contador de Ficha Propio. El mismo
+    # enrich corre para fichas de portal, así que scopearlo por `fuente` es lo que
+    # evita que el contador infle con gasto que no es de Ficha Propio.
+    await record_llm_usage(
+        sb,
+        scope='ficha_propio' if prop.get('fuente') == 'manual' else 'ficha_enrich',
+        model=MODEL,
+        usage=getattr(msg, 'usage', None),
+        property_id=prop.get('id'),
+        url=prop.get('url_origen'),
+    )
 
     tool_use = next((b for b in msg.content if b.type == 'tool_use'), None)
     if not tool_use:
