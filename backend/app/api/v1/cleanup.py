@@ -9,12 +9,14 @@ la limpieza puede tardar minutos y el front sigue el avance por `/status`.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from fastapi import APIRouter, Request
 
 from app.services.cleaner import (
     DEFAULT_LIMIT,
+    check_links,
     cleanup_state,
     read_schedule,
     save_schedule,
@@ -25,6 +27,17 @@ router = APIRouter()
 
 # Tope de corridas devueltas por el historial.
 _RUNS_PAGE = 20
+
+_SPLIT_RE = re.compile(r'\s+')
+
+
+def _parse_urls(raw: Any) -> list[str]:
+    """Acepta tanto una lista como el bloque de texto pegado tal cual."""
+    if isinstance(raw, str):
+        return [part for part in _SPLIT_RE.split(raw) if part]
+    if isinstance(raw, list):
+        return [str(item) for item in raw]
+    return []
 
 
 @router.post('/run')
@@ -51,6 +64,23 @@ async def run_now(request: Request, body: dict | None = None) -> dict[str, Any]:
         origen='manual',
     ))
     return {'started': True, 'state': cleanup_state()}
+
+
+@router.post('/check-links')
+async def check_links_endpoint(body: dict) -> dict[str, Any]:
+    """Verifica una lista de links pegada a mano y la parte en dos.
+
+    Body: ``{"urls": [...]}`` o el bloque de texto pegado tal cual.
+
+    NO toca la base y por eso no depende de Supabase: sólo entra a cada link,
+    mira si el aviso sigue publicado y clasifica. Además de ``activos`` y
+    ``rotos`` devuelve ``sin_definir`` — los links que el portal no dejó
+    verificar (bloqueo, timeout), que a propósito NO se reportan como rotos.
+    """
+    try:
+        return await check_links(_parse_urls(body.get('urls')))
+    except ValueError as e:
+        return {'activos': [], 'rotos': [], 'sin_definir': [], 'total': 0, 'error': str(e)}
 
 
 @router.get('/status')

@@ -1,11 +1,15 @@
 import Link from 'next/link'
 import { ArrowRight, Check } from 'lucide-react'
+import { ApifyCostChip } from '@/components/cost/ApifyCostChip'
+import type { ApifyCostBreakdown } from '@/lib/apifyCost'
 
 export function SearchDoneCard({
   jobId,
   matchedCount,
   totalCount = null,
   insideCount = null,
+  apifyCostUsd = null,
+  apifyCostBreakdown = null,
 }: {
   jobId: string
   matchedCount: number
@@ -17,6 +21,10 @@ export function SearchDoneCard({
   // polygon. `null`/omitted (the /chat path, no polygon) falls back to the
   // SSE-accumulated `matchedCount`, unchanged from today.
   insideCount?: number | null
+  // Lo que gastó esta búsqueda en Apify, del evento `done`. `null` = el
+  // backend no lo informó y no se muestra nada.
+  apifyCostUsd?: number | null
+  apifyCostBreakdown?: ApifyCostBreakdown | null
 }) {
   const count = insideCount ?? matchedCount
   const total = insideCount != null ? count : Math.max(totalCount ?? count, count)
@@ -29,6 +37,11 @@ export function SearchDoneCard({
           <Check className="size-3 text-background" strokeWidth={3} />
         </div>
         <span className="text-sm font-medium text-foreground">Búsqueda completada</span>
+        <ApifyCostChip
+          costUsd={apifyCostUsd}
+          breakdown={apifyCostBreakdown}
+          className="ml-auto"
+        />
       </div>
 
       <p className="text-sm text-muted-foreground">

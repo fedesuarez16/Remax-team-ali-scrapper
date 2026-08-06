@@ -1,8 +1,11 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
-import { Loader2, Search, Sparkles, X } from 'lucide-react'
+import { Check, Loader2, Search, Sparkles, X } from 'lucide-react'
 import { PropertyCard } from '@/components/chat/PropertyCard'
+import { SelectCheckbox } from '@/components/properties/SelectCheckbox'
+import { SelectionBar } from '@/components/properties/SelectionBar'
 import type { Property } from '@/hooks/useSSEStream'
+import { cn } from '@/lib/utils'
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
@@ -18,7 +21,35 @@ export default function SearchPage() {
   const [results, setResults] = useState<MatchResult[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const keyFor = (r: MatchResult, i: number) => r.property.id ?? String(i)
+
+  const toggle = (key: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
+  const allSelected = results.length > 0 && results.every((r, i) => selected.has(keyFor(r, i)))
+
+  const toggleAll = () =>
+    setSelected(allSelected ? new Set() : new Set(results.map(keyFor)))
+
+  // Sólo las persistidas se pueden borrar: `keyFor` cae al índice cuando no hay id.
+  const selectedIds = results
+    .filter((r, i) => selected.has(keyFor(r, i)))
+    .map((r) => r.property.id)
+    .filter((id): id is string => Boolean(id))
+
+  const onDeleted = (removed: string[]) => {
+    const gone = new Set(removed)
+    setResults((prev) => prev.filter((r) => !(r.property.id && gone.has(r.property.id))))
+    setSelected(new Set())
+  }
 
   // Once a search has been submitted the input docks to the top.
   const active = submitted !== '' || loading
@@ -30,6 +61,9 @@ export default function SearchPage() {
     const ctrl = new AbortController()
     setLoading(true)
     setError(null)
+    // Los ids seleccionados pertenecen a la búsqueda anterior — arrastrarlos
+    // haría que "Eliminar" borre propiedades que ya no están en pantalla.
+    setSelected(new Set())
 
     ;(async () => {
       try {
@@ -65,6 +99,7 @@ export default function SearchPage() {
     setSubmitted('')
     setResults([])
     setError(null)
+    setSelected(new Set())
     setTimeout(() => inputRef.current?.focus(), 0)
   }
 
@@ -125,11 +160,22 @@ export default function SearchPage() {
     <div className="flex h-full flex-col bg-background text-foreground">
       <header className="border-b border-border px-6 py-4">
         <div className="mx-auto w-full max-w-2xl">{SearchBar}</div>
-        <p className="mx-auto mt-2 w-full max-w-2xl text-xs text-muted-foreground">
-          {loading
-            ? 'Analizando coincidencias semánticas...'
-            : `${results.length} coincidencia${results.length === 1 ? '' : 's'} para “${submitted}”`}
-        </p>
+        <div className="mx-auto mt-2 flex w-full max-w-2xl items-center justify-between gap-3">
+          <p className="text-xs text-muted-foreground">
+            {loading
+              ? 'Analizando coincidencias semánticas...'
+              : `${results.length} coincidencia${results.length === 1 ? '' : 's'} para “${submitted}”`}
+          </p>
+          {results.length > 0 && (
+            <button
+              onClick={toggleAll}
+              className="flex shrink-0 items-center gap-2 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground transition hover:bg-muted"
+            >
+              <Check className="size-3.5" />
+              {allSelected ? 'Deseleccionar todo' : 'Seleccionar todo'}
+            </button>
+          )}
+        </div>
       </header>
 
       <div className="flex-1 overflow-y-auto p-6">
@@ -152,8 +198,18 @@ export default function SearchPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {results.map((r, i) => (
-              <div key={i} className="relative">
+            {results.map((r, i) => {
+              const key = keyFor(r, i)
+              const isSel = selected.has(key)
+              return (
+              <div
+                key={key}
+                className={cn(
+                  'relative rounded-2xl transition',
+                  isSel && 'ring-2 ring-foreground ring-offset-2 ring-offset-background'
+                )}
+              >
+                <SelectCheckbox selected={isSel} onToggle={() => toggle(key)} />
                 <div className="absolute right-2 top-2 z-10 rounded-full bg-foreground px-2 py-0.5 text-xs font-semibold text-background">
                   {r.score}%
                 </div>
@@ -168,10 +224,21 @@ export default function SearchPage() {
                   </div>
                 )}
               </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </div>
+
+      {/* Action bar — selección → borrar */}
+      {selected.size > 0 && (
+        <SelectionBar
+          count={selected.size}
+          ids={selectedIds}
+          onClear={() => setSelected(new Set())}
+          onDeleted={onDeleted}
+        />
+      )}
     </div>
   )
 }

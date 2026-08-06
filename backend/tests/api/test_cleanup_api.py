@@ -156,6 +156,81 @@ async def test_put_schedule_without_supabase_reports_the_error() -> None:
     assert 'error' in resp.json()
 
 
+# ── POST /check-links ────────────────────────────────────────────────────────
+
+
+async def test_check_links_returns_the_two_lists(monkeypatch) -> None:
+    from app.services import cleaner as cleaner_module
+
+    async def fake_check(url: str, *, client: Any):
+        verdict = 'dead' if 'muerta' in url else 'alive'
+        return cleaner_module.CheckResult(verdict, f'fake:{verdict}')
+
+    monkeypatch.setattr(cleaner_module, 'check_url', fake_check)
+
+    async with _client(_FakeSupabase()) as client:
+        resp = await client.post('/cleanup/check-links', json={
+            'urls': ['https://portal.com/viva', 'https://portal.com/muerta'],
+        })
+
+    body = resp.json()
+    assert [i['url'] for i in body['activos']] == ['https://portal.com/viva']
+    assert [i['url'] for i in body['rotos']] == ['https://portal.com/muerta']
+    assert body['total'] == 2
+
+
+async def test_check_links_accepts_a_pasted_block_of_text(monkeypatch) -> None:
+    from app.services import cleaner as cleaner_module
+
+    async def fake_check(url: str, *, client: Any):
+        return cleaner_module.CheckResult('alive', 'ok')
+
+    monkeypatch.setattr(cleaner_module, 'check_url', fake_check)
+
+    async with _client(_FakeSupabase()) as client:
+        resp = await client.post('/cleanup/check-links', json={
+            'urls': 'https://portal.com/a\nhttps://portal.com/b\n\nhttps://portal.com/c',
+        })
+
+    assert resp.json()['total'] == 3
+
+
+async def test_check_links_works_without_supabase(monkeypatch) -> None:
+    """Verificar una lista pegada no toca la base — no puede depender de ella."""
+    from app.services import cleaner as cleaner_module
+
+    async def fake_check(url: str, *, client: Any):
+        return cleaner_module.CheckResult('alive', 'ok')
+
+    monkeypatch.setattr(cleaner_module, 'check_url', fake_check)
+
+    async with _client(None) as client:
+        resp = await client.post('/cleanup/check-links', json={'urls': ['https://portal.com/a']})
+
+    assert resp.status_code == 200
+    assert len(resp.json()['activos']) == 1
+
+
+async def test_check_links_rejects_an_empty_payload() -> None:
+    async with _client(_FakeSupabase()) as client:
+        resp = await client.post('/cleanup/check-links', json={'urls': []})
+
+    assert resp.status_code == 200
+    assert 'error' in resp.json()
+
+
+async def test_check_links_rejects_too_many_links() -> None:
+    from app.services.cleaner import MAX_LINKS
+
+    async with _client(_FakeSupabase()) as client:
+        resp = await client.post('/cleanup/check-links', json={
+            'urls': [f'https://portal.com/{i}' for i in range(MAX_LINKS + 1)],
+        })
+
+    assert 'error' in resp.json()
+    assert str(MAX_LINKS) in resp.json()['error']
+
+
 # ── GET /runs ────────────────────────────────────────────────────────────────
 
 

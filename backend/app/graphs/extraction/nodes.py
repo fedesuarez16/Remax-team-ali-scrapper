@@ -15,7 +15,11 @@ from app.graphs.extraction.tools import (
     EXTRACT_FILTERS_TOOL, INSTAGRAM_EXTRACT_TOOL, INSTAGRAM_SYSTEM_PROMPT, SYSTEM_PROMPT,
 )
 from app.services.apify import PORTAL_SOURCES, get_apify_service, harvest_page_images
-from app.services.zona import normalize_address as _normalize_address, normalize_zona as _normalize_zona
+from app.services.zona import (
+    address_fingerprint as _address_fingerprint,
+    normalize_address as _normalize_address,
+    normalize_zona as _normalize_zona,
+)
 
 MODEL = 'claude-haiku-4-5-20251001'
 _client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
@@ -72,7 +76,7 @@ def _read_selection(state: ScrapingState) -> dict[str, Any]:
 def _env_allowed_sources() -> tuple[str, ...]:
     """Portals this deployment is allowed to hit at all, before the user's pick."""
     if settings.APIFY_DISABLED:
-        return ('mercadolibre',)  # direct httpx, no Apify actor
+        return ('mercadolibre', 'inmobusqueda', 'mudafy')  # direct httpx, no Apify actor
     if settings.SCRAPE_GOOGLEMAPS_ONLY:
         return ()
     if settings.SCRAPE_ZONAPROP_ONLY:
@@ -263,11 +267,25 @@ def normalize_properties(state: ScrapingState) -> dict[str, Any]:
     return {'normalized_properties': out}
 
 
+def _dedup_key(p: NormalizedProperty) -> tuple[Any, ...]:
+    """What makes two scraped rows the SAME listing.
+
+    The address is reduced to a canonical `street number` so the one property
+    that Zonaprop, Argenprop and the aggregators each publish their own way
+    collapses into a single row instead of one per portal. Price, currency,
+    operation and property type stay in the key on purpose: they are what tells
+    apart the several distinct units that legitimately share one street
+    address, so widening the address match cannot silently swallow them.
+    """
+    anchor = _address_fingerprint(p.direccion) or _normalize_address(p.direccion)
+    return (anchor, p.precio, p.moneda, p.tipo_operacion, p.tipo_propiedad)
+
+
 def deduplicate_properties(state: ScrapingState) -> dict[str, Any]:
     seen: set[tuple[Any, ...]] = set()
     unique: list[NormalizedProperty] = []
     for p in state.get('normalized_properties', []):
-        key = (p.direccion, p.precio, p.tipo_operacion)
+        key = _dedup_key(p)
         if key in seen:
             continue
         seen.add(key)

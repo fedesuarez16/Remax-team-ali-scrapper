@@ -188,7 +188,13 @@ function ChatPage() {
                   <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-foreground">
                     <Sparkles className="size-3.5 text-background" />
                   </div>
-                  <SearchDoneCard jobId={m.jobId} matchedCount={m.matchedCount} totalCount={m.totalCount} />
+                  <SearchDoneCard
+                    jobId={m.jobId}
+                    matchedCount={m.matchedCount}
+                    totalCount={m.totalCount}
+                    apifyCostUsd={m.apifyCostUsd}
+                    apifyCostBreakdown={m.apifyCostBreakdown}
+                  />
                 </div>
               )
 

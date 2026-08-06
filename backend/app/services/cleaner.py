@@ -433,6 +433,98 @@ async def run_cleanup(
         return {**cleanup_state(), 'skipped': False, 'eliminadas': deleted}
 
 
+# ── verificación de una lista pegada a mano ──────────────────────────────────
+
+# Tope por pedido: la verificación corre DENTRO del request HTTP (a diferencia
+# de la limpieza de base, que es fire-and-forget), así que la lista tiene que
+# terminar en un tiempo razonable.
+MAX_LINKS = 50
+_LINKS_CONCURRENCY = 10
+
+# "www.zonaprop.com.ar/ficha-123.html" — pegado desde WhatsApp, sin esquema.
+_BARE_DOMAIN_RE = re.compile(r'^[\w-]+(\.[\w-]+)+(/.*)?$')
+
+
+def _normalize_link(raw: str) -> str | None:
+    """Devuelve la URL lista para pedir, o None si eso no es un link."""
+    link = raw.strip()
+    if not link:
+        return None
+    if link.startswith(('http://', 'https://')):
+        return link
+    if _BARE_DOMAIN_RE.match(link):
+        return f'https://{link}'
+    return None
+
+
+async def check_links(
+    urls: list[str], *, checker: Checker | None = None, concurrency: int = _LINKS_CONCURRENCY,
+) -> dict[str, Any]:
+    """Verifica una lista de links pegada a mano y la parte en dos.
+
+    Pensado para "estos 15 links se los mandé a un cliente hace un mes, ¿cuáles
+    siguen vivos?". NO toca la base: no borra, no escribe, ni siquiera necesita
+    Supabase.
+
+    Devuelve ``activos`` y ``rotos`` (las dos listas que importan) más
+    ``sin_definir``: los que el portal no dejó verificar (403, 429, timeout).
+    Esos NO van a ``rotos`` a propósito — un bloqueo del portal no vuelve roto
+    al link, y mandarlos a la basura le haría descartar links vivos.
+
+    Un texto que ni siquiera es una URL sí cuenta como roto: no hay nada que
+    verificar y tampoco sirve para reenviar.
+    """
+    seen: dict[str, str | None] = {}
+    for raw in urls:
+        candidate = (raw or '').strip()
+        if not candidate:
+            continue
+        seen.setdefault(candidate, _normalize_link(candidate))
+
+    if not seen:
+        raise ValueError('Pegá al menos un link')
+    if len(seen) > MAX_LINKS:
+        raise ValueError(f'Máximo {MAX_LINKS} links por vez')
+
+    check: Checker = checker or check_url
+    sem = asyncio.Semaphore(max(1, concurrency))
+    results: dict[str, CheckResult] = {}
+
+    async def verify(original: str, normalized: str, client: Any) -> None:
+        async with sem:
+            try:
+                results[original] = await check(normalized, client=client)
+            except Exception as exc:
+                results[original] = CheckResult(
+                    'unknown', f'error al verificar ({type(exc).__name__})',
+                )
+
+    client = httpx.AsyncClient(
+        headers={'User-Agent': _USER_AGENT, 'Accept-Language': 'es-AR,es;q=0.9'},
+        timeout=_REQUEST_TIMEOUT,
+        follow_redirects=True,
+    )
+    try:
+        await asyncio.gather(*(
+            verify(original, normalized, client)
+            for original, normalized in seen.items()
+            if normalized is not None
+        ))
+    finally:
+        await client.aclose()
+
+    buckets: dict[str, list[dict[str, str]]] = {'activos': [], 'rotos': [], 'sin_definir': []}
+    for original, normalized in seen.items():
+        if normalized is None:
+            buckets['rotos'].append({'url': original, 'motivo': 'no es un link válido'})
+            continue
+        result = results[original]
+        bucket = {'alive': 'activos', 'dead': 'rotos', 'unknown': 'sin_definir'}[result.verdict]
+        buckets[bucket].append({'url': normalized, 'motivo': result.reason})
+
+    return {**buckets, 'total': len(seen)}
+
+
 # ── programación automática ──────────────────────────────────────────────────
 
 SCHEDULE_ID = 'default'

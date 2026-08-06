@@ -3,6 +3,8 @@ import { Suspense, useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Check, ChevronLeft, ChevronRight, Database, Loader2, MapPin, RefreshCw, Send } from 'lucide-react'
 import { PropertyCard } from '@/components/chat/PropertyCard'
+import { SelectCheckbox } from '@/components/properties/SelectCheckbox'
+import { SelectionBar } from '@/components/properties/SelectionBar'
 import type { Property } from '@/hooks/useSSEStream'
 import { enrichFicha, guardarSeleccion, marcarEnviadas } from '@/lib/ficha'
 import { sortVentaFirst } from '@/lib/operacion'
@@ -48,6 +50,19 @@ function PropertiesPage() {
 
   const toggleAll = () =>
     setSelected(allSelected ? new Set() : new Set(shown.map((p, i) => keyFor(p, i))))
+
+  // Sólo las persistidas se pueden borrar: `keyFor` cae al índice cuando no hay id.
+  const selectedIds = shown
+    .filter((p, i) => selected.has(keyFor(p, i)))
+    .map((p) => p.id)
+    .filter((id): id is string => Boolean(id))
+
+  const onDeleted = (removed: string[]) => {
+    const gone = new Set(removed)
+    setProperties((prev) => prev.filter((p) => !(p.id && gone.has(p.id))))
+    setTotal((prev) => Math.max(0, prev - gone.size))
+    setSelected(new Set())
+  }
 
   const prepararYEnviar = async () => {
     const chosen = shown.filter((p, i) => selected.has(keyFor(p, i)))
@@ -212,18 +227,7 @@ function PropertiesPage() {
                     isSel && 'ring-2 ring-foreground ring-offset-2 ring-offset-background'
                   )}
                 >
-                  <button
-                    onClick={(e) => { e.stopPropagation(); toggle(key) }}
-                    aria-label={isSel ? 'Quitar de la selección' : 'Seleccionar propiedad'}
-                    className={cn(
-                      'absolute left-2 top-2 z-20 flex size-6 items-center justify-center rounded-md border shadow-sm transition',
-                      isSel
-                        ? 'border-foreground bg-foreground text-background'
-                        : 'border-border bg-background/90 text-transparent backdrop-blur-sm hover:border-foreground/40'
-                    )}
-                  >
-                    <Check className="size-4" strokeWidth={3} />
-                  </button>
+                  <SelectCheckbox selected={isSel} onToggle={() => toggle(key)} />
                   {p.id && p.lat != null && p.lng != null && (
                     <button
                       onClick={(e) => {
@@ -245,29 +249,23 @@ function PropertiesPage() {
         )}
       </div>
 
-      {/* Action bar — selection → ficha */}
+      {/* Action bar — selection → borrar / ficha */}
       {selected.size > 0 && (
-        <div className="flex items-center justify-between gap-3 border-t border-border bg-card px-6 py-3">
-          <span className="text-sm text-foreground">
-            {selected.size} {selected.size === 1 ? 'propiedad seleccionada' : 'propiedades seleccionadas'}
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setSelected(new Set())}
-              className="rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition hover:bg-muted"
-            >
-              Limpiar
-            </button>
-            <button
-              onClick={prepararYEnviar}
-              disabled={preparing}
-              className="flex items-center gap-2 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background transition hover:bg-foreground/85 disabled:opacity-60"
-            >
-              {preparing ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-              {preparing ? 'Preparando fichas...' : 'Preparar y enviar'}
-            </button>
-          </div>
-        </div>
+        <SelectionBar
+          count={selected.size}
+          ids={selectedIds}
+          onClear={() => setSelected(new Set())}
+          onDeleted={onDeleted}
+        >
+          <button
+            onClick={prepararYEnviar}
+            disabled={preparing}
+            className="flex items-center gap-2 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background transition hover:bg-foreground/85 disabled:opacity-60"
+          >
+            {preparing ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+            {preparing ? 'Preparando fichas...' : 'Preparar y enviar'}
+          </button>
+        </SelectionBar>
       )}
 
       {/* Pagination — only when not scoped to a job and there's more than one page */}

@@ -20,6 +20,7 @@ import { AgencySelector } from '@/components/chat/AgencySelector'
 import { ProgressBubble } from '@/components/chat/ProgressBubble'
 import { SourceSelector } from '@/components/chat/SourceSelector'
 import { SaveSearchPanel } from '@/components/map/SaveSearchPanel'
+import { ApifyCostChip } from '@/components/cost/ApifyCostChip'
 import { useZoneSearch } from '@/hooks/useZoneSearch'
 import {
   DEFAULT_SELECTION,
@@ -515,9 +516,16 @@ export default function PropertyMap({
         )}
         {zone.phase === 'done' && (
           <div className="space-y-2 rounded-2xl border border-border bg-background/95 p-3.5 shadow-sm">
-            <p className="text-xs font-medium text-foreground">
-              {zone.insideCount} propiedades ubicadas
-            </p>
+            <div className="flex items-center gap-2">
+              <p className="text-xs font-medium text-foreground">
+                {zone.insideCount} propiedades ubicadas
+              </p>
+              <ApifyCostChip
+                costUsd={zone.apifyCostUsd}
+                breakdown={zone.apifyCostBreakdown}
+                className="ml-auto"
+              />
+            </div>
             {zone.ungeocodedCount > 0 && (
               <p className="text-xs text-muted-foreground">
                 sin ubicación aún ({zone.ungeocodedCount}){zone.draining ? ' · ubicando...' : ''}

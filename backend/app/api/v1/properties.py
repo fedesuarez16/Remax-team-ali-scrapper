@@ -265,6 +265,41 @@ async def mark_properties_sent(request: Request, body: dict) -> dict[str, Any]:
     return {'updated': len(rows), 'properties': rows}
 
 
+@router.post('/bulk-delete')
+async def bulk_delete_properties(request: Request, body: dict) -> dict[str, Any]:
+    """Borrar las propiedades elegidas con el seleccionador.
+
+    Body: ``{"ids": ["..."]}``. Se llama desde /properties y desde los
+    resultados de una búsqueda cuando el usuario marca tarjetas y toca
+    "Eliminar". El borrado va en UNA sola operación (`in_`) — 40 propiedades
+    no pueden costar 40 round-trips.
+
+    Sin ids devolvemos 400: un `in_` vacío corre riesgo de barrer la tabla.
+
+    NOTE: declarado antes del catch-all `/{property_id}`, igual que `/map`.
+    """
+    sb = request.app.state.supabase
+    if sb is None:
+        return {'deleted': 0, 'ids': [], 'error': 'Supabase no configurado'}
+
+    raw = body.get('ids') or []
+    ids = list(dict.fromkeys(
+        i.strip() for i in raw if isinstance(i, str) and i.strip()
+    ))
+    if not ids:
+        raise HTTPException(status_code=400, detail='ids requerido')
+
+    try:
+        res = await sb.table('properties').delete().in_('id', ids).execute()
+    except Exception as e:
+        return {'deleted': 0, 'ids': [], 'error': str(e)}
+    rows = res.data or []
+    # PostgREST devuelve las filas borradas; si el representation viene vacío
+    # caemos a los ids pedidos para no reportar 0 sobre un borrado real.
+    deleted_ids = [r.get('id') for r in rows if r.get('id')] or ids
+    return {'deleted': len(rows), 'ids': deleted_ids}
+
+
 @router.get('/ficha-propio/stats')
 async def ficha_propio_stats(request: Request) -> dict[str, Any]:
     """Contadores automáticos de la solapa Ficha Propio.

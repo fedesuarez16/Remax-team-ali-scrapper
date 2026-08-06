@@ -3,40 +3,15 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Folder as FolderIcon, FolderPlus, Pencil, Search, Trash2 } from 'lucide-react'
 import { useSearchHistory, type SearchEntry } from '@/hooks/useSearchHistory'
-
-const usd = (n: number) => `US$ ${n.toFixed(4)}`
-
-/** Hover detail: which portal burned the credits, and over how many actor runs. */
-const costTitle = (entry: SearchEntry) => {
-  const rows = Object.entries(entry.apify_cost_breakdown ?? {})
-  if (rows.length === 0) {
-    return 'Sin runs de Apify: servida desde caché o desde fuentes directas (MercadoLibre, RE/MAX)'
-  }
-  return rows
-    .map(([source, { usd: u, runs }]) => `${source}: ${usd(u)} (${runs} run${runs === 1 ? '' : 's'})`)
-    .join('\n')
-}
+import { ApifyCostChip } from '@/components/cost/ApifyCostChip'
+import { formatUsd as usd } from '@/lib/apifyCost'
 
 const sumCost = (entries: SearchEntry[]) =>
   entries.reduce((acc, e) => acc + (e.apify_cost_usd ?? 0), 0)
 
-const CostChip = ({ entry }: { entry: SearchEntry }) => {
-  const cost = entry.apify_cost_usd
-  // null/undefined = unknown (entrada de chat, o job anterior a la columna).
-  // Mostrar "US$ 0" ahí sería mentir; mejor no mostrar nada.
-  if (cost === null || cost === undefined) return null
-  const free = cost === 0
-  return (
-    <span
-      title={costTitle(entry)}
-      className={`shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[11px] tabular-nums ${
-        free ? 'bg-muted text-muted-foreground' : 'bg-amber-500/10 text-amber-700 dark:text-amber-400'
-      }`}
-    >
-      {free ? 'US$ 0' : usd(cost)}
-    </span>
-  )
-}
+const CostChip = ({ entry }: { entry: SearchEntry }) => (
+  <ApifyCostChip costUsd={entry.apify_cost_usd} breakdown={entry.apify_cost_breakdown} />
+)
 
 export default function HistorialPage() {
   const { searches, folders, updateEntry, deleteEntry, createFolder, loading } = useSearchHistory()

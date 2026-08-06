@@ -151,6 +151,24 @@ async def _write_job_terminal(
             log.warning('job status write-back failed: %s', retry_exc)
 
 
+def _stamp_cost(data: dict[str, Any], cost_ledger: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Attach the search's Apify spend to a `done` payload so the operator sees
+    it the moment the search ends, not only later in the historial.
+
+    Only `done` gets stamped: mid-run the tally is half-formed, and a number that
+    isn't yet the search's cost is worse than no number. The value is always
+    present (0.0 for a cache-served or direct-source search) — an absent field
+    reads as "unknown", which is a different fact.
+    """
+    from app.services.apify import ledger_total_usd
+
+    return {
+        **data,
+        'apify_cost_usd': ledger_total_usd(cost_ledger),
+        'apify_cost_breakdown': cost_ledger,
+    }
+
+
 async def _run_graph_into_queue(
     graph: Any,
     inputs: Any,
@@ -239,6 +257,7 @@ async def stream_scraping(job_id: str, query: str, request: Request) -> Streamin
                 data = ev['data']
                 if name == 'done':
                     await _write_job_terminal(sb, job_id, 'done', data.get('total_count', 0), cost_ledger)
+                    data = _stamp_cost(data, cost_ledger)
                 elif name == 'error' and not data.get('recoverable', True):
                     await _write_job_terminal(sb, job_id, 'error', 0, cost_ledger)
                 seq += 1
@@ -303,6 +322,7 @@ async def resume_scraping(job_id: str, body: ResumeScrapingRequest, request: Req
                 data = ev['data']
                 if name == 'done':
                     await _write_job_terminal(sb, job_id, 'done', data.get('total_count', 0), cost_ledger)
+                    data = _stamp_cost(data, cost_ledger)
                 elif name == 'error' and not data.get('recoverable', True):
                     await _write_job_terminal(sb, job_id, 'error', 0, cost_ledger)
                 seq += 1

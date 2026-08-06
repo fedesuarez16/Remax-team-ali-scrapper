@@ -97,6 +97,24 @@ export async function addSource(nombre: string, url: string, zona?: string): Pro
   }
 }
 
+/** Flips a source on/off. `activo=false` excludes it from every future search
+ * (the scraper only reads active sources). Returns an error message or null. */
+export async function toggleSource(id: string, activo: boolean): Promise<string | null> {
+  try {
+    const res = await fetch(`${SOURCES_URL}/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ activo }),
+    })
+    const data = await res.json()
+    if (data.error) return data.error as string
+    notify()
+    return null
+  } catch {
+    return 'No se pudo conectar con el servidor'
+  }
+}
+
 export async function deleteSource(id: string): Promise<void> {
   try {
     const res = await fetch(`${SOURCES_URL}/${encodeURIComponent(id)}`, { method: 'DELETE' })
@@ -138,7 +156,7 @@ export function useManualSources() {
     }
   }, [])
 
-  return { sources, addSource, deleteSource, loading }
+  return { sources, addSource, deleteSource, toggleSource, loading }
 }
 
 // ── Zonas ────────────────────────────────────────────────────────────────────

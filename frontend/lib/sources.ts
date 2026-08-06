@@ -5,13 +5,21 @@
  * catalog must stay in sync with `backend/app/services/apify.py`.
  */
 
-export type PortalId = 'zonaprop' | 'argenprop' | 'mercadolibre' | 'remax'
+export type PortalId =
+  | 'zonaprop'
+  | 'argenprop'
+  | 'mercadolibre'
+  | 'remax'
+  | 'inmobusqueda'
+  | 'mudafy'
 
 export const PORTALES: { id: PortalId; label: string }[] = [
   { id: 'zonaprop', label: 'Zonaprop' },
   { id: 'argenprop', label: 'Argenprop' },
   { id: 'mercadolibre', label: 'Mercado Libre' },
   { id: 'remax', label: 'RE/MAX' },
+  { id: 'inmobusqueda', label: 'InmoBusqueda' },
+  { id: 'mudafy', label: 'Mudafy' },
 ]
 
 export type SourceSelection = {

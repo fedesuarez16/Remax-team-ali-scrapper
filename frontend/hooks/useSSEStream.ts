@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Agency } from '@/components/chat/AgencySelector'
 import type { SourceSelection } from '@/lib/sources'
+import type { ApifyCostBreakdown } from '@/lib/apifyCost'
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
@@ -29,10 +30,23 @@ export type Message =
   | { id: string; type: 'user'; text: string }
   | { id: string; type: 'agent'; text: string }
   | { id: string; type: 'progress'; progress: ProgressMap; matchedCount: number; totalCount: number }
-  | { id: string; type: 'done'; jobId: string; matchedCount: number; totalCount: number }
+  | {
+      id: string; type: 'done'; jobId: string; matchedCount: number; totalCount: number
+      // Lo que la búsqueda gastó en Apify, tal cual lo reporta el `done` del
+      // backend. `0` = salió gratis (caché o fuentes directas); `null` =
+      // desconocido (backend anterior a este campo) y no se muestra.
+      apifyCostUsd: number | null; apifyCostBreakdown: ApifyCostBreakdown | null
+    }
   | { id: string; type: 'agencies'; agencies: Agency[]; message: string; jobId: string }
 
 export const INITIAL_SOURCES = ['zonaprop', 'mercadolibre', 'googlemaps']
+
+/** Lo que viene en el evento `done` del backend (SSE y resume comparten forma). */
+type DonePayload = {
+  job_id?: string
+  apify_cost_usd?: number | null
+  apify_cost_breakdown?: ApifyCostBreakdown | null
+}
 
 export function useSSEStream() {
   const [messages, setMessages] = useState<Message[]>([])
@@ -66,6 +80,21 @@ export function useSSEStream() {
         : m
     ))
   }, [])
+
+  // Un solo armador para los dos caminos (EventSource y resume-por-fetch): el
+  // costo tiene que llegar igual por ambos o el operador ve un número distinto
+  // según haya elegido inmobiliarias o no.
+  const doneMessage = useCallback((jobId: string, d: DonePayload): Message => ({
+    id: crypto.randomUUID(),
+    type: 'done',
+    jobId,
+    matchedCount: matchedCountRef.current,
+    totalCount: totalCountRef.current,
+    // El backend manda 0 explícito cuando la búsqueda salió gratis; `null`
+    // queda para "el campo no vino" y ahí no se muestra nada.
+    apifyCostUsd: typeof d.apify_cost_usd === 'number' ? d.apify_cost_usd : null,
+    apifyCostBreakdown: d.apify_cost_breakdown ?? null,
+  }), [])
 
   const openSSE = useCallback((url: string) => {
     const es = new EventSource(url)
@@ -105,14 +134,15 @@ export function useSSEStream() {
     es.addEventListener('done', (e) => {
       const me = e as MessageEvent
       let jobId = url.match(/scraping\/([^/]+)\//)?.[1] ?? ''
+      let d: DonePayload = {}
       if (me.data) {
         try {
-          const d = JSON.parse(me.data)
+          d = JSON.parse(me.data)
           if (d.job_id) jobId = d.job_id
         } catch { /* ignore */ }
       }
       setLastJobId(jobId)
-      setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'done', jobId, matchedCount: matchedCountRef.current, totalCount: totalCountRef.current }])
+      setMessages((p) => [...p, doneMessage(jobId, d)])
       close()
     })
 
@@ -126,7 +156,7 @@ export function useSSEStream() {
     })
 
     return es
-  }, [close, upsertProgress, addMatched])
+  }, [close, upsertProgress, addMatched, doneMessage])
 
   const startScraping = useCallback(async (
     query: string,
@@ -207,7 +237,7 @@ export function useSSEStream() {
         else if (d.event === 'done') {
           const resolvedJobId = d.job_id ?? jobId
           setLastJobId(resolvedJobId)
-          setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'done', jobId: resolvedJobId, matchedCount: matchedCountRef.current, totalCount: totalCountRef.current }])
+          setMessages((p) => [...p, doneMessage(resolvedJobId, d)])
           setIsStreaming(false)
         } else if (d.event === 'error')
           setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'agent', text: `Error: ${d.message}` }])
@@ -226,7 +256,7 @@ export function useSSEStream() {
     } finally {
       setIsStreaming(false)
     }
-  }, [upsertProgress, addMatched])
+  }, [upsertProgress, addMatched, doneMessage])
 
   return { messages, isStreaming, lastJobId, startScraping, resumeScraping }
 }

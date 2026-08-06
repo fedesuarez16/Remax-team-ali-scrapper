@@ -53,6 +53,22 @@ export type CleanupRun = {
   finished_at: string | null
 }
 
+/** Un link verificado de una lista pegada a mano. */
+export type CheckedLink = {
+  url: string
+  motivo: string
+}
+
+/** Resultado de verificar una lista. `sin_definir` son los que el portal no
+ * dejó verificar — NO son links rotos. */
+export type LinkCheckResult = {
+  activos: CheckedLink[]
+  rotos: CheckedLink[]
+  sin_definir: CheckedLink[]
+  total: number
+  error?: string
+}
+
 const EMPTY_STATE: CleanupState = {
   running: false,
   origen: null,
@@ -182,4 +198,44 @@ export function useCleanup() {
   )
 
   return { state, schedule, runs, error, runNow, saveSchedule, refresh: refreshStatus }
+}
+
+/** Verifica una lista de links pegada a mano. Independiente de `useCleanup`:
+ * no toca la base ni comparte estado con la limpieza. */
+export function useLinkChecker() {
+  const [result, setResult] = useState<LinkCheckResult | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const check = useCallback(async (raw: string) => {
+    setChecking(true)
+    setError(null)
+    try {
+      const res = await fetch(`${CLEANUP_URL}/check-links`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // El backend parsea el bloque pegado tal cual: no hace falta splitear acá.
+        body: JSON.stringify({ urls: raw }),
+      })
+      const data = (await res.json()) as LinkCheckResult
+      if (data.error) {
+        setError(data.error)
+        setResult(null)
+        return
+      }
+      setResult(data)
+    } catch {
+      setError('No se pudo conectar con el servidor')
+      setResult(null)
+    } finally {
+      setChecking(false)
+    }
+  }, [])
+
+  const reset = useCallback(() => {
+    setResult(null)
+    setError(null)
+  }, [])
+
+  return { result, checking, error, check, reset }
 }

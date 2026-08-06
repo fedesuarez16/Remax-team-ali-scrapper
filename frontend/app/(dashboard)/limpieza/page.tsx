@@ -12,6 +12,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useCleanup, type CleanupRun } from '@/hooks/useCleanup'
+import LinkChecker from '@/components/cleanup/LinkChecker'
 
 const PRESETS = [7, 15, 30, 90]
 
@@ -60,15 +61,18 @@ export default function LimpiezaPage() {
             Bot limpiador
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Entra al link de cada propiedad scrapeada y verifica si el aviso sigue publicado. Si se
-            vendió, lo bajaron del portal o el link quedó roto, borra la propiedad entera de la base.
-            Cuando el portal no responde (bloqueo, timeout) la propiedad NO se toca — la duda nunca
-            borra.
+            Verifica si los avisos siguen publicados. Podés pegarle una lista de links sueltos para
+            saber cuáles siguen vivos, o dejarlo recorrer toda la base y borrar las propiedades que
+            se vendieron, las bajaron del portal o quedaron con el link roto. Cuando el portal no
+            responde (bloqueo, timeout) no se toca nada — la duda nunca borra.
           </p>
         </div>
       </header>
 
       <div className="mx-auto w-full max-w-3xl flex-1 space-y-6 p-6">
+        {/* ── Verificar una lista pegada ────────────────────────────────── */}
+        <LinkChecker />
+
         {/* ── Limpieza manual ───────────────────────────────────────────── */}
         <section className="space-y-3 rounded-2xl border border-border bg-card p-4 shadow-sm">
           <div className="flex items-center justify-between gap-3">

@@ -82,6 +82,16 @@ export function useZoneSearch() {
     return null
   }, [messages])
 
+  // Último `done`: en una búsqueda reanudada hay dos, y el segundo trae el
+  // total ACUMULADO (semilla del row + lo que gastó el resume). El último gana.
+  const doneMsg = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.type === 'done') return m
+    }
+    return null
+  }, [messages])
+
   const progress: ProgressMap = progressMsg?.progress ?? {}
   const matchedCount = progressMsg?.matchedCount ?? 0
   const agencies: Agency[] | null = agenciesMsg?.agencies ?? null
@@ -334,6 +344,8 @@ export function useZoneSearch() {
     draining,
     stalled,
     polygon,
+    apifyCostUsd: doneMsg?.apifyCostUsd ?? null,
+    apifyCostBreakdown: doneMsg?.apifyCostBreakdown ?? null,
     savedEntryId,
     runQuery,
     resolveZone,

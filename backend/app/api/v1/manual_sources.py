@@ -99,6 +99,32 @@ async def create_manual_source(request: Request, body: dict) -> dict[str, Any]:
         return {'source': None, 'error': str(e)}
 
 
+@router.patch('/{source_id}')
+async def update_manual_source(request: Request, source_id: str, body: dict) -> dict[str, Any]:
+    """Toggle a source on/off. `activo=false` excludes it from every future
+    search — the fan-out only reads `.eq('activo', True)` (see
+    `_fetch_active_manual_sources` in app.graphs.extraction.nodes).
+    """
+    sb = request.app.state.supabase
+    if sb is None:
+        return {'source': None, 'error': 'Supabase no configurado'}
+
+    if 'activo' not in body:
+        return {'source': None, 'error': 'activo es requerido'}
+
+    try:
+        res = (
+            await sb.table('manual_sources')
+            .update({'activo': bool(body['activo'])})
+            .eq('id', source_id)
+            .execute()
+        )
+        source = res.data[0] if res.data else None
+        return {'source': source}
+    except Exception as e:
+        return {'source': None, 'error': str(e)}
+
+
 @router.delete('/{source_id}')
 async def delete_manual_source(request: Request, source_id: str) -> dict[str, Any]:
     sb = request.app.state.supabase

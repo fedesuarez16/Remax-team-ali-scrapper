@@ -41,6 +41,8 @@ export const FUENTES = [
   { value: 'mercadolibre', label: 'MercadoLibre' },
   { value: 'argenprop', label: 'Argenprop' },
   { value: 'remax', label: 'RE/MAX' },
+  { value: 'inmobusqueda', label: 'InmoBusqueda' },
+  { value: 'mudafy', label: 'Mudafy' },
   { value: 'googlemaps', label: 'Sitios web' },
 ]
 

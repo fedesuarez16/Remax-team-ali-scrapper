@@ -15,8 +15,8 @@ from app.models.property import Agency, RawProperty, ScrapingFilters
 
 ProgressCb = Callable[[str, str, int], Awaitable[None]]
 
-PORTAL_SOURCES = ('zonaprop', 'mercadolibre', 'argenprop', 'remax')   # phase-1 portal scrapers
-SOURCES = ('zonaprop', 'mercadolibre', 'argenprop', 'remax', 'googlemaps', 'instagram')
+PORTAL_SOURCES = ('zonaprop', 'mercadolibre', 'argenprop', 'remax', 'inmobusqueda', 'mudafy')   # phase-1 portal scrapers
+SOURCES = (*PORTAL_SOURCES, 'googlemaps', 'instagram')
 
 # ── Actor IDs ─────────────────────────────────────────────────────────────────
 _ACTORS: dict[str, str] = {
@@ -491,6 +491,578 @@ _ML_PROP_TYPE: dict[str, str] = {
     'cochera': 'otro',
     'galpón': 'otro',
 }
+
+
+# ── InmoBusqueda — plain server-rendered PHP portal. No WAF, no Apify actor,
+# no client-side hydration: a direct httpx GET returns the full results DOM,
+# and `-pagina-N` URLs paginate for real (100+ pages on a busy zona).
+#
+# This is the one portal in the catalog with genuine La Plata-area depth
+# (Manuel B Gonnet, City Bell, Villa Elisa, La Plata casco urbano), which is
+# exactly where Zonaprop/Argenprop thin out.
+#
+# The zona is resolved through the portal's own location autocomplete — the
+# endpoint its search box calls, public and unauthenticated. That indirection
+# is NOT optional: an unknown slug does not 404, it renders the same page with
+# the zona silently dropped, so a guessed slug returns nationwide results that
+# look valid. Verified live: `propiedades-gonnet.html` is that trap; the real
+# slug is `manuel-b-gonnet`. ─────────────────────────────────────────────────
+_INMOBUSQUEDA_BASE = 'https://www.inmobusqueda.com.ar'
+_INMOBUSQUEDA_AUTOCOMPLETE_URL = f'{_INMOBUSQUEDA_BASE}/configubicacion/autocomplete.json.php'
+_INMOBUSQUEDA_SLUG_CACHE: dict[str, str | None] = {}
+_INMOBUSQUEDA_PAGE_SIZE = 15   # cards per `propiedades-...` page (20 on typed ones)
+
+# Operation and property-type segments of the URL, read off the portal's own
+# search form. A type it doesn't model falls back to the untyped
+# `propiedades-{zona}` listing rather than 404ing the whole search.
+_INMOBUSQUEDA_URL_OP: dict[str, str] = {
+    'venta': 'venta', 'alquiler': 'alquiler', 'alquiler_temp': 'alquiler-temporario',
+}
+_INMOBUSQUEDA_URL_TIPO: dict[str, str] = {
+    'departamento': 'departamento', 'casa': 'casa', 'ph': 'ph',
+    'local': 'local', 'oficina': 'oficina', 'terreno': 'terreno',
+}
+# Card label → our canonical type. The portal's catalog is far wider than ours
+# (Chacras, Tambos, Haras…); anything unlisted lands on 'otro'.
+_INMOBUSQUEDA_TIPO_LABELS: dict[str, str] = {
+    'departamento': 'departamento', 'monoambiente': 'departamento', 'piso': 'departamento',
+    'duplex': 'departamento', 'triplex': 'departamento',
+    'casa': 'casa', 'chalet': 'casa', 'casa quinta': 'casa', 'casa en country': 'casa',
+    'ph': 'ph',
+    'local': 'local', 'fondo de comercio': 'local',
+    'oficina': 'oficina', 'consultorio': 'oficina',
+    'terreno': 'terreno', 'lote': 'terreno', 'campo': 'terreno',
+    'fracciones': 'terreno', 'chacras': 'terreno', 'lote en country': 'terreno',
+}
+
+
+async def _inmobusqueda_resolve_zona_slug(zona: str) -> str | None:
+    """Free-text zona → InmoBusqueda's canonical URL slug, via the portal's own
+    autocomplete ("Gonnet" → "manuel-b-gonnet").
+
+    Candidates are entries whose slugified `name` contains EVERY comma-part of
+    the query; the winner is the first whose FIRST name-component matches the
+    query head exactly, else the first candidate. That exact-head rule is what
+    keeps "city bell" off "Lomas de City Bell" (which the API ranks first and
+    whose page comes back zona-less) and picks CABA's "Palermo" over the
+    homonym in Partido de Anta, Salta. Returns None on no match or any API
+    failure — the caller then skips the search rather than scraping the
+    country.
+    """
+    query_parts = [p.strip() for p in zona.split(',') if p.strip()]
+    if not query_parts:
+        return None
+    cache_key = _slugify(zona)
+    if cache_key in _INMOBUSQUEDA_SLUG_CACHE:
+        return _INMOBUSQUEDA_SLUG_CACHE[cache_key]
+
+    slug: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(
+                _INMOBUSQUEDA_AUTOCOMPLETE_URL,
+                params={'partido': 1, 'valor': query_parts[0]},
+            )
+            resp.raise_for_status()
+            results = resp.json()
+        wanted = [_slugify(p) for p in query_parts]
+        fallback: str | None = None
+        for entry in results or []:
+            name = str(entry.get('name') or '')
+            if not name or not all(part in _slugify(name) for part in wanted):
+                continue
+            # `localidad_id: 0` marks the form-only "Todo el Partido de X"
+            # option: the search box submits it by id, and it has no listing
+            # page of its own — `propiedades-todo-el-partido-de-la-plata.html`
+            # renders the zona-less nationwide page (verified live).
+            if not int(entry.get('localidad_id') or 0):
+                continue
+            head = _slugify(name.split(',')[0])
+            if head == wanted[0]:
+                slug = head
+                break
+            if fallback is None:
+                fallback = head
+        if slug is None:
+            slug = fallback
+    except Exception:
+        return None  # transient failure — don't cache, retry next search
+
+    _INMOBUSQUEDA_SLUG_CACHE[cache_key] = slug
+    return slug
+
+
+def _inmobusqueda_search_urls(
+    filters: ScrapingFilters, max_pages: int, zona_slug: str,
+) -> list[str]:
+    """Listing URLs for one search, page 1..N.
+
+    Two shapes exist: `{tipo}-{operacion}-{zona}.html` when the search pins a
+    single property type AND an operation, else the broader
+    `propiedades-{zona}.html`. Later pages append `-pagina-N` before `.html`.
+    """
+    tipos = filters.tipos_propiedad or []
+    tipo_slug = _INMOBUSQUEDA_URL_TIPO.get(tipos[0], '') if len(tipos) == 1 else ''
+    op_slug = _INMOBUSQUEDA_URL_OP.get(filters.tipo_operacion or '', '')
+    stem = f'{tipo_slug}-{op_slug}-{zona_slug}' if tipo_slug and op_slug else f'propiedades-{zona_slug}'
+
+    pages = max(1, max_pages)
+    return [f'{_INMOBUSQUEDA_BASE}/{stem}.html'] + [
+        f'{_INMOBUSQUEDA_BASE}/{stem}-pagina-{n}.html' for n in range(2, pages + 1)
+    ]
+
+
+def _inmobusqueda_price(text: str) -> tuple[float | None, str]:
+    """"U$S 145.000" → (145000.0, 'USD'); "$ 350.000" → (350000.0, 'ARS').
+
+    "Consultar" (a real listing with no public price) yields no price rather
+    than dropping the card — the pipeline already treats `precio=None` as
+    unknown and never filters it out.
+    """
+    raw = text.strip()
+    moneda = 'ARS' if raw.startswith('$') else 'USD'
+    digits = re.sub(r'[^\d]', '', raw.split(',')[0])
+    return (float(digits) if digits else None), moneda
+
+
+def _inmobusqueda_card_details(card: Any) -> dict[str, Any]:
+    """The `div.rdBox` chip row: ambientes, m², garage, listing code, date.
+
+    Chips are positional-free — each is identified by its own text, because a
+    partial listing simply omits the ones it has no data for (and the row is
+    padded with empty divs). "N Dorm" feeds `ambientes`, the same mapping the
+    Argenprop parser makes.
+    """
+    out: dict[str, Any] = {}
+    for chip in card.select('div.rdBox'):
+        text = ' '.join(chip.get_text(' ', strip=True).split())
+        low = text.lower()
+        if not text or low.startswith('ib-'):
+            continue
+        if 'monoamb' in low:
+            out['ambientes'] = 1
+        elif (m := re.match(r'(\d+)\s*(?:amb|dorm)', low)):
+            out['ambientes'] = int(m.group(1))
+        elif (m := re.match(r'([\d.,]+)\s*(?:mts|m2|m²)', low)):
+            out['m2_total'] = float(m.group(1).replace(',', '.'))
+        elif low.startswith('garage'):
+            out['cocheras'] = 0 if 'no' in low.split() else 1
+    return out
+
+
+def _inmobusqueda_ficha_url(href: str) -> str | None:
+    """Canonical `/ficha-{id}` URL for a card link.
+
+    Promoted listings are wrapped in `ficha.verdestacado.php?id=…&hash=…&rd=…`,
+    a tracking redirect whose `hash`/`rd` change on every crawl — storing that
+    would defeat both dedup and any later re-fetch of the same listing.
+    """
+    href = (href or '').strip()
+    if not href:
+        return None
+    if 'verdestacado' in href:
+        if m := re.search(r'[?&]id=(\d+)', href):
+            return f'{_INMOBUSQUEDA_BASE}/ficha-{m.group(1)}'
+        return None
+    return href
+
+
+def _inmobusqueda_card_identity(
+    tipo_text: str, localidad_text: str,
+) -> tuple[str, str]:
+    """(tipo label, address) for a card, resolved by CONTENT not position.
+
+    The portal reuses one markup for two page shapes: on `propiedades-{zona}`
+    the `resultadoTipo` block reads "{tipo} en {operación}" and `localidad`
+    holds the address; on `{tipo}-{operacion}-{zona}` the SAME block holds the
+    street address and `localidad` reads "{tipo} en {zona}". Whichever block
+    starts with a type we know is the type block; the other is the address.
+    """
+    def leading_tipo(text: str) -> str:
+        head = ' '.join(text.split()).lower()
+        # Longest label first so "casa quinta" wins over "casa".
+        for label in sorted(_INMOBUSQUEDA_TIPO_LABELS, key=len, reverse=True):
+            if head.startswith(label):
+                return label
+        return ''
+
+    tipo_from_localidad = leading_tipo(localidad_text)
+    if tipo_from_localidad and not leading_tipo(tipo_text):
+        # Typed listing: `resultadoTipo` is the street address, and `localidad`
+        # carries "{tipo} en {zona}" — join both so the address keeps its zona.
+        zona_tail = re.sub(r'^\s*\S.*?\ben\b\s*', '', localidad_text, count=1).strip()
+        street = ' '.join(tipo_text.split())
+        direccion = f'{street}, {zona_tail}' if street and zona_tail else (street or zona_tail)
+        return tipo_from_localidad, direccion
+
+    return leading_tipo(tipo_text) or tipo_from_localidad, ' '.join(localidad_text.split())
+
+
+def _parse_inmobusqueda_page(html: str, filters: ScrapingFilters) -> list[RawProperty]:
+    """One results page → RawProperty list, zona-guarded.
+
+    The guard is the same defence ZonaProp needs: when a slug fails to resolve
+    the portal serves nationwide results in identical markup, so a card only
+    survives if its text mentions one of the searched phrases.
+    """
+    from bs4 import BeautifulSoup  # type: ignore[import-untyped]
+
+    soup = BeautifulSoup(html, 'html.parser')
+    # Same phrase-set semantics as `_item_matches_zona`: a composite phrase
+    # ("Villa Elisa, La Plata") requires EVERY comma part in the haystack.
+    phrase_parts = [
+        parts for parts in
+        ([_slugify(p) for p in z.split(',') if _slugify(p)] for z in _guard_phrases(filters))
+        if parts
+    ]
+
+    results: list[RawProperty] = []
+    for card in soup.select('div.ResultadoCaja'):
+        link = card.select_one('div.resultadoTipo a')
+        if link is None:
+            continue
+        url = _inmobusqueda_ficha_url(str(link.get('href') or ''))
+        heading = link.get_text(' ', strip=True)
+
+        localidad_el = card.select_one('div.resultadoLocalidad')
+        localidad_text = localidad_el.get_text(' ', strip=True) if localidad_el else ''
+
+        if phrase_parts:
+            haystack = _slugify(card.get_text(' ', strip=True))
+            if not any(all(part in haystack for part in parts) for parts in phrase_parts):
+                continue
+
+        tipo_key, direccion = _inmobusqueda_card_identity(heading, localidad_text)
+
+        # The operation is only spelled out on the untyped listing ("… en
+        # Venta"); the typed one omits it entirely, so the search's own filter
+        # is the fallback — it is what selected that URL in the first place.
+        op_low = f'{heading} {localidad_text}'.lower()
+        if 'temporario' in op_low:
+            tipo_operacion = 'alquiler_temp'
+        elif 'alquiler' in op_low:
+            tipo_operacion = 'alquiler'
+        elif 'venta' in op_low:
+            tipo_operacion = 'venta'
+        else:
+            tipo_operacion = filters.tipo_operacion or 'venta'
+
+        precio_el = card.select_one('div.resultadoPrecio')
+        precio, moneda = _inmobusqueda_price(precio_el.get_text(' ', strip=True) if precio_el else '')
+
+        desc_el = card.select_one('div.resultadoDescripcion')
+        descripcion = desc_el.get_text(' ', strip=True) if desc_el else None
+
+        # Photoless listings render the agency's "sin fotos" placeholder.
+        imagenes = [
+            src for img in card.select('img.FotoBox')
+            if (src := str(img.get('src') or '').strip()).startswith('http')
+            and 'sinfotos' not in src
+        ]
+
+        detalles = _inmobusqueda_card_details(card)
+        results.append(RawProperty(
+            fuente='inmobusqueda',
+            titulo=' '.join(heading.split()) or None,
+            descripcion=descripcion or None,
+            direccion=direccion or (filters.zona or ''),
+            precio=precio,
+            moneda=moneda,
+            tipo_operacion=tipo_operacion,
+            tipo_propiedad=_INMOBUSQUEDA_TIPO_LABELS.get(tipo_key, 'otro'),
+            ambientes=detalles.get('ambientes'),
+            cocheras=detalles.get('cocheras'),
+            m2_total=detalles.get('m2_total'),
+            imagenes=imagenes[:_MAX_GALLERY],
+            url_origen=url,
+        ))
+    return results
+
+
+async def _scrape_inmobusqueda(
+    filters: ScrapingFilters, on_progress: ProgressCb,
+) -> list[RawProperty]:
+    """Sequential page walk over the portal's own paginated URLs.
+
+    Stops early on an empty page or a short one (the listing's last), so a
+    zona with 30 results costs two requests instead of the full page budget.
+    """
+    from app.core.config import settings
+    await on_progress('inmobusqueda', 'running', 0)
+
+    # Fan-out unit: localidad on the map path, zona on the chat path.
+    zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
+    zona_slug = await _inmobusqueda_resolve_zona_slug(zona)
+    if not zona_slug:
+        # No confident slug → the portal would serve the whole country. Report
+        # zero rather than flooding the search with unrelated listings.
+        await on_progress('inmobusqueda', 'done', 0)
+        return []
+
+    urls = _inmobusqueda_search_urls(filters, settings.INMOBUSQUEDA_MAX_PAGES, zona_slug)
+    results: list[RawProperty] = []
+    seen: set[str] = set()
+    async with httpx.AsyncClient(
+        timeout=20, follow_redirects=True,
+        headers={'User-Agent': 'Mozilla/5.0 (compatible; PropSearchBot/1.0)'},
+    ) as client:
+        for url in urls:
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+            except Exception:
+                break
+
+            page_props = _parse_inmobusqueda_page(resp.text, filters)
+            new = 0
+            for prop in page_props:
+                key = str(prop.url_origen or '')
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                results.append(prop)
+                new += 1
+
+            if new == 0 or len(page_props) < _INMOBUSQUEDA_PAGE_SIZE:
+                break
+            await on_progress('inmobusqueda', 'running', len(results))
+
+    await on_progress('inmobusqueda', 'done', len(results))
+    return results
+
+
+# ── Mudafy — Next.js App Router site. The listing data is NOT in the DOM and
+# there is no `__NEXT_DATA__`: it rides inside the React Server Components
+# flight payload (`self.__next_f.push([...])`), JSON-escaped in a JS string.
+#
+# We do NOT decode the flight format — it's an internal React protocol that
+# shifts between Next releases. Unescaping the page and scanning for
+# `"publication":{…}` objects keeps the coupling to a single property name.
+#
+# Worth the effort because the payload is the richest in this catalog: `street`
+# and `street_number` arrive as separate fields, which is exactly what the
+# cross-portal dedup fingerprint anchors on.
+#
+# robots.txt disallows `/api/` and `/*?` — so path-based URLs only, never a
+# query string. ─────────────────────────────────────────────────────────────
+_MUDAFY_BASE = 'https://mudafy.com.ar'
+_MUDAFY_PAGE_SIZE = 25
+
+# Mudafy searches by broad REGION only: city and barrio slugs 404. Zonas are
+# mapped onto the region that contains them, and the zona guard then does the
+# precision filtering locally over what comes back.
+_MUDAFY_REGIONS: tuple[str, ...] = (
+    'caba',
+    'provincia-de-buenos-aires-gba-norte',
+    'provincia-de-buenos-aires-gba-oeste',
+    'provincia-de-buenos-aires-gba-sur',
+    'provincia-de-buenos-aires-costa-atlantica',
+    'provincia-de-buenos-aires-interior-de-buenos-aires',
+    'cordoba',
+    'rio-negro',
+)
+_MUDAFY_DEFAULT_REGION = 'provincia-de-buenos-aires-gba-sur'
+# Zona → region. Only what this deployment actually searches; anything else
+# falls back to the default region and is filtered by the zona guard.
+_MUDAFY_ZONA_REGION: dict[str, str] = {
+    'la-plata': 'provincia-de-buenos-aires-gba-sur',
+    'city-bell': 'provincia-de-buenos-aires-gba-sur',
+    'manuel-b-gonnet': 'provincia-de-buenos-aires-gba-sur',
+    'gonnet': 'provincia-de-buenos-aires-gba-sur',
+    'villa-elisa': 'provincia-de-buenos-aires-gba-sur',
+    'tolosa': 'provincia-de-buenos-aires-gba-sur',
+    'berisso': 'provincia-de-buenos-aires-gba-sur',
+    'ensenada': 'provincia-de-buenos-aires-gba-sur',
+}
+_MUDAFY_CABA_ZONAS = frozenset({
+    'palermo', 'belgrano', 'caballito', 'recoleta', 'almagro', 'villa-crespo',
+    'nunez', 'colegiales', 'puerto-madero', 'san-telmo', 'flores', 'devoto',
+})
+
+_MUDAFY_URL_OP: dict[str, str] = {'venta': 'venta', 'alquiler': 'alquiler', 'alquiler_temp': 'alquiler'}
+_MUDAFY_URL_TIPO: dict[str, str] = {
+    'departamento': 'departamentos', 'casa': 'casas', 'ph': 'ph',
+    'oficina': 'oficinas', 'terreno': 'terrenos', 'local': 'propiedades',
+}
+_MUDAFY_KIND: dict[str, str] = {
+    'apartment': 'departamento', 'house': 'casa', 'ph': 'ph',
+    'land': 'terreno', 'office': 'oficina', 'commercial': 'local', 'store': 'local',
+}
+# The listing-URL segment mirrors the kind, not our canonical type.
+_MUDAFY_KIND_PATH: dict[str, str] = {
+    'apartment': 'apartment', 'house': 'house', 'ph': 'ph',
+    'land': 'land', 'office': 'office', 'commercial': 'commercial',
+}
+
+
+def _mudafy_region_for(zona: str) -> str:
+    key = _slugify(zona)
+    if key in _MUDAFY_ZONA_REGION:
+        return _MUDAFY_ZONA_REGION[key]
+    if key in _MUDAFY_CABA_ZONAS:
+        return 'caba'
+    if key in _MUDAFY_REGIONS:
+        return key
+    return _MUDAFY_DEFAULT_REGION
+
+
+def _mudafy_search_urls(filters: ScrapingFilters, max_pages: int) -> list[str]:
+    """Listing URLs, page 1..N. Later pages take the `/{N}-p` suffix — read off
+    the site's own pagination hrefs, and query-string free so the crawl stays
+    inside what robots.txt allows."""
+    zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
+    region = _mudafy_region_for(zona)
+    op = _MUDAFY_URL_OP.get(filters.tipo_operacion or 'venta', 'venta')
+    tipos = filters.tipos_propiedad or []
+    tipo = _MUDAFY_URL_TIPO.get(tipos[0], 'propiedades') if len(tipos) == 1 else 'propiedades'
+    base = f'{_MUDAFY_BASE}/{op}/{tipo}/{region}'
+    return [base] + [f'{base}/{n}-p' for n in range(2, max(1, max_pages) + 1)]
+
+
+def _norm_mudafy(pub: dict[str, Any]) -> RawProperty | None:
+    """One `publication` object → RawProperty."""
+    addr = pub.get('address') or {}
+    direccion = str(addr.get('full_address') or addr.get('public_address') or '').strip()
+    if not direccion:
+        return None
+
+    price = pub.get('price') or {}
+    amount = price.get('amount')
+    dims = pub.get('dimensions') or {}
+    prop = pub.get('property') or {}
+    rooms = prop.get('rooms') or {}
+    kind = str(prop.get('kind') or '').lower()
+
+    slug = str(pub.get('slug') or '')
+    kind_path = _MUDAFY_KIND_PATH.get(kind, 'property')
+    url = f'{_MUDAFY_BASE}/{kind_path}/{slug}' if slug else None
+
+    def _num(value: Any) -> float | None:
+        return float(value) if isinstance(value, (int, float)) and value else None
+
+    def _int(value: Any) -> int | None:
+        try:
+            return int(value) if value not in (None, '', 0) else None
+        except (TypeError, ValueError):
+            return None
+
+    imagenes = [
+        str(pic.get('url')) for pic in (pub.get('pictures') or [])
+        if isinstance(pic, dict) and pic.get('url')
+    ]
+
+    return RawProperty(
+        fuente='mudafy',
+        titulo=str(pub.get('title') or '') or None,
+        descripcion=str(pub.get('description') or '') or None,
+        direccion=direccion,
+        precio=float(amount) if isinstance(amount, (int, float)) and amount else None,
+        moneda=str(price.get('currency') or 'USD'),
+        tipo_propiedad=_MUDAFY_KIND.get(kind, 'otro'),
+        ambientes=_int(rooms.get('total_count')),
+        banos=_int(rooms.get('bathrooms')),
+        # `garages: 0` is real data (no parking), unlike a missing key.
+        cocheras=int(rooms['garages']) if isinstance(rooms.get('garages'), int) else None,
+        piso=_int(addr.get('floor_number')),
+        m2_total=_num(dims.get('total_area')),
+        m2_cubiertos=_num(dims.get('roofed_area')),
+        antiguedad=_int(prop.get('construction_year')),
+        imagenes=imagenes[:_MAX_GALLERY],
+        url_origen=url,
+        raw={'id': pub.get('id'), 'coordinates': (addr.get('coordinates') or {})},
+    )
+
+
+def _parse_mudafy_payload(page: str, filters: ScrapingFilters) -> list[RawProperty]:
+    """Every `"publication":{…}` in the flight payload → RawProperty, zona-guarded.
+
+    Mudafy only filters by broad region, so the searched zona is enforced here
+    over whatever the region page returned.
+    """
+    import json
+
+    # The payload lives JSON-escaped inside a JS string literal.
+    text = page.replace('\\"', '"').replace('\\\\', '\\')
+    decoder = json.JSONDecoder()
+    phrase_parts = [
+        parts for parts in
+        ([_slugify(p) for p in z.split(',') if _slugify(p)] for z in _guard_phrases(filters))
+        if parts
+    ]
+
+    results: list[RawProperty] = []
+    seen: set[Any] = set()
+    marker = '"publication":'
+    idx = text.find(marker)
+    while idx != -1:
+        start = idx + len(marker)
+        try:
+            pub, end = decoder.raw_decode(text, start)
+        except ValueError:
+            idx = text.find(marker, start)
+            continue
+        idx = text.find(marker, end)
+
+        if not isinstance(pub, dict):
+            continue
+        pub_id = pub.get('id')
+        if pub_id is not None and pub_id in seen:
+            continue
+        if pub_id is not None:
+            seen.add(pub_id)
+
+        prop = _norm_mudafy(pub)
+        if prop is None:
+            continue
+        if phrase_parts:
+            haystack = _slugify(f'{prop.direccion} {prop.titulo or ""}')
+            if not any(all(part in haystack for part in parts) for parts in phrase_parts):
+                continue
+        # The payload never names the operation — the listing URL chose it.
+        prop.tipo_operacion = filters.tipo_operacion or 'venta'
+        results.append(prop)
+    return results
+
+
+async def _scrape_mudafy(
+    filters: ScrapingFilters, on_progress: ProgressCb,
+) -> list[RawProperty]:
+    from app.core.config import settings
+    await on_progress('mudafy', 'running', 0)
+
+    results: list[RawProperty] = []
+    seen: set[str] = set()
+    async with httpx.AsyncClient(
+        timeout=30, follow_redirects=True,
+        headers={'User-Agent': 'Mozilla/5.0 (compatible; PropSearchBot/1.0)'},
+    ) as client:
+        for url in _mudafy_search_urls(filters, settings.MUDAFY_MAX_PAGES):
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+            except Exception:
+                break
+
+            page_props = _parse_mudafy_payload(resp.text, filters)
+            new = 0
+            for prop in page_props:
+                key = str(prop.url_origen or '')
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                results.append(prop)
+                new += 1
+
+            # A region page that yielded nothing new is either exhausted or
+            # entirely outside the zona — either way, stop paging.
+            if new == 0:
+                break
+            await on_progress('mudafy', 'running', len(results))
+
+    await on_progress('mudafy', 'done', len(results))
+    return results
 
 
 def _norm_mercadolibre_api(item: dict[str, Any], zona: str) -> RawProperty | None:
@@ -1307,6 +1879,10 @@ class ApifyService(BaseApifyService):
             return await _scrape_remax_api(filters, on_progress)
         if source == 'argenprop':
             return await self._scrape_argenprop(filters, on_progress)
+        if source == 'inmobusqueda':
+            return await _scrape_inmobusqueda(filters, on_progress)
+        if source == 'mudafy':
+            return await _scrape_mudafy(filters, on_progress)
 
         actor_id = _ACTORS.get(source)
         if not actor_id:

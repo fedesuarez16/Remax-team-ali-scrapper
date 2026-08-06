@@ -1,4 +1,5 @@
 'use client'
+import type { ApifyCostBreakdown } from '@/lib/apifyCost'
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 const HISTORY_URL = `${API}/api/v1/search-history`
@@ -7,7 +8,7 @@ const FOLDERS_URL = `${HISTORY_URL}/folders`
 /** Per-source Apify tally: `{ zonaprop: { usd, runs } }`. ZonaProp runs one
  *  actor per listing page, so `runs` > 1 is normal. A source missing from the
  *  object never reached Apify (direct scrape or cache hit). */
-export type ApifyCostBreakdown = Record<string, { usd: number; runs: number }>
+export type { ApifyCostBreakdown }
 
 export type SearchEntry = {
   id: string

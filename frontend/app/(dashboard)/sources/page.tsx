@@ -1,7 +1,8 @@
 'use client'
 import { useState } from 'react'
-import { Globe, Loader2, MapPin, Plus, Trash2 } from 'lucide-react'
+import { Building2, Globe, Layers, Loader2, MapPin, Plus, Trash2 } from 'lucide-react'
 import { useManualSources, useSourceZonas } from '@/hooks/useManualSources'
+import { usePortals } from '@/hooks/usePortals'
 
 const ZONA_SUGERIDAS = [
   'City Bell', 'Gonnet', 'Villa Elisa', 'Casco La Plata',
@@ -9,7 +10,8 @@ const ZONA_SUGERIDAS = [
 ]
 
 export default function SourcesPage() {
-  const { sources, addSource, deleteSource, loading } = useManualSources()
+  const { sources, addSource, deleteSource, toggleSource, loading } = useManualSources()
+  const { portals, togglePortal, loading: loadingPortals } = usePortals()
   const { zonas } = useSourceZonas()
   const [nombre, setNombre] = useState('')
   const [url, setUrl] = useState('')
@@ -17,6 +19,11 @@ export default function SourcesPage() {
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+
+  const portalesActivos = portals.filter((p) => p.activo).length
+  const portalesInactivos = portals.length - portalesActivos
+  const inmoActivas = sources.filter((s) => s.activo).length
+  const inmoInactivas = sources.length - inmoActivas
 
   const handleSubmit = async () => {
     setSaving(true)
@@ -53,6 +60,50 @@ export default function SourcesPage() {
       </header>
 
       <div className="mx-auto w-full max-w-2xl flex-1 space-y-6 p-6">
+        {/* ── Resumen de fuentes ────────────────────────────────────────── */}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <SummaryCard
+            icon={<Layers className="size-4 text-muted-foreground" />}
+            title="Portales Inmobiliarios"
+            activas={portalesActivos}
+            inactivas={portalesInactivos}
+            loading={loadingPortals}
+          />
+          <SummaryCard
+            icon={<Building2 className="size-4 text-muted-foreground" />}
+            title="Inmobiliarias Tradicionales"
+            activas={inmoActivas}
+            inactivas={inmoInactivas}
+            loading={loading}
+          />
+        </div>
+
+        {/* ── Portales del catálogo ─────────────────────────────────────── */}
+        <div>
+          <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Portales inmobiliarios
+          </p>
+          <ul className="space-y-2">
+            {portals.map((p) => (
+              <li
+                key={p.id}
+                className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5"
+              >
+                <Layers className="size-4 shrink-0 text-muted-foreground" />
+                <p className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
+                  {p.label}
+                </p>
+                <Toggle
+                  active={p.activo}
+                  onClick={() => togglePortal(p.id, !p.activo)}
+                  label={`${p.activo ? 'Desactivar' : 'Activar'} ${p.label}`}
+                />
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        {/* ── Alta de inmobiliaria / portal manual ──────────────────────── */}
         <div className="space-y-2 rounded-2xl border border-border bg-card p-4 shadow-sm">
           <input
             type="text"
@@ -109,7 +160,9 @@ export default function SourcesPage() {
               {sources.map((s) => (
                 <li
                   key={s.id}
-                  className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5"
+                  className={`flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5 ${
+                    s.activo ? '' : 'opacity-55'
+                  }`}
                 >
                   <Globe className="size-4 shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
@@ -135,6 +188,11 @@ export default function SourcesPage() {
                       {s.url}
                     </a>
                   </div>
+                  <Toggle
+                    active={s.activo}
+                    onClick={() => toggleSource(s.id, !s.activo)}
+                    label={`${s.activo ? 'Desactivar' : 'Activar'} ${s.nombre}`}
+                  />
                   <button
                     onClick={() => handleDelete(s.id)}
                     disabled={deletingId === s.id}
@@ -154,5 +212,69 @@ export default function SourcesPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+/** CRM-style summary card: title + Activas / Inactivas side by side. */
+function SummaryCard({
+  icon,
+  title,
+  activas,
+  inactivas,
+  loading,
+}: {
+  icon: React.ReactNode
+  title: string
+  activas: number
+  inactivas: number
+  loading: boolean
+}) {
+  return (
+    <div className="rounded-2xl border border-border bg-card p-4 shadow-sm">
+      <div className="flex items-center gap-2">
+        {icon}
+        <h2 className="text-sm font-semibold">{title}</h2>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-3">
+        <div>
+          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Activas</p>
+          <p className="text-2xl font-semibold text-foreground">{loading ? '—' : activas}</p>
+        </div>
+        <div>
+          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Inactivas</p>
+          <p className="text-2xl font-semibold text-muted-foreground">{loading ? '—' : inactivas}</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** Compact on/off switch used for both portales and inmobiliarias. */
+function Toggle({
+  active,
+  onClick,
+  label,
+}: {
+  active: boolean
+  onClick: () => void
+  label: string
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={active}
+      aria-label={label}
+      onClick={onClick}
+      className={`relative h-5 w-9 shrink-0 rounded-full transition ${
+        active ? 'bg-foreground' : 'bg-border'
+      }`}
+    >
+      <span
+        className={`absolute top-0.5 size-4 rounded-full bg-background transition-all ${
+          active ? 'left-[1.125rem]' : 'left-0.5'
+        }`}
+      />
+    </button>
   )
 }
