@@ -20,8 +20,10 @@ import { AgencySelector } from '@/components/chat/AgencySelector'
 import { ProgressBubble } from '@/components/chat/ProgressBubble'
 import { SourceSelector } from '@/components/chat/SourceSelector'
 import { SaveSearchPanel } from '@/components/map/SaveSearchPanel'
+import { SavedZonesPanel } from '@/components/map/SavedZonesPanel'
 import { ApifyCostChip } from '@/components/cost/ApifyCostChip'
 import { useZoneSearch } from '@/hooks/useZoneSearch'
+import { useSavedZones, type SavedZone } from '@/hooks/useSavedZones'
 import {
   DEFAULT_SELECTION,
   describeSelection,
@@ -125,6 +127,25 @@ function FocusHandler({
   return null
 }
 
+/** Zooms the map to a delineation the user just picked from the saved list.
+ *  `nonce` re-fires the fit when the SAME zone is picked twice (the polygon
+ *  reference alone wouldn't change). */
+function FitPolygonHandler({
+  polygon,
+  nonce,
+}: {
+  polygon: [number, number][]
+  nonce: number
+}) {
+  const map = useMap()
+  useEffect(() => {
+    if (polygon.length < 3) return
+    map.fitBounds(polygon, { padding: [40, 40] })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map, nonce])
+  return null
+}
+
 type DrawState = 'idle' | 'drawing' | 'closed'
 
 export default function PropertyMap({
@@ -144,6 +165,12 @@ export default function PropertyMap({
   // "search everything" so behaviour matches the pre-selector map.
   const [selection, setSelection] = useState<SourceSelection>(DEFAULT_SELECTION)
   const zone = useZoneSearch()
+  // Named delineations: geometry only, independent of any search. Picking one
+  // draws it; `activeZoneId` marks that what's on the map came from the list
+  // (so we don't offer to save it again).
+  const savedZones = useSavedZones()
+  const [activeZoneId, setActiveZoneId] = useState<string | null>(null)
+  const [fitNonce, setFitNonce] = useState(0)
   const focusMarkerRef = useRef<LeafletCircleMarker | null>(null)
   const focused = useMemo(
     () => (focusId ? properties.find((p) => p.id === focusId) ?? null : null),
@@ -187,13 +214,36 @@ export default function PropertyMap({
 
   const startDrawing = () => {
     setVertices([])
+    setActiveZoneId(null)
     setDrawState('drawing')
   }
   const closeZone = () => setDrawState('closed')
   const clearZone = () => {
     setVertices([])
+    setActiveZoneId(null)
     setDrawState('idle')
     zone.cancel()
+  }
+
+  // Re-draw a stored delineation. Any previous job overlay is dropped: the
+  // saved zone carries no results, it's a fresh starting point.
+  const selectSavedZone = (saved: SavedZone) => {
+    zone.cancel()
+    setVertices(saved.polygon)
+    setDrawState('closed')
+    setActiveZoneId(saved.id)
+    setFitNonce((n) => n + 1)
+  }
+
+  const saveCurrentZone = (name: string) => {
+    void savedZones.saveZone(name, vertices).then((saved) => {
+      if (saved) setActiveZoneId(saved.id)
+    })
+  }
+
+  const deleteSavedZone = (id: string) => {
+    void savedZones.deleteZone(id)
+    if (id === activeZoneId) setActiveZoneId(null)
   }
 
   return (
@@ -216,6 +266,7 @@ export default function PropertyMap({
         <Polyline positions={vertices} pathOptions={ZONE_STYLE} />
       )}
       {zoneActive && <Polygon positions={vertices} pathOptions={ZONE_STYLE} />}
+      {fitNonce > 0 && <FitPolygonHandler polygon={vertices} nonce={fitNonce} />}
       {drawState === 'drawing' &&
         vertices.map((v, i) => (
           <CircleMarker key={`vertex-${i}`} center={v} radius={5} pathOptions={VERTEX_STYLE} />
@@ -385,6 +436,17 @@ export default function PropertyMap({
           {vertices.length < 3 ? ' · mínimo 3' : ''})
         </p>
       )}
+      <SavedZonesPanel
+        zones={savedZones.zones}
+        loading={savedZones.loading}
+        error={savedZones.error}
+        activeZoneId={activeZoneId}
+        canSave={zoneActive && activeZoneId === null}
+        onSelect={selectSavedZone}
+        onSave={saveCurrentZone}
+        onRename={(id, name) => void savedZones.renameZone(id, name)}
+        onDelete={deleteSavedZone}
+      />
       {zone.error && (
         <p className="rounded-lg border border-border bg-background/90 px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
           {zone.error}
