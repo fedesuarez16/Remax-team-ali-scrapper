@@ -7,9 +7,9 @@ import {
 } from 'lucide-react'
 import type { Property } from '@/hooks/useSSEStream'
 import {
-  AGENTE, DISCLAIMER_LEGAL, TEXTO_SELECCION,
-  agenteByEmail, facebookUrl, instagramUrl, whatsappUrl, type Agente,
+  AGENTE, agenteByEmail, whatsappUrl, type Agente, type FichaTextos,
 } from '@/lib/ficha'
+import { useFichaTextos } from '@/hooks/useFichaTextos'
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
@@ -121,28 +121,34 @@ function AgenteCard({ a, p }: { a: Agente; p: Property }) {
         Consultar por WhatsApp
       </a>
 
-      {a.redes && (
+      {/* Cada red se evalúa por separado: Nahir y Ahmed no tienen Facebook, y
+          un botón que lleva a otro perfil es peor que no tener botón. */}
+      {(a.instagram || a.facebook) && (
         <div className="flex gap-2">
-          <a
-            href={instagramUrl(a)}
-            target="_blank"
-            rel="noopener"
-            title={`Instagram de ${a.nombre}`}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition hover:bg-muted"
-          >
-            <InstagramIcon className="size-3.5" />
-            Instagram
-          </a>
-          <a
-            href={facebookUrl(a)}
-            target="_blank"
-            rel="noopener"
-            title={`Facebook de ${a.nombre}`}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition hover:bg-muted"
-          >
-            <FacebookIcon className="size-3.5" />
-            Facebook
-          </a>
+          {a.instagram && (
+            <a
+              href={a.instagram}
+              target="_blank"
+              rel="noopener"
+              title={`Instagram de ${a.nombre}`}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition hover:bg-muted"
+            >
+              <InstagramIcon className="size-3.5" />
+              Instagram
+            </a>
+          )}
+          {a.facebook && (
+            <a
+              href={a.facebook}
+              target="_blank"
+              rel="noopener"
+              title={`Facebook de ${a.nombre}`}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium text-foreground transition hover:bg-muted"
+            >
+              <FacebookIcon className="size-3.5" />
+              Facebook
+            </a>
+          )}
         </div>
       )}
 
@@ -160,13 +166,15 @@ function AgenteCard({ a, p }: { a: Agente; p: Property }) {
   )
 }
 
-function ContactColumn({ p }: { p: Property }) {
+function ContactColumn({ p, textos }: { p: Property; textos: FichaTextos }) {
   // Un único contacto: el agente a cuyo nombre se generó esta ficha.
   const a = agenteByEmail(p.agente_email)
   return (
     <div className="space-y-4">
       <div className="rounded-2xl border border-border bg-muted/40 p-4">
-        <p className="text-sm leading-relaxed text-foreground">{TEXTO_SELECCION}</p>
+        <p className="whitespace-pre-line text-sm leading-relaxed text-foreground">
+          {textos.texto_seleccion}
+        </p>
       </div>
       <AgenteCard a={a} p={p} />
     </div>
@@ -177,6 +185,9 @@ export default function PublicListingPage() {
   const params = useParams<{ id: string }>()
   const id = params?.id
   const [p, setP] = useState<Property | null>(null)
+  // Textos del equipo. El hook arranca en los defaults, así el pie nunca se
+  // renderiza vacío mientras carga ni si el backend no responde.
+  const { textos } = useFichaTextos()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [shared, setShared] = useState(false)
@@ -330,24 +341,23 @@ export default function PublicListingPage() {
           {/* Contact column */}
           <aside className="lg:col-span-1">
             <div className="lg:sticky lg:top-20">
-              <ContactColumn p={p} />
+              <ContactColumn p={p} textos={textos} />
             </div>
           </aside>
         </div>
       </main>
 
+      {/* Pie editable desde el editor de ficha. Los textos son del equipo, no de
+          esta propiedad: cambiarlos reescribe el pie de todas las fichas. */}
       <footer className="mt-8 border-t border-border">
         <div className="mx-auto max-w-5xl space-y-3 px-4 py-6 text-xs text-muted-foreground">
           <div>
-            <p className="font-medium text-foreground">{AGENTE.firma}</p>
-            <p className="mt-0.5">{AGENTE.colegiatura}</p>
+            <p className="font-medium text-foreground">{textos.firma}</p>
+            <p className="mt-0.5">{textos.colegiatura}</p>
           </div>
           {/* Descargo normativo — obligatorio en toda Ficha Propio. */}
-          <p className="leading-relaxed">{DISCLAIMER_LEGAL}</p>
-          <p>
-            Publicación generada por {AGENTE.inmobiliaria}. La información puede estar sujeta a
-            modificaciones sin previo aviso.
-          </p>
+          <p className="whitespace-pre-line leading-relaxed">{textos.disclaimer_legal}</p>
+          <p className="whitespace-pre-line">{textos.pie_publicacion}</p>
         </div>
       </footer>
     </div>

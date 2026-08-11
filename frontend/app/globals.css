@@ -80,6 +80,24 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
+
+  /* Series del dashboard de métricas.
+   *
+   * Grises por diseño: este sistema es acromático (todos los tokens tienen croma
+   * 0), así que meterle un par categórico de colores rompería la identidad visual.
+   * La separación va por LIGHTNESS, que además es el único canal que sobrevive
+   * intacto a los tres tipos de daltonismo: ΔE 28.7 en deuteranopía Y tritanopía,
+   * verificado con el validador, contra un piso de 8.
+   *
+   * Cada serie tiene su token fijo: el color sigue a la ENTIDAD, nunca a su
+   * ranking. Si mañana el gasto de LLM supera al de Apify, no se repintan. */
+  --serie-apify: oklch(0.269 0 0);
+  --serie-llm: oklch(0.556 0 0);
+  /* Track de los meters: paso más claro de la MISMA rampa que el relleno, para
+   * que el estado se lea a lo largo de toda la barra. */
+  --serie-track: oklch(0.922 0 0);
+  /* Grilla y ejes: un paso off-surface, hairline y sólida (nunca punteada). */
+  --serie-grid: oklch(0.922 0 0);
 }
 
 .dark {
@@ -114,6 +132,16 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
+
+  /* Pasos ELEGIDOS para dark, no un flip automático del set claro. Los --chart-*
+   * de arriba son idénticos en ambos temas, así que sobre la card oscura
+   * (L 0.205) el paso 0.269 sería prácticamente invisible — por eso las series
+   * del dashboard tienen sus propios valores acá, revalidados contra la
+   * superficie oscura: ΔE 20.6 en deuteranopía y tritanopía. */
+  --serie-apify: oklch(0.922 0 0);
+  --serie-llm: oklch(0.715 0 0);
+  --serie-track: oklch(0.32 0 0);
+  --serie-grid: oklch(1 0 0 / 12%);
 }
 
 @layer base {

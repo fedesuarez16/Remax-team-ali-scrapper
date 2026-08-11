@@ -9,7 +9,7 @@ import httpx
 from anthropic import AsyncAnthropic
 
 from app.core.config import settings
-from app.services.llm_costs import record_llm_usage
+from app.services.llm_costs import SCOPE_FICHA_ENRICH, SCOPE_FICHA_PROPIO, record_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -331,7 +331,7 @@ async def enrich_ficha(prop: dict[str, Any], sb: Any) -> dict[str, Any]:
     # evita que el contador infle con gasto que no es de Ficha Propio.
     await record_llm_usage(
         sb,
-        scope='ficha_propio' if prop.get('fuente') == 'manual' else 'ficha_enrich',
+        scope=SCOPE_FICHA_PROPIO if prop.get('fuente') == 'manual' else SCOPE_FICHA_ENRICH,
         model=MODEL,
         usage=getattr(msg, 'usage', None),
         property_id=prop.get('id'),

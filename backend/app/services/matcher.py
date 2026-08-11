@@ -8,6 +8,7 @@ from anthropic import AsyncAnthropic
 
 from app.core.config import settings
 from app.models.property import MatchCriteria, ScoreBreakdown
+from app.services.llm_costs import SCOPE_MATCH_PARSE, record_llm_usage
 
 MODEL = 'claude-haiku-4-5-20251001'
 _client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
@@ -229,7 +230,17 @@ def _parse_criteria_heuristic(query: str) -> MatchCriteria:
     )
 
 
-async def _parse_criteria(query: str) -> MatchCriteria:
+async def _parse_criteria(
+    query: str, *, sb: Any = None, job_id: str | None = None,
+) -> MatchCriteria:
+    """Parse a natural-language query into structured criteria, falling back to the
+    heuristic parser on any LLM trouble.
+
+    `sb`/`job_id` are the ledger hooks. They are optional because the heuristic
+    fallback means this function must keep working with no infrastructure at all —
+    but when a caller has them, the call gets booked. The billed call is recorded
+    even when tool-use parsing fails and the heuristic takes over.
+    """
     try:
         msg = await _client.messages.create(
             model=MODEL,
@@ -238,6 +249,13 @@ async def _parse_criteria(query: str) -> MatchCriteria:
             tools=[_EXTRACT_MATCH_CRITERIA_TOOL],  # type: ignore[list-item]
             tool_choice={'type': 'tool', 'name': 'extract_match_criteria'},
             messages=[{'role': 'user', 'content': query}],
+        )
+        await record_llm_usage(
+            sb,
+            scope=SCOPE_MATCH_PARSE,
+            model=MODEL,
+            usage=getattr(msg, 'usage', None),
+            job_id=job_id,
         )
         tool_use = next((b for b in msg.content if b.type == 'tool_use'), None)
         if tool_use is not None:
@@ -249,14 +267,19 @@ async def _parse_criteria(query: str) -> MatchCriteria:
     return _parse_criteria_heuristic(query)
 
 
-async def rank_properties(query: str, properties: list[dict]) -> list[dict]:
+async def rank_properties(
+    query: str, properties: list[dict], *, sb: Any = None, job_id: str | None = None,
+) -> list[dict]:
     """Score and sort an already-fetched set of properties against a query.
 
     Unlike ``match_properties``, this does not touch the DB or filter anything —
     it ranks the exact list passed in. Each property dict is mutated in place with
     ``match_score`` (0-100) and ``match_reasons``, then sorted by score descending.
+
+    ``sb``/``job_id`` only feed the token ledger: pass them when the ranking runs
+    as part of a search, so the criteria-parse call is attributed to that job.
     """
-    criteria = await _parse_criteria(query)
+    criteria = await _parse_criteria(query, sb=sb, job_id=job_id)
     for prop in properties:
         score, _breakdown, reasons = _score_property(prop, criteria)
         prop['match_score'] = score
@@ -266,7 +289,9 @@ async def rank_properties(query: str, properties: list[dict]) -> list[dict]:
 
 
 async def match_properties(query: str, supabase: Any) -> dict[str, Any]:
-    criteria = await _parse_criteria(query)
+    # No job_id: POST /properties/match searches the whole CRM, it is not part of
+    # any scraping job.
+    criteria = await _parse_criteria(query, sb=supabase)
 
     q = supabase.table('properties').select('*').eq('tipo_operacion', 'venta').limit(500)
 

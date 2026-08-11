@@ -16,6 +16,13 @@ import pytest
 
 from app.services.llm_costs import (
     HAIKU_4_5,
+    SCOPE_EXTRACT_INSTAGRAM,
+    SCOPE_EXTRACT_WEBSITE,
+    SCOPE_FICHA_ENRICH,
+    SCOPE_FICHA_PROPIO,
+    SCOPE_MATCH_PARSE,
+    SCOPE_SEARCH_PARSE,
+    SEARCH_SCOPES,
     record_llm_usage,
     usage_cost_usd,
 )
@@ -131,3 +138,54 @@ async def test_write_failure_never_propagates() -> None:
 
 async def test_no_supabase_is_a_noop() -> None:
     await record_llm_usage(None, scope='ficha_propio', model=HAIKU_4_5, usage=_Usage(input_tokens=1))
+
+
+# ── job attribution ──────────────────────────────────────────────────────────
+#
+# Without `job_id` the ledger can price a call but cannot answer "what did THIS
+# search cost me in tokens". `property_id` is not a substitute: the properties
+# dedup index (direccion, precio, tipo_operacion) leaves a re-scraped listing
+# attached to the job that first saw it, so per-job spend derived from it drifts.
+
+
+async def test_records_the_job_that_paid_for_the_call() -> None:
+    sb = _CapturingSupabase()
+    await record_llm_usage(
+        sb, scope=SCOPE_SEARCH_PARSE, model=HAIKU_4_5,
+        usage=_Usage(input_tokens=300, output_tokens=80),
+        job_id='job-42',
+    )
+    assert sb.rows[-1]['job_id'] == 'job-42'
+
+
+async def test_job_id_is_null_when_the_call_belongs_to_no_search() -> None:
+    """CRM-side calls (ficha propio, /properties/match) are not part of any job."""
+    sb = _CapturingSupabase()
+    await record_llm_usage(
+        sb, scope=SCOPE_FICHA_PROPIO, model=HAIKU_4_5, usage=_Usage(input_tokens=10),
+    )
+    assert sb.rows[-1]['job_id'] is None
+
+
+# ── scope taxonomy ───────────────────────────────────────────────────────────
+
+
+def test_search_scopes_never_collide_with_the_ficha_propio_counter() -> None:
+    """`GET /properties/ficha-propio/stats` sums `cost_usd` WHERE scope='ficha_propio'.
+
+    Any newly instrumented call site that reused that scope would silently inflate
+    the CRM counter, which is exactly the bug this taxonomy exists to prevent.
+    """
+    assert SCOPE_FICHA_PROPIO not in SEARCH_SCOPES
+    assert SCOPE_FICHA_ENRICH not in SEARCH_SCOPES
+
+
+def test_every_search_side_call_site_has_its_own_scope() -> None:
+    """One scope per call site — otherwise per-source spend can't be broken out."""
+    assert SEARCH_SCOPES == frozenset({
+        SCOPE_SEARCH_PARSE,
+        SCOPE_MATCH_PARSE,
+        SCOPE_EXTRACT_WEBSITE,
+        SCOPE_EXTRACT_INSTAGRAM,
+    })
+    assert len(SEARCH_SCOPES) == 4

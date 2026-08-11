@@ -414,7 +414,7 @@ async def get_job_properties(job_id: str, request: Request) -> dict[str, Any]:
     if query_raw and properties:
         try:
             from app.services.matcher import rank_properties
-            properties = await rank_properties(query_raw, properties)
+            properties = await rank_properties(query_raw, properties, sb=sb, job_id=job_id)
         except Exception as exc:
             log.warning('match ranking failed (%s) — returning unranked properties', exc)
 

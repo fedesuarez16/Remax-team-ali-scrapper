@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     properties, leads, scraping, agents, geo, search_history, saved_zones, manual_sources,
-    portals, cleanup,
+    portals, cleanup, ficha_settings, metrics,
 )
 
 api_router = APIRouter()
@@ -17,3 +17,5 @@ api_router.include_router(saved_zones.router, prefix="/saved-zones", tags=["save
 api_router.include_router(manual_sources.router, prefix="/manual-sources", tags=["manual-sources"])
 api_router.include_router(portals.router, prefix="/portals", tags=["portals"])
 api_router.include_router(cleanup.router, prefix="/cleanup", tags=["cleanup"])
+api_router.include_router(ficha_settings.router, prefix="/ficha-settings", tags=["ficha-settings"])
+api_router.include_router(metrics.router, prefix="/metrics", tags=["metrics"])

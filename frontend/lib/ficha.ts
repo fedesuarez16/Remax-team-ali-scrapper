@@ -74,23 +74,12 @@ export type Agente = {
   cargo: string
   telefono: string
   email: string
-  /** `true` ⇒ la ficha muestra los botones de Instagram y Facebook. */
-  redes: boolean
-  /** Perfil PERSONAL del agente. `null` ⇒ el botón usa el de la inmobiliaria
-   *  (`REDES_INMOBILIARIA`), que es real y verificado. Nunca se adivina un
-   *  handle: un usuario inventado puede ser el de un tercero, y este link viaja
-   *  en una ficha que el equipo le manda a sus clientes. */
+  /** URL del perfil, o `null` si el agente no tiene cuenta en esa red. Cada red
+   *  se decide por separado: no todos tienen las dos, y un botón que lleva a
+   *  otro lado es peor que no tener botón. */
   instagram: string | null
   facebook: string | null
 }
-
-/** Cuentas oficiales de RE/MAX Diagonal II, tomadas del sitio de la oficina
- *  (remax-diagonal2.com.ar/nosotros/contacto/). Son el destino por defecto de
- *  los botones de redes: la inmobiliaria a la que pertenece el agente. */
-export const REDES_INMOBILIARIA = {
-  instagram: 'https://www.instagram.com/remaxdiagonal2',
-  facebook: 'https://www.facebook.com/remaxdiagonal2',
-} as const
 
 /** Equipo Alí — RE/MAX Diagonal II. El orden es el de la ficha. */
 export const AGENTES: readonly Agente[] = [
@@ -100,11 +89,8 @@ export const AGENTES: readonly Agente[] = [
     cargo: 'Corredor Inmobiliario Col. 7428',
     telefono: '+54 9 221 477 0660',
     email: 'aliandres@remax.com.ar',
-    redes: true,
-    // Sin perfil personal publicado: los botones usan el oficial de la oficina.
-    // Si Andrés tiene cuenta propia, pegarla acá y el botón la prefiere.
-    instagram: null,
-    facebook: null,
+    instagram: 'https://www.instagram.com/andresaliremax',
+    facebook: 'https://www.facebook.com/AndresAliRemax',
   },
   {
     nombre: 'Nahir Alí',
@@ -112,10 +98,8 @@ export const AGENTES: readonly Agente[] = [
     cargo: 'Agente Inmobiliario',
     telefono: '+54 9 221 477 0661',
     email: 'nali@remax.com.ar',
-    redes: true,
-    // Sin perfil personal publicado: los botones usan el oficial de la oficina.
-    instagram: null,
-    facebook: null,
+    instagram: 'https://www.instagram.com/nahiraliremax',
+    facebook: null, // Nahir no tiene Facebook: el botón no se muestra
   },
   {
     nombre: 'Ahmed Alí',
@@ -123,9 +107,8 @@ export const AGENTES: readonly Agente[] = [
     cargo: 'Team Alí',
     telefono: '+54 9 221 477 0671',
     email: 'menchuali2003@gmail.com',
-    redes: false, // el pedido no lista redes para Ahmed: sólo teléfono y correo
-    instagram: null,
-    facebook: null,
+    instagram: 'https://www.instagram.com/teamaliremax', // cuenta del Team Alí
+    facebook: null, // Ahmed no tiene Facebook: el botón no se muestra
   },
 ] as const
 
@@ -159,20 +142,72 @@ export const DISCLAIMER_LEGAL =
   'ejercen el Corretaje Inmobiliario. Todas las operaciones inmobiliarias son concluidas ' +
   'por los Corredores Matriculados responsables en cada oficina.'
 
+/**
+ * Textos editables de la ficha. Son GLOBALES del equipo: se editan una vez y
+ * cambian en todas las fichas, publicadas y futuras. Viven en el backend
+ * (`ficha_settings`, fila única) porque eso es lo que ya eran acá: constantes
+ * compartidas por todas las fichas, no datos de una propiedad.
+ */
+export type FichaTextos = {
+  /** Presentación, arriba de la tarjeta del agente. */
+  texto_seleccion: string
+  /** Descargo normativo del pie. Obligatorio en toda ficha publicada. */
+  disclaimer_legal: string
+  /** Firma del pie: corredor responsable. */
+  firma: string
+  /** Matrícula / colegiatura, debajo de la firma. */
+  colegiatura: string
+  /** Cierre del pie ("Publicación generada por…"). */
+  pie_publicacion: string
+}
+
+/** Espejo de `DEFAULT_TEXTOS` del backend. Es el fallback cuando el backend no
+ *  responde: una ficha pública con el pie vacío es peor que una desactualizada,
+ *  y el descargo legal tiene que aparecer siempre. */
+export const FICHA_TEXTOS_DEFAULT: FichaTextos = {
+  texto_seleccion: TEXTO_SELECCION,
+  disclaimer_legal: DISCLAIMER_LEGAL,
+  firma: AGENTES[0].nombre + ' | Diagonal II',
+  colegiatura: 'C.D.C.P.D.J.L.P. 7428',
+  pie_publicacion:
+    `Publicación generada por ${AGENTES[0].inmobiliaria}. La información puede estar sujeta a ` +
+    'modificaciones sin previo aviso.',
+}
+
+/** Lee los textos del equipo. Nunca falla: ante cualquier problema devuelve los
+ *  defaults, para que la ficha pública siempre tenga pie. */
+export async function getFichaTextos(signal?: AbortSignal): Promise<FichaTextos> {
+  try {
+    const res = await fetch(`${API}/api/v1/ficha-settings`, { signal })
+    if (!res.ok) return FICHA_TEXTOS_DEFAULT
+    const data = await res.json()
+    return { ...FICHA_TEXTOS_DEFAULT, ...(data.settings ?? {}) } as FichaTextos
+  } catch {
+    return FICHA_TEXTOS_DEFAULT
+  }
+}
+
+/** Guarda uno o más textos del equipo. A diferencia de la lectura, acá el fallo
+ *  SÍ se propaga (`null`): el usuario tiene que enterarse de que no se guardó. */
+export async function updateFichaTextos(patch: Partial<FichaTextos>): Promise<FichaTextos | null> {
+  try {
+    const res = await fetch(`${API}/api/v1/ficha-settings`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    if (data.error || !data.settings) return null
+    return data.settings as FichaTextos
+  } catch {
+    return null
+  }
+}
+
 /** Link de WhatsApp listo para usar (wa.me exige el número sin símbolos). */
 export function whatsappUrl(telefono: string, texto: string): string {
   return `https://wa.me/${telefono.replace(/\D/g, '')}?text=${encodeURIComponent(texto)}`
-}
-
-/** Instagram del agente: su perfil personal si está cargado, si no el oficial
- *  de la inmobiliaria. Siempre resuelve a un perfil real. */
-export function instagramUrl(a: Agente): string {
-  return a.instagram ?? REDES_INMOBILIARIA.instagram
-}
-
-/** Ídem para Facebook. */
-export function facebookUrl(a: Agente): string {
-  return a.facebook ?? REDES_INMOBILIARIA.facebook
 }
 
 /** URL pública y compartible de la ficha propia de una propiedad (reemplaza la del portal). */

@@ -21,7 +21,7 @@ from anthropic import AsyncAnthropic
 from app.core.config import settings
 from app.models.property import NormalizedProperty
 from app.services.apify import _extract_images_from_html, harvest_page_images
-from app.services.llm_costs import record_llm_usage
+from app.services.llm_costs import SCOPE_FICHA_PROPIO, record_llm_usage
 from app.services.zona import normalize_address
 
 MODEL = 'claude-haiku-4-5-20251001'
@@ -150,7 +150,7 @@ async def import_property_from_url(sb: Any, url: str) -> dict[str, Any]:
     data, usage = await _extract_llm(url, text)
     # Se bookea SIEMPRE, encuentre o no la propiedad: Anthropic cobra la llamada
     # igual, y un contador que sólo suma los aciertos subestima el gasto real.
-    await record_llm_usage(sb, scope='ficha_propio', model=MODEL, usage=usage, url=url)
+    await record_llm_usage(sb, scope=SCOPE_FICHA_PROPIO, model=MODEL, usage=usage, url=url)
     if not data:
         raise RuntimeError('No se encontró una propiedad en esa página')
 

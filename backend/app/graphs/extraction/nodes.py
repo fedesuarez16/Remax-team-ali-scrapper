@@ -15,6 +15,12 @@ from app.graphs.extraction.tools import (
     EXTRACT_FILTERS_TOOL, INSTAGRAM_EXTRACT_TOOL, INSTAGRAM_SYSTEM_PROMPT, SYSTEM_PROMPT,
 )
 from app.services.apify import PORTAL_SOURCES, get_apify_service, harvest_page_images
+from app.services.llm_costs import (
+    SCOPE_EXTRACT_INSTAGRAM,
+    SCOPE_EXTRACT_WEBSITE,
+    SCOPE_SEARCH_PARSE,
+    record_llm_usage,
+)
 from app.services.zona import (
     address_fingerprint as _address_fingerprint,
     normalize_address as _normalize_address,
@@ -36,6 +42,16 @@ async def parse_query(state: ScrapingState, config: RunnableConfig) -> dict[str,
         tool_choice={'type': 'tool', 'name': 'extract_search_filters'},
         messages=[{'role': 'user', 'content': state['query']}],
     )
+    # Booked before the tool_use check on purpose: a query too vague to parse still
+    # burned tokens, and the clarification branches below return early.
+    await record_llm_usage(
+        config['configurable'].get('supabase'),
+        scope=SCOPE_SEARCH_PARSE,
+        model=MODEL,
+        usage=getattr(msg, 'usage', None),
+        job_id=state.get('job_id'),
+    )
+
     tool_use = next((b for b in msg.content if b.type == 'tool_use'), None)
     if tool_use is None:
         await adispatch_custom_event('clarification', {
@@ -753,6 +769,12 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
     pages: list[dict[str, str]] = state.get('website_pages', [])
     results: list[NormalizedProperty] = []
     total_pages = len(pages)
+    # One ledger row per page rather than one aggregate for the node: this loop is
+    # where token spend concentrates, and an aggregate would hide which site was
+    # expensive. Writing inside the loop also means a crash mid-run keeps the rows
+    # for the pages already paid for.
+    sb = config['configurable'].get('supabase')
+    job_id = state.get('job_id')
 
     for page_idx, page in enumerate(pages, 1):
         await adispatch_custom_event('progress', {
@@ -775,7 +797,17 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
                 messages=[{'role': 'user', 'content': f'Página: {page.get("url", "")}\n\n{text}'}],
             )
         except Exception:
+            # Never reached Anthropic → nothing billed, nothing to book.
             continue
+
+        await record_llm_usage(
+            sb,
+            scope=SCOPE_EXTRACT_WEBSITE,
+            model=MODEL,
+            usage=getattr(msg, 'usage', None),
+            job_id=job_id,
+            url=page.get('url') or None,
+        )
 
         tool_use = next((b for b in msg.content if b.type == 'tool_use'), None)
         if not tool_use:
@@ -920,6 +952,8 @@ async def extract_instagram_properties_llm(state: ScrapingState, config: Runnabl
     posts: list[dict] = state.get('instagram_posts', [])
     results: list[NormalizedProperty] = []
     total_posts = len(posts)
+    sb = config['configurable'].get('supabase')
+    job_id = state.get('job_id')
 
     for post_idx, post in enumerate(posts, 1):
         await adispatch_custom_event('progress', {
@@ -941,6 +975,18 @@ async def extract_instagram_properties_llm(state: ScrapingState, config: Runnabl
             )
         except Exception:
             continue
+
+        # Booked before the es_propiedad check: classifying a post as "not a listing"
+        # costs exactly as much as classifying it as one.
+        await record_llm_usage(
+            sb,
+            scope=SCOPE_EXTRACT_INSTAGRAM,
+            model=MODEL,
+            usage=getattr(msg, 'usage', None),
+            job_id=job_id,
+            url=post.get('url') or None,
+        )
+
         tool_use = next((b for b in msg.content if b.type == 'tool_use'), None)
         if not tool_use or not tool_use.input.get('es_propiedad'):
             continue
