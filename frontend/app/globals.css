@@ -134,9 +134,7 @@
   --sidebar-ring: oklch(0.556 0 0);
 
   /* Pasos ELEGIDOS para dark, no un flip automático del set claro. Los --chart-*
-   * de arriba son idénticos en ambos temas, así que sobre la card oscura
-   * (L 0.205) el paso 0.269 sería prácticamente invisible — por eso las series
-   * del dashboard tienen sus propios valores acá, revalidados contra la
+   * de arriba son idénticos en ambos temas, así que sobre la card oscura   * del dashboard tienen sus propios valores acá, revalidados contra la
    * superficie oscura: ΔE 20.6 en deuteranopía y tritanopía. */
   --serie-apify: oklch(0.922 0 0);
   --serie-llm: oklch(0.715 0 0);
