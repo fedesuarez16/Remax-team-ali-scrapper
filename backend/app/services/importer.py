@@ -20,7 +20,12 @@ from anthropic import AsyncAnthropic
 
 from app.core.config import settings
 from app.models.property import NormalizedProperty
-from app.services.apify import _extract_images_from_html, harvest_page_images
+from app.services.apify import (
+    _extract_images_from_html,
+    fetch_page_html_via_actor,
+    harvest_page_images,
+    render_page_html,
+)
 from app.services.llm_costs import SCOPE_FICHA_PROPIO, record_llm_usage
 from app.services.zona import normalize_address
 
@@ -78,25 +83,108 @@ _FICHA_SYSTEM_PROMPT = (
 _MIN_GALLERY = 4
 
 
-async def _fetch_page(url: str) -> tuple[str, list[str]]:
-    """Fetch the ficha and return (visible text, server-HTML gallery)."""
+# ── Fetch ladder: httpx → Playwright local → actor de Apify ───────────────────
+#
+# Argenprop (y cualquier portal detrás de AWS WAF Bot Control) devuelve 403 a un
+# GET pelado de httpx. El search path ya lo sabía y corre el actor con
+# `crawlerType: 'playwright:chrome'`; este path se comía el 403 y abortaba el
+# import entero.
+#
+# El orden es puramente económico: httpx es gratis e instantáneo y alcanza para
+# la mayoría de los portales (tokko, xintel, webs de inmobiliarias); Playwright
+# cuesta segundos; el actor cuesta plata. Cada escalón sólo se paga cuando el
+# anterior no alcanzó.
+#
+# La distinción que importa es bloqueo ≠ ausencia: un 403 es "el portal no nos
+# deja" y se reintenta con más artillería; un 404 es "el aviso no existe" y
+# escalar no lo va a revivir — sólo quema tiempo y créditos de Apify.
+
+_BROWSER_HEADERS = {
+    'User-Agent': (
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+    ),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'es-AR,es;q=0.9,en;q=0.8',
+    'Upgrade-Insecure-Requests': '1',
+}
+
+# Códigos donde el portal nos rechaza a NOSOTROS, no a la URL.
+_BLOCKED_STATUS = frozenset({401, 403, 405, 429, 503})
+
+# Un challenge de WAF vuelve con 200 y HTML válido, así que hay que mirar el
+# cuerpo. Lo que NO sirve es buscar el nombre del vendor: verificado en vivo,
+# argenprop.com inyecta `captcha-sdk.awswaf.com/challenge.js` en TODAS sus
+# páginas, ficha real incluida. Ese detector daba falso positivo sobre páginas
+# perfectamente buenas y mandaba cada import a pagar un run de Apify al pedo.
+#
+# La señal honesta es el TEXTO VISIBLE: un challenge pesa kilobytes de script y
+# no dice nada; una ficha real trae miles de caracteres de descripción. El
+# umbral es holgado a propósito — de más, escalamos y gastamos sin necesidad.
+_MIN_VISIBLE_TEXT = 500
+
+
+class PortalBlocked(RuntimeError):
+    """El portal nos bloqueó. No dice NADA sobre si la propiedad existe."""
+
+
+def _is_blocked_status(status: int) -> bool:
+    return status in _BLOCKED_STATUS
+
+
+def _visible_text(html: str) -> str:
+    """El texto que un humano ve — sin scripts, estilos ni chrome de navegación."""
     from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (compatible; PropSearchBot/1.0)',
-        'Accept-Language': 'es-AR,es;q=0.9',
-    }
-    async with httpx.AsyncClient(headers=headers, timeout=20, follow_redirects=True) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        html = resp.text
-
-    imgs = _extract_images_from_html(html, url)
     soup = BeautifulSoup(html, 'html.parser')
     for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
         tag.decompose()
-    text = re.sub(r'\n{3,}', '\n\n', soup.get_text(separator='\n')).strip()
-    return text[:8000], imgs
+    return re.sub(r'\n{3,}', '\n\n', soup.get_text(separator='\n')).strip()
+
+
+def _looks_blocked(html: str) -> bool:
+    """True si el HTML es un challenge/interstitial en vez de la ficha."""
+    return len(_visible_text(html)) < _MIN_VISIBLE_TEXT
+
+
+async def _fetch_html_httpx(url: str) -> str:
+    """Tier 1. Levanta ``PortalBlocked`` si el portal nos rechaza a nosotros;
+    cualquier otro error HTTP (404, 500) propaga tal cual."""
+    async with httpx.AsyncClient(
+        headers=_BROWSER_HEADERS, timeout=20, follow_redirects=True,
+    ) as client:
+        resp = await client.get(url)
+    if _is_blocked_status(resp.status_code):
+        raise PortalBlocked(f'El portal bloqueó el pedido ({resp.status_code})')
+    resp.raise_for_status()
+    html = resp.text
+    if _looks_blocked(html):
+        raise PortalBlocked('El portal devolvió un challenge en vez de la ficha')
+    return html
+
+
+async def _fetch_html(url: str) -> str:
+    """La ficha en HTML, escalando sólo lo necesario. Ver el bloque de arriba."""
+    try:
+        return await _fetch_html_httpx(url)
+    except PortalBlocked:
+        pass
+
+    for fetch in (render_page_html, fetch_page_html_via_actor):
+        html = await fetch(url)
+        if html and not _looks_blocked(html):
+            return html
+
+    raise PortalBlocked(
+        'El portal bloqueó todos los intentos (httpx, browser y Apify). '
+        'La propiedad puede existir igual — reintentá más tarde.'
+    )
+
+
+async def _fetch_page(url: str) -> tuple[str, list[str]]:
+    """Fetch the ficha and return (visible text, server-HTML gallery)."""
+    html = await _fetch_html(url)
+    return _visible_text(html)[:8000], _extract_images_from_html(html, url)
 
 
 async def _extract_llm(url: str, text: str) -> tuple[dict[str, Any] | None, Any]:

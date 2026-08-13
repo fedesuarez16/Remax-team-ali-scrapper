@@ -1606,6 +1606,96 @@ async def _render_gallery_images(urls: list[str]) -> dict[str, list[str]]:
     return out
 
 
+# ── Single-page HTML fetchers for WAF'd portals ───────────────────────────────
+#
+# Two escalations for the same problem: a portal that 403s a plain httpx GET.
+# Neither is used for search (that path runs its own actor per portal) — both
+# exist for the one-page fetches, where paying a full actor run up front would
+# be absurd for the majority of sites that answer a plain GET just fine.
+#
+# The caller owns the ladder and the blocked/not-blocked decision; these two
+# only know how to fetch. Both return None on failure instead of raising, so a
+# missing Chromium or an unset Apify token degrades to the next rung rather
+# than killing the import.
+
+_BROWSER_UA = (
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+)
+
+
+async def render_page_html(url: str) -> str | None:
+    """Load one page in headless Chromium and return its rendered HTML.
+
+    Gets past the plain-UA blocks and the JS-hydration walls that make httpx
+    come back empty. NOT a guaranteed WAF bypass: Argenprop's AWS WAF Bot
+    Control challenges default headless Chromium too (see the module header),
+    which is exactly why the caller checks the returned HTML before trusting it.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except Exception:
+        return None
+
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(args=['--disable-blink-features=AutomationControlled'])
+            try:
+                context = await browser.new_context(
+                    user_agent=_BROWSER_UA,
+                    locale='es-AR',
+                    viewport={'width': 1440, 'height': 900},
+                )
+                page = await context.new_page()
+                try:
+                    await page.goto(url, wait_until='domcontentloaded', timeout=25000)
+                    # WAF challenges resolve themselves a beat after load; the
+                    # rendered DOM is worthless if we snapshot it mid-challenge.
+                    await page.wait_for_timeout(2500)
+                    return str(await page.content())
+                except Exception:
+                    return None
+                finally:
+                    await page.close()
+            finally:
+                await browser.close()
+    except Exception:
+        return None
+
+
+async def fetch_page_html_via_actor(url: str) -> str | None:
+    """Last resort: fetch one page through Apify's website-content-crawler.
+
+    This is the only fetcher verified to get past Argenprop's WAF, and the only
+    one that costs real money — hence last. `htmlTransformer: 'none'` for the
+    same reason the search path sets it: the Readability DOM drops the photo
+    carousel, and the gallery is half the point of a ficha.
+    """
+    from app.core.config import settings
+    if settings.APIFY_USE_MOCK or not settings.APIFY_API_TOKEN:
+        return None
+
+    service = ApifyService(api_token=settings.APIFY_API_TOKEN)
+    try:
+        pages = await service._run_actor('ficha_propio', _ACTORS['website'], {
+            'startUrls': [{'url': url}],
+            'maxCrawlPages': 1,
+            'maxCrawlDepth': 0,
+            'crawlerType': 'playwright:chrome',
+            'saveHtml': True,
+            'htmlTransformer': 'none',
+        })
+    except Exception:
+        return None
+    finally:
+        await service._client.aclose()
+
+    for page in pages:
+        if html := page.get('html'):
+            return str(html)
+    return None
+
+
 async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict[str, str]]:
     from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 
