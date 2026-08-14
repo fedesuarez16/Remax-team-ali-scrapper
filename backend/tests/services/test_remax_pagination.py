@@ -125,8 +125,9 @@ async def test_page_size_comes_from_settings(
     assert len(results) == 50
 
 
-async def test_default_cap_is_the_previous_hardcoded_depth() -> None:
-    # Behavior-preserving default: existing deployments keep the 5 × 20 = 100
-    # ceiling until they opt into more.
-    assert settings.REMAX_MAX_PAGES == 5
-    assert settings.REMAX_PAGE_SIZE == 20
+async def test_default_ships_uncapped() -> None:
+    # The 5 × 20 = 100 default WAS the bug: every zona search topped out at
+    # exactly 100 items and it read like a portal limit. See
+    # `test_uncapped_pagination.py` for the cross-portal contract.
+    assert settings.REMAX_MAX_PAGES == 0
+    assert settings.REMAX_PAGE_SIZE == 200

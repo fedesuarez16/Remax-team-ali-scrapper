@@ -7,6 +7,7 @@ import random
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from datetime import datetime
+from itertools import count
 from typing import Any, Awaitable, Callable, Iterable, Iterator, Mapping
 
 import httpx
@@ -30,7 +31,10 @@ _ACTORS: dict[str, str] = {
 # ── MercadoLibre public REST API (no Apify) ───────────────────────────────────
 _ML_API_BASE = 'https://api.mercadolibre.com'
 _ML_CATEGORY = 'MLA1459'   # Inmuebles Argentina
-_ML_MAX_PAGES = 5           # 5 × 50 = 250 results max
+_ML_PAGE_SIZE = 50          # the API maximum per request
+# Paging depth is `settings.MERCADOLIBRE_MAX_PAGES` (0 = no cap): page until the
+# response is empty or `paging.total` is covered. It used to be a hard-coded 5,
+# which silently truncated every busy zona at 250 items.
 
 # ── RE/MAX public REST API (no Apify) — same undocumented-but-open API its own
 # Angular frontend calls (confirmed via live requests, no auth required) ──────
@@ -308,9 +312,11 @@ def _argenprop_search_urls(
     """Argenprop listing-page URLs for one search, page 1..N. Page 1 has no
     query string; later pages append the literal `?pagina-N` token (no `=`,
     confirmed from real `href`s) — capped at 10 because robots.txt only
-    `Allow`s pagina-1 through pagina-10. `zona_slug` is the portal-resolved
-    slug from `_argenprop_resolve_zona_slug`; without one, falls back to
-    naive `_slugify` (the zona guard downstream rejects redirect garbage)."""
+    `Allow`s pagina-1 through pagina-10 — so `max_pages=0` ("no cap" everywhere
+    else) resolves to that ceiling here, since it is a robots.txt boundary and
+    not a tunable. `zona_slug` is the portal-resolved slug from
+    `_argenprop_resolve_zona_slug`; without one, falls back to naive `_slugify`
+    (the zona guard downstream rejects redirect garbage)."""
     zona = filters.zona or 'Buenos Aires'
     op_slug = 'alquiler' if filters.tipo_operacion == 'alquiler' else 'venta'
     tipos = filters.tipos_propiedad or []
@@ -319,7 +325,10 @@ def _argenprop_search_urls(
         zona_slug = _slugify(filters.localidades[0]) if filters.localidades else _slugify(zona)
     base_url = f'{_ARGENPROP_BASE}/{tipo_slug}/{op_slug}/{zona_slug}'
 
-    capped = max(1, min(max_pages, _ARGENPROP_MAX_PAGES_HARD))
+    capped = (
+        _ARGENPROP_MAX_PAGES_HARD if max_pages <= 0
+        else min(max_pages, _ARGENPROP_MAX_PAGES_HARD)
+    )
     return [base_url] + [f'{base_url}?pagina-{page}' for page in range(2, capped + 1)]
 
 
@@ -594,8 +603,10 @@ async def _inmobusqueda_resolve_zona_slug(zona: str) -> str | None:
 
 def _inmobusqueda_search_urls(
     filters: ScrapingFilters, max_pages: int, zona_slug: str,
-) -> list[str]:
-    """Listing URLs for one search, page 1..N.
+) -> Iterator[str]:
+    """Listing URLs for one search, page 1..N — lazily, so `max_pages=0` means
+    "no cap" and the caller's own exhaustion checks (a page with nothing new,
+    or a short page) are what end the crawl.
 
     Two shapes exist: `{tipo}-{operacion}-{zona}.html` when the search pins a
     single property type AND an operation, else the broader
@@ -606,10 +617,11 @@ def _inmobusqueda_search_urls(
     op_slug = _INMOBUSQUEDA_URL_OP.get(filters.tipo_operacion or '', '')
     stem = f'{tipo_slug}-{op_slug}-{zona_slug}' if tipo_slug and op_slug else f'propiedades-{zona_slug}'
 
-    pages = max(1, max_pages)
-    return [f'{_INMOBUSQUEDA_BASE}/{stem}.html'] + [
-        f'{_INMOBUSQUEDA_BASE}/{stem}-pagina-{n}.html' for n in range(2, pages + 1)
-    ]
+    yield f'{_INMOBUSQUEDA_BASE}/{stem}.html'
+    for n in count(2):
+        if max_pages > 0 and n > max_pages:
+            return
+        yield f'{_INMOBUSQUEDA_BASE}/{stem}-pagina-{n}.html'
 
 
 def _inmobusqueda_price(text: str) -> tuple[float | None, str]:
@@ -907,17 +919,22 @@ def _mudafy_region_for(zona: str) -> str:
     return _MUDAFY_DEFAULT_REGION
 
 
-def _mudafy_search_urls(filters: ScrapingFilters, max_pages: int) -> list[str]:
-    """Listing URLs, page 1..N. Later pages take the `/{N}-p` suffix — read off
-    the site's own pagination hrefs, and query-string free so the crawl stays
-    inside what robots.txt allows."""
+def _mudafy_search_urls(filters: ScrapingFilters, max_pages: int) -> Iterator[str]:
+    """Listing URLs, page 1..N — lazily, so `max_pages=0` means "no cap" and the
+    caller stops on the first page that yields nothing new. Later pages take the
+    `/{N}-p` suffix — read off the site's own pagination hrefs, and query-string
+    free so the crawl stays inside what robots.txt allows."""
     zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
     region = _mudafy_region_for(zona)
     op = _MUDAFY_URL_OP.get(filters.tipo_operacion or 'venta', 'venta')
     tipos = filters.tipos_propiedad or []
     tipo = _MUDAFY_URL_TIPO.get(tipos[0], 'propiedades') if len(tipos) == 1 else 'propiedades'
     base = f'{_MUDAFY_BASE}/{op}/{tipo}/{region}'
-    return [base] + [f'{base}/{n}-p' for n in range(2, max(1, max_pages) + 1)]
+    yield base
+    for n in count(2):
+        if max_pages > 0 and n > max_pages:
+            return
+        yield f'{base}/{n}-p'
 
 
 def _norm_mudafy(pub: dict[str, Any]) -> RawProperty | None:
@@ -1147,14 +1164,21 @@ async def _scrape_mercadolibre_api(
 
     await on_progress('mercadolibre', 'running', 0)
 
+    from app.core.config import settings
+    max_pages = settings.MERCADOLIBRE_MAX_PAGES   # 0 = uncapped
+
     results: list[RawProperty] = []
     async with httpx.AsyncClient(timeout=20) as client:
-        for page in range(_ML_MAX_PAGES):
-            offset = page * 50
+        page = 0
+        while max_pages <= 0 or page < max_pages:
+            offset = page * _ML_PAGE_SIZE
             try:
                 resp = await client.get(
                     f'{_ML_API_BASE}/sites/MLA/search',
-                    params={'category': _ML_CATEGORY, 'q': q, 'limit': 50, 'offset': offset},
+                    params={
+                        'category': _ML_CATEGORY, 'q': q,
+                        'limit': _ML_PAGE_SIZE, 'offset': offset,
+                    },
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -1171,11 +1195,11 @@ async def _scrape_mercadolibre_api(
                     results.append(prop)
 
             paging = data.get('paging', {})
-            if offset + 50 >= paging.get('total', 0):
+            if offset + _ML_PAGE_SIZE >= paging.get('total', 0):
                 break
 
-            if page < _ML_MAX_PAGES - 1:
-                await on_progress('mercadolibre', 'running', len(results))
+            page += 1
+            await on_progress('mercadolibre', 'running', len(results))
 
     await on_progress('mercadolibre', 'done', len(results))
     return results
@@ -1330,7 +1354,15 @@ async def _scrape_remax_api(
 
     await on_progress('remax', 'running', 0)
 
-    max_pages = settings.REMAX_MAX_PAGES   # 0 = uncapped
+    # 0 = uncapped: page until `totalPages`. That is safe ONLY once `locations`
+    # bounded the result set to the zona server-side. Without it the API serves
+    # the newest listings NATIONWIDE (66k+, verified live) and the zona is
+    # matched client-side on text — sweeping all of that means hundreds of
+    # round-trips to keep a handful of rows, so the unlocated fallback keeps its
+    # own ceiling. An explicit REMAX_MAX_PAGES always wins over that fallback.
+    max_pages = settings.REMAX_MAX_PAGES
+    if max_pages <= 0 and location is None:
+        max_pages = max(1, settings.REMAX_UNLOCATED_MAX_PAGES)
     page_size = max(1, settings.REMAX_PAGE_SIZE)
 
     results: list[RawProperty] = []
@@ -2009,8 +2041,6 @@ class ApifyService(BaseApifyService):
     # dies after page 1 (every run returns one page regardless of maxResults),
     # so WE paginate: one actor run per `...-pagina-N.html` URL.
     _ZP_PAGE_SIZE = 30
-    # Hard page ceiling when ZONAPROP_MAX_RESULTS is 0 (uncapped).
-    _ZP_MAX_PAGES_UNCAPPED = 20
 
     async def _scrape_zonaprop_paginated(
         self, actor_id: str, filters: ScrapingFilters,
@@ -2020,14 +2050,16 @@ class ApifyService(BaseApifyService):
         base_input = self._input_for('zonaprop', filters)
         base_url: str = base_input['searchUrl']
         phrases = _guard_phrases(filters)
-        max_pages = (
-            -(-cap // self._ZP_PAGE_SIZE) if cap > 0 else self._ZP_MAX_PAGES_UNCAPPED
-        )
+        # `cap <= 0` = no cap: the loop below already stops on an empty page, an
+        # all-duplicate page (an out-of-range `-pagina-N` redirects to page 1),
+        # an all-rejected page, or a short page — no synthetic page ceiling
+        # needed on top, and the old 20-page one was truncating busy zonas.
+        max_pages = -(-cap // self._ZP_PAGE_SIZE) if cap > 0 else 0
 
         results: list[RawProperty] = []
         seen: set[str] = set()
         page = 1
-        while page <= max_pages and (cap <= 0 or len(results) < cap):
+        while (max_pages <= 0 or page <= max_pages) and (cap <= 0 or len(results) < cap):
             input_data = dict(base_input)
             if page > 1:
                 input_data['searchUrl'] = base_url.replace('.html', f'-pagina-{page}.html')
