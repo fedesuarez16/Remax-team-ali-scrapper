@@ -184,7 +184,9 @@ async def _fetch_html(url: str) -> str:
 async def _fetch_page(url: str) -> tuple[str, list[str]]:
     """Fetch the ficha and return (visible text, server-HTML gallery)."""
     html = await _fetch_html(url)
-    return _visible_text(html)[:8000], _extract_images_from_html(html, url)
+    # anchor_to_og: la ficha es UNA propiedad, así que las fotos que no comparten
+    # el directorio del og:image son de otra (bloques de "similares", widgets).
+    return _visible_text(html)[:8000], _extract_images_from_html(html, url, anchor_to_og=True)
 
 
 async def _extract_llm(url: str, text: str) -> tuple[dict[str, Any] | None, Any]:
