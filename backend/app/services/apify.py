@@ -1449,12 +1449,54 @@ _IMG_JUNK = (
 )
 
 
-def _extract_images_from_html(html: str, base: str) -> list[str]:
+# Contenedores cuyas fotos NO son de la propiedad de esta página: bloques de
+# "propiedades similares/relacionadas" y widgets de sidebar. Se podan ANTES de
+# recolectar, porque filtrar despues por nombre de archivo es imposible: la foto
+# de una propiedad similar es una foto de propiedad legitima y no matchea ningun
+# patron de basura. Verificado en vivo sobre una ficha de Argenprop, donde
+# `ul.similar-properties__list` metia 4 propiedades ajenas en cada import.
+_FOREIGN_CONTAINER_PATTERNS = (
+    'similar', 'related', 'relacionad', 'recomend', 'sugerid',
+    'otras-propiedades', 'otras_propiedades', 'form-widget',
+)
+
+# `style="background: center url(...)"`. El visor de Argenprop no usa <img>:
+# sin esto la ficha queda con UNA foto (la del og:image) aunque el DOM traiga 5.
+_CSS_URL_RE = re.compile(r'url\(\s*[\'"]?([^\'")]+)[\'"]?\s*\)', re.I)
+
+
+def _is_foreign_container(tag: Any) -> bool:
+    ident = f"{' '.join(tag.get('class') or [])} {tag.get('id') or ''}".lower()
+    return any(p in ident for p in _FOREIGN_CONTAINER_PATTERNS)
+
+
+def _url_dir(url: str) -> str:
+    """El 'directorio' de una URL de imagen — todo hasta la ultima barra."""
+    return url.rsplit('/', 1)[0] if '/' in url else url
+
+
+def _extract_images_from_html(html: str, base: str, anchor_to_og: bool = False) -> list[str]:
     """Property photos visible in server HTML: og:image/twitter:image metas plus
-    content <img> tags (honoring lazy-load attrs and srcset), junk filtered."""
+    content <img> tags (honoring lazy-load attrs and srcset) and inline
+    `background: url(...)` photos, junk filtered.
+
+    Foreign blocks (similar/related listings, sidebar widgets) are pruned first —
+    see `_FOREIGN_CONTAINER_PATTERNS`.
+
+    ``anchor_to_og`` is for pages holding ONE property (fichas): the og:image is
+    by definition this page's main photo, so photos sharing its directory are
+    this property's and the rest are not. It is opt-in because a real-estate
+    agency LISTING legitimately shows many properties, and anchoring there would
+    wipe the catalog. It also degrades safely: CDNs that give every photo its own
+    hashed directory yield no grouping evidence, and then nothing is filtered —
+    losing real photos is worse than letting a foreign one through.
+    """
     from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 
     soup = BeautifulSoup(html, 'html.parser')
+    for tag in soup.find_all(_is_foreign_container):
+        tag.decompose()
+
     imgs: list[str] = []
     seen: set[str] = set()
 
@@ -1472,10 +1514,18 @@ def _extract_images_from_html(html: str, base: str) -> list[str]:
             seen.add(full)
             imgs.append(full)
 
+    og_image = ''
     for meta in soup.find_all('meta'):
         key = str(meta.get('property') or meta.get('name') or '').lower()
         if key in ('og:image', 'og:image:url', 'og:image:secure_url', 'twitter:image', 'twitter:image:src'):
-            _add_img(str(meta.get('content') or ''))
+            content = str(meta.get('content') or '')
+            if key.startswith('og:image') and content and not og_image:
+                og_image = content
+            _add_img(content)
+
+    for el in soup.find_all(style=True):
+        for raw in _CSS_URL_RE.findall(str(el.get('style') or '')):
+            _add_img(raw)
 
     for img in soup.find_all('img'):
         srcset = img.get('srcset') or img.get('data-srcset') or ''
@@ -1487,6 +1537,15 @@ def _extract_images_from_html(html: str, base: str) -> list[str]:
             if raw:
                 _add_img(str(raw))
                 break
+
+    if anchor_to_og and og_image:
+        anchor = _url_dir(og_image if og_image.startswith('http')
+                          else base.rstrip('/') + '/' + og_image.lstrip('/'))
+        owned = [i for i in imgs if _url_dir(i) == anchor]
+        # Un solo match es el propio og:image: no prueba que el portal agrupe
+        # por directorio, asi que filtrar ahi seria adivinar y perder fotos.
+        if len(owned) > 1:
+            imgs = owned
 
     return imgs[:20]
 
@@ -1517,7 +1576,9 @@ async def harvest_page_images(urls: list[str], render_budget: int = 8) -> dict[s
             try:
                 resp = await client.get(u)
                 resp.raise_for_status()
-                return u, _extract_images_from_html(resp.text, u)
+                # Estas URLs son fichas de UNA propiedad (ver docstring), así que
+                # el og:image sirve de ancla para descartar fotos ajenas.
+                return u, _extract_images_from_html(resp.text, u, anchor_to_og=True)
             except Exception:
                 return u, []
 
