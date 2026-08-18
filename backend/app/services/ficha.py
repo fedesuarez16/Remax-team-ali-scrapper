@@ -267,6 +267,17 @@ async def _fetch_full_gallery(prop: dict[str, Any]) -> list[str]:
     return []
 
 
+def _gallery_looks_incomplete(prop: dict[str, Any]) -> bool:
+    """True when a ficha never captured its real gallery.
+
+    The search feed stores only the thumbnail (0-1 photos) while a portal listing
+    holds 15-34. A ficha stuck on <=1 image got its gallery fetch swallowed by a
+    transient portal failure (WAF challenge, timeout) at scrape time — worth one
+    re-attempt. A healthy gallery reports False, so repeat ficha opens cost nothing.
+    """
+    return len(prop.get('imagenes') or []) <= 1
+
+
 async def _enrich_gallery(prop: dict[str, Any], sb: Any) -> None:
     """Merge the full original-listing gallery into ``imagenes`` and persist.
 
@@ -298,7 +309,12 @@ async def enrich_ficha(prop: dict[str, Any], sb: Any) -> dict[str, Any]:
     Also recovers the full original-listing gallery (search feeds only carry a
     partial set — MercadoLibre only the thumbnail) before the text enrichment gate.
     """
-    if not prop.get('ficha_enriched'):
+    # Gallery recovery is deliberately decoupled from the text-enrichment gate:
+    # `ficha_enriched` is set by the text pass, so a ficha whose gallery came back
+    # empty at scrape time would otherwise stay locked on the lone feed thumbnail
+    # forever. Re-attempt whenever the stored gallery is still incomplete — a
+    # healthy gallery skips the fetch, so repeat opens cost nothing.
+    if not prop.get('ficha_enriched') or _gallery_looks_incomplete(prop):
         await _enrich_gallery(prop, sb)
 
     if prop.get('ficha_enriched'):

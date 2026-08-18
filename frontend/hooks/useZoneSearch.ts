@@ -272,7 +272,10 @@ export function useZoneSearch() {
 
     const kickBackfill = async () => {
       try {
-        await fetch(`${API}/api/v1/geocode/backfill`, { method: 'POST' })
+        // The backfill routes live on the `properties` router, so the prefix is
+        // `/properties/geocode/...` — `/api/v1/geocode/...` is a 404 and the
+        // whole drain loop silently no-ops (see backend/app/api/v1/router.py).
+        await fetch(`${API}/api/v1/properties/geocode/backfill`, { method: 'POST' })
       } catch {
         // best-effort trigger — poll loop below still checks progress
       }
@@ -290,7 +293,7 @@ export function useZoneSearch() {
       pollCount += 1
       let status: { running?: boolean; aborted?: string | null; finished_at?: string | null } | null = null
       try {
-        const res = await fetch(`${API}/api/v1/geocode/status`)
+        const res = await fetch(`${API}/api/v1/properties/geocode/status`)
         if (res.ok) status = await res.json()
       } catch {
         // ignore — keep polling until the hard cap
