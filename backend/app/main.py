@@ -50,3 +50,14 @@ app.include_router(api_router, prefix="/api/v1")
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "version": "0.1.0"}
+
+
+# Same probe on `/`. Railway reads `healthcheckPath` from the railway.toml
+# inside the service's Root Directory; when that file is not picked up the
+# default probe hits `/`, and a container serving only `/health` fails the
+# deploy with "Failed to connect before the deadline" while being perfectly
+# healthy. Touches nothing — no Supabase, no state — so it answers regardless
+# of what the lifespan managed to connect to.
+@app.get("/")
+async def root() -> dict[str, str]:
+    return await health()
