@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Iterable, Iterator, Mapping
 import httpx
 
 from app.models.property import Agency, RawProperty, ScrapingFilters
+from app.services.zona import zona_candidates
 
 ProgressCb = Callable[[str, str, int], Awaitable[None]]
 
@@ -170,13 +171,21 @@ def _guard_phrases(filters: ScrapingFilters) -> set[str]:
     present): barrios ∪ localidades ∪ zona — wide on purpose, the polygon is
     the precision gate downstream. Chat path (no localidades): ONLY this
     branch's zona, preserving the pre-change per-branch scoping for
-    multi-zona chat queries."""
+    multi-zona chat queries.
+
+    Every seed is then expanded through `zona_candidates`, so a search that
+    had to degrade to the localidad still keeps its results: a real casco
+    address reads "calle 47 e/ 12 y 13, La Plata" and never names the barrio,
+    which a barrio-only guard rejected outright. Degradation stops before
+    province-wide terms, and a composite phrase still requires EVERY comma
+    part — so the San Luis homonym of "Casco Urbano" stays out.
+    """
     if filters.localidades:
-        phrases = set(filters.zonas) | set(filters.localidades) | {filters.zona or ''}
+        seeds = set(filters.zonas) | set(filters.localidades) | {filters.zona or ''}
     else:
-        phrases = {filters.zona or ''}
-    phrases.discard('')
-    return phrases
+        seeds = {filters.zona or ''}
+    seeds.discard('')
+    return {phrase for seed in seeds for phrase in zona_candidates(seed)}
 
 
 def _item_matches_zona(item: dict[str, Any], zonas: Iterable[str]) -> bool:
@@ -1291,10 +1300,20 @@ async def _remax_resolve_location(zona: str) -> str | None:
     sample (the original "always 0 results" failure).
 
     Result labels carry `<b>` highlight tags and fuzzy matches can outrank
-    exact ones, so the winner is the first result whose slugified label
-    (tags stripped) contains EVERY comma-part of the query. Returns None on
-    no confident match or API failure — callers fall back to nationwide
-    paging plus the text zona guard."""
+    exact ones, so a candidate must have EVERY comma-part of the query in its
+    slugified label (tags stripped) AND its first label component must EQUAL
+    the query head — same exact-head rule the InmoBusqueda resolver uses.
+    Containment alone is not enough: RE/MAX's only literal "Casco Urbano" is
+    the gated community "Los Eucaliptus Casco Urbano", a real level-3 id that
+    serves zero listings. Rejecting it lets the zona candidate chain degrade
+    instead of burning the attempt on a plausible-looking wrong place.
+
+    Among exact-head candidates the DEEPEST level wins. RE/MAX ranks the
+    partido above the localidad, and "La Plata" the city (level 3, `cityId`)
+    is what the user means — level 2 (`countyId`) drags in City Bell, Villa
+    Elisa, Gonnet, Tolosa and Los Hornos, which measured live as 77 of 200
+    listings. Returns None on no confident match or API failure — callers
+    fall back to nationwide paging plus the text zona guard."""
     query_parts = [p.strip() for p in zona.split(',') if p.strip()]
     if not query_parts:
         return None
@@ -1313,18 +1332,29 @@ async def _remax_resolve_location(zona: str) -> str | None:
             resp.raise_for_status()
             geo_results = (resp.json().get('data') or {}).get('geoSearch') or []
         wanted = [_slugify(p) for p in query_parts]
-        for entry in geo_results:
+        best_rank: tuple[int, int] | None = None
+        for idx, entry in enumerate(geo_results):
             label = re.sub(r'</?b>', '', str(entry.get('label') or ''))
             label_slug = _slugify(label)
             if not all(part in label_slug for part in wanted):
                 continue
-            id_field = _REMAX_LEVEL_ID_FIELD.get(entry.get('level') or 0)
+            level = entry.get('level') or 0
+            id_field = _REMAX_LEVEL_ID_FIELD.get(level)
             loc_id = entry.get(id_field) if id_field else None
-            if loc_id:
+            if not loc_id:
+                continue
+            # An exact head is the strong signal, and among those the DEEPEST
+            # level wins — that is what picks "La Plata, La Plata" (level 3,
+            # the localidad) over "La Plata, Buenos Aires" (level 2, the
+            # partido). Without an exact head the portal simply spells the
+            # zona more fully than the user did ("Gonnet" → "Manuel B
+            # Gonnet"), so its own relevance order decides.
+            rank = (1, level) if _slugify(label.split(',')[0]) == wanted[0] else (0, -idx)
+            if best_rank is None or rank > best_rank:
+                best_rank = rank
                 slots = [''] * _REMAX_LOCATION_SLOTS
-                slots[entry['level']] = str(loc_id)
+                slots[level] = str(loc_id)
                 location = 'in:' + ':'.join(slots)
-                break
     except Exception:
         return None  # transient failure — don't cache, retry next search
 
@@ -2065,6 +2095,38 @@ class ApifyService(BaseApifyService):
         return items_resp.json()  # type: ignore[no-any-return]
 
     async def scrape_source(
+        self,
+        source: str,
+        filters: ScrapingFilters,
+        on_progress: ProgressCb,
+    ) -> list[RawProperty]:
+        """Scrape one portal, walking the zona's candidate chain until a
+        candidate returns something.
+
+        Resolving a barrio fails in three ways and only the last is visible
+        from inside a resolver: no autocomplete match at all (Argenprop
+        answers "Casco Urbano" with a barrio in San Luis), a match that is
+        the wrong place (RE/MAX's only literal one is the gated community
+        "Los Eucaliptus Casco Urbano"), or a good slug over an empty listing.
+        Text inspection cannot separate the second from a real hit, so the
+        retry keys on the only honest signal — zero results — and lives here,
+        the one entry point every portal shares.
+        """
+        results: list[RawProperty] = []
+        for candidate in zona_candidates(filters.zona or '') or [filters.zona or '']:
+            # `localidades` outranks `zona` in every portal's resolver, so a
+            # stale barrio left there would re-resolve the same dead slug.
+            update: dict[str, Any] = {'zona': candidate}
+            if filters.localidades:
+                update['localidades'] = [candidate]
+            results = await self._scrape_source_once(
+                source, filters.model_copy(update=update), on_progress,
+            )
+            if results:
+                break
+        return results
+
+    async def _scrape_source_once(
         self,
         source: str,
         filters: ScrapingFilters,

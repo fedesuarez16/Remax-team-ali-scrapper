@@ -11,8 +11,11 @@ EXTRACT_FILTERS_TOOL = {
                 'type': 'array',
                 'items': {'type': 'string'},
                 'description': (
-                    'TODAS las zonas mencionadas (barrios o ciudades). Una entrada por zona. '
-                    'Ej: ["Los Hornos", "Tolosa", "City Bell"]. Si menciona una sola, devolvé una lista de un elemento.'
+                    'TODAS las zonas mencionadas. Una entrada por zona. Cada barrio va con '
+                    'su ciudad o partido separados por coma ("Barrio, Ciudad"); una ciudad o '
+                    'partido a secas va sola. '
+                    'Ej: ["City Bell, La Plata", "Palermo, CABA", "La Plata"]. '
+                    'Si menciona una sola, devolvé una lista de un elemento.'
                 ),
             },
             'tipo_operacion': {'type': ['string', 'null'],
@@ -102,5 +105,12 @@ SYSTEM_PROMPT = (
     'Si no podés identificar ninguna zona, devolvé zonas=[]. '
     'Al extraer cada zona, normalizá el nombre con espacios correctos tal como aparece '
     'en portales inmobiliarios argentinos: "citybell" → "City Bell", '
-    '"sanandrés" → "San Andrés", "villacrespo" → "Villa Crespo", etc.'
+    '"sanandrés" → "San Andrés", "villacrespo" → "Villa Crespo", etc. '
+    'Un barrio suelto es AMBIGUO y los portales resuelven el equivocado: existe un '
+    '"Casco Urbano" en San Luis y un "Palermo" en Salta. Por eso todo barrio va con '
+    'su ciudad o partido separados por coma: '
+    '"el casco de La Plata" → "Casco Urbano, La Plata"; '
+    '"citybell" → "City Bell, La Plata"; "palermo" → "Palermo, CABA". '
+    'Si el usuario nombra una ciudad o un partido a secas, dejala sola y NO le agregues '
+    'la provincia: "La Plata" → "La Plata", "Mar del Plata" → "Mar del Plata".'
 )
