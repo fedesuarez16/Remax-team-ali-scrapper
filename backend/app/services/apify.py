@@ -7,11 +7,13 @@ import random
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from datetime import datetime
+from itertools import count
 from typing import Any, Awaitable, Callable, Iterable, Iterator, Mapping
 
 import httpx
 
 from app.models.property import Agency, RawProperty, ScrapingFilters
+from app.services.zona import zona_candidates
 
 ProgressCb = Callable[[str, str, int], Awaitable[None]]
 
@@ -30,7 +32,10 @@ _ACTORS: dict[str, str] = {
 # ── MercadoLibre public REST API (no Apify) ───────────────────────────────────
 _ML_API_BASE = 'https://api.mercadolibre.com'
 _ML_CATEGORY = 'MLA1459'   # Inmuebles Argentina
-_ML_MAX_PAGES = 5           # 5 × 50 = 250 results max
+_ML_PAGE_SIZE = 50          # the API maximum per request
+# Paging depth is `settings.MERCADOLIBRE_MAX_PAGES` (0 = no cap): page until the
+# response is empty or `paging.total` is covered. It used to be a hard-coded 5,
+# which silently truncated every busy zona at 250 items.
 
 # ── RE/MAX public REST API (no Apify) — same undocumented-but-open API its own
 # Angular frontend calls (confirmed via live requests, no auth required) ──────
@@ -166,13 +171,21 @@ def _guard_phrases(filters: ScrapingFilters) -> set[str]:
     present): barrios ∪ localidades ∪ zona — wide on purpose, the polygon is
     the precision gate downstream. Chat path (no localidades): ONLY this
     branch's zona, preserving the pre-change per-branch scoping for
-    multi-zona chat queries."""
+    multi-zona chat queries.
+
+    Every seed is then expanded through `zona_candidates`, so a search that
+    had to degrade to the localidad still keeps its results: a real casco
+    address reads "calle 47 e/ 12 y 13, La Plata" and never names the barrio,
+    which a barrio-only guard rejected outright. Degradation stops before
+    province-wide terms, and a composite phrase still requires EVERY comma
+    part — so the San Luis homonym of "Casco Urbano" stays out.
+    """
     if filters.localidades:
-        phrases = set(filters.zonas) | set(filters.localidades) | {filters.zona or ''}
+        seeds = set(filters.zonas) | set(filters.localidades) | {filters.zona or ''}
     else:
-        phrases = {filters.zona or ''}
-    phrases.discard('')
-    return phrases
+        seeds = {filters.zona or ''}
+    seeds.discard('')
+    return {phrase for seed in seeds for phrase in zona_candidates(seed)}
 
 
 def _item_matches_zona(item: dict[str, Any], zonas: Iterable[str]) -> bool:
@@ -308,9 +321,11 @@ def _argenprop_search_urls(
     """Argenprop listing-page URLs for one search, page 1..N. Page 1 has no
     query string; later pages append the literal `?pagina-N` token (no `=`,
     confirmed from real `href`s) — capped at 10 because robots.txt only
-    `Allow`s pagina-1 through pagina-10. `zona_slug` is the portal-resolved
-    slug from `_argenprop_resolve_zona_slug`; without one, falls back to
-    naive `_slugify` (the zona guard downstream rejects redirect garbage)."""
+    `Allow`s pagina-1 through pagina-10 — so `max_pages=0` ("no cap" everywhere
+    else) resolves to that ceiling here, since it is a robots.txt boundary and
+    not a tunable. `zona_slug` is the portal-resolved slug from
+    `_argenprop_resolve_zona_slug`; without one, falls back to naive `_slugify`
+    (the zona guard downstream rejects redirect garbage)."""
     zona = filters.zona or 'Buenos Aires'
     op_slug = 'alquiler' if filters.tipo_operacion == 'alquiler' else 'venta'
     tipos = filters.tipos_propiedad or []
@@ -319,7 +334,10 @@ def _argenprop_search_urls(
         zona_slug = _slugify(filters.localidades[0]) if filters.localidades else _slugify(zona)
     base_url = f'{_ARGENPROP_BASE}/{tipo_slug}/{op_slug}/{zona_slug}'
 
-    capped = max(1, min(max_pages, _ARGENPROP_MAX_PAGES_HARD))
+    capped = (
+        _ARGENPROP_MAX_PAGES_HARD if max_pages <= 0
+        else min(max_pages, _ARGENPROP_MAX_PAGES_HARD)
+    )
     return [base_url] + [f'{base_url}?pagina-{page}' for page in range(2, capped + 1)]
 
 
@@ -594,8 +612,10 @@ async def _inmobusqueda_resolve_zona_slug(zona: str) -> str | None:
 
 def _inmobusqueda_search_urls(
     filters: ScrapingFilters, max_pages: int, zona_slug: str,
-) -> list[str]:
-    """Listing URLs for one search, page 1..N.
+) -> Iterator[str]:
+    """Listing URLs for one search, page 1..N — lazily, so `max_pages=0` means
+    "no cap" and the caller's own exhaustion checks (a page with nothing new,
+    or a short page) are what end the crawl.
 
     Two shapes exist: `{tipo}-{operacion}-{zona}.html` when the search pins a
     single property type AND an operation, else the broader
@@ -606,10 +626,11 @@ def _inmobusqueda_search_urls(
     op_slug = _INMOBUSQUEDA_URL_OP.get(filters.tipo_operacion or '', '')
     stem = f'{tipo_slug}-{op_slug}-{zona_slug}' if tipo_slug and op_slug else f'propiedades-{zona_slug}'
 
-    pages = max(1, max_pages)
-    return [f'{_INMOBUSQUEDA_BASE}/{stem}.html'] + [
-        f'{_INMOBUSQUEDA_BASE}/{stem}-pagina-{n}.html' for n in range(2, pages + 1)
-    ]
+    yield f'{_INMOBUSQUEDA_BASE}/{stem}.html'
+    for n in count(2):
+        if max_pages > 0 and n > max_pages:
+            return
+        yield f'{_INMOBUSQUEDA_BASE}/{stem}-pagina-{n}.html'
 
 
 def _inmobusqueda_price(text: str) -> tuple[float | None, str]:
@@ -907,17 +928,22 @@ def _mudafy_region_for(zona: str) -> str:
     return _MUDAFY_DEFAULT_REGION
 
 
-def _mudafy_search_urls(filters: ScrapingFilters, max_pages: int) -> list[str]:
-    """Listing URLs, page 1..N. Later pages take the `/{N}-p` suffix — read off
-    the site's own pagination hrefs, and query-string free so the crawl stays
-    inside what robots.txt allows."""
+def _mudafy_search_urls(filters: ScrapingFilters, max_pages: int) -> Iterator[str]:
+    """Listing URLs, page 1..N — lazily, so `max_pages=0` means "no cap" and the
+    caller stops on the first page that yields nothing new. Later pages take the
+    `/{N}-p` suffix — read off the site's own pagination hrefs, and query-string
+    free so the crawl stays inside what robots.txt allows."""
     zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
     region = _mudafy_region_for(zona)
     op = _MUDAFY_URL_OP.get(filters.tipo_operacion or 'venta', 'venta')
     tipos = filters.tipos_propiedad or []
     tipo = _MUDAFY_URL_TIPO.get(tipos[0], 'propiedades') if len(tipos) == 1 else 'propiedades'
     base = f'{_MUDAFY_BASE}/{op}/{tipo}/{region}'
-    return [base] + [f'{base}/{n}-p' for n in range(2, max(1, max_pages) + 1)]
+    yield base
+    for n in count(2):
+        if max_pages > 0 and n > max_pages:
+            return
+        yield f'{base}/{n}-p'
 
 
 def _norm_mudafy(pub: dict[str, Any]) -> RawProperty | None:
@@ -1147,14 +1173,21 @@ async def _scrape_mercadolibre_api(
 
     await on_progress('mercadolibre', 'running', 0)
 
+    from app.core.config import settings
+    max_pages = settings.MERCADOLIBRE_MAX_PAGES   # 0 = uncapped
+
     results: list[RawProperty] = []
     async with httpx.AsyncClient(timeout=20) as client:
-        for page in range(_ML_MAX_PAGES):
-            offset = page * 50
+        page = 0
+        while max_pages <= 0 or page < max_pages:
+            offset = page * _ML_PAGE_SIZE
             try:
                 resp = await client.get(
                     f'{_ML_API_BASE}/sites/MLA/search',
-                    params={'category': _ML_CATEGORY, 'q': q, 'limit': 50, 'offset': offset},
+                    params={
+                        'category': _ML_CATEGORY, 'q': q,
+                        'limit': _ML_PAGE_SIZE, 'offset': offset,
+                    },
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -1171,11 +1204,11 @@ async def _scrape_mercadolibre_api(
                     results.append(prop)
 
             paging = data.get('paging', {})
-            if offset + 50 >= paging.get('total', 0):
+            if offset + _ML_PAGE_SIZE >= paging.get('total', 0):
                 break
 
-            if page < _ML_MAX_PAGES - 1:
-                await on_progress('mercadolibre', 'running', len(results))
+            page += 1
+            await on_progress('mercadolibre', 'running', len(results))
 
     await on_progress('mercadolibre', 'done', len(results))
     return results
@@ -1267,10 +1300,20 @@ async def _remax_resolve_location(zona: str) -> str | None:
     sample (the original "always 0 results" failure).
 
     Result labels carry `<b>` highlight tags and fuzzy matches can outrank
-    exact ones, so the winner is the first result whose slugified label
-    (tags stripped) contains EVERY comma-part of the query. Returns None on
-    no confident match or API failure — callers fall back to nationwide
-    paging plus the text zona guard."""
+    exact ones, so a candidate must have EVERY comma-part of the query in its
+    slugified label (tags stripped) AND its first label component must EQUAL
+    the query head — same exact-head rule the InmoBusqueda resolver uses.
+    Containment alone is not enough: RE/MAX's only literal "Casco Urbano" is
+    the gated community "Los Eucaliptus Casco Urbano", a real level-3 id that
+    serves zero listings. Rejecting it lets the zona candidate chain degrade
+    instead of burning the attempt on a plausible-looking wrong place.
+
+    Among exact-head candidates the DEEPEST level wins. RE/MAX ranks the
+    partido above the localidad, and "La Plata" the city (level 3, `cityId`)
+    is what the user means — level 2 (`countyId`) drags in City Bell, Villa
+    Elisa, Gonnet, Tolosa and Los Hornos, which measured live as 77 of 200
+    listings. Returns None on no confident match or API failure — callers
+    fall back to nationwide paging plus the text zona guard."""
     query_parts = [p.strip() for p in zona.split(',') if p.strip()]
     if not query_parts:
         return None
@@ -1289,18 +1332,29 @@ async def _remax_resolve_location(zona: str) -> str | None:
             resp.raise_for_status()
             geo_results = (resp.json().get('data') or {}).get('geoSearch') or []
         wanted = [_slugify(p) for p in query_parts]
-        for entry in geo_results:
+        best_rank: tuple[int, int] | None = None
+        for idx, entry in enumerate(geo_results):
             label = re.sub(r'</?b>', '', str(entry.get('label') or ''))
             label_slug = _slugify(label)
             if not all(part in label_slug for part in wanted):
                 continue
-            id_field = _REMAX_LEVEL_ID_FIELD.get(entry.get('level') or 0)
+            level = entry.get('level') or 0
+            id_field = _REMAX_LEVEL_ID_FIELD.get(level)
             loc_id = entry.get(id_field) if id_field else None
-            if loc_id:
+            if not loc_id:
+                continue
+            # An exact head is the strong signal, and among those the DEEPEST
+            # level wins — that is what picks "La Plata, La Plata" (level 3,
+            # the localidad) over "La Plata, Buenos Aires" (level 2, the
+            # partido). Without an exact head the portal simply spells the
+            # zona more fully than the user did ("Gonnet" → "Manuel B
+            # Gonnet"), so its own relevance order decides.
+            rank = (1, level) if _slugify(label.split(',')[0]) == wanted[0] else (0, -idx)
+            if best_rank is None or rank > best_rank:
+                best_rank = rank
                 slots = [''] * _REMAX_LOCATION_SLOTS
-                slots[entry['level']] = str(loc_id)
+                slots[level] = str(loc_id)
                 location = 'in:' + ':'.join(slots)
-                break
     except Exception:
         return None  # transient failure — don't cache, retry next search
 
@@ -1330,7 +1384,15 @@ async def _scrape_remax_api(
 
     await on_progress('remax', 'running', 0)
 
-    max_pages = settings.REMAX_MAX_PAGES   # 0 = uncapped
+    # 0 = uncapped: page until `totalPages`. That is safe ONLY once `locations`
+    # bounded the result set to the zona server-side. Without it the API serves
+    # the newest listings NATIONWIDE (66k+, verified live) and the zona is
+    # matched client-side on text — sweeping all of that means hundreds of
+    # round-trips to keep a handful of rows, so the unlocated fallback keeps its
+    # own ceiling. An explicit REMAX_MAX_PAGES always wins over that fallback.
+    max_pages = settings.REMAX_MAX_PAGES
+    if max_pages <= 0 and location is None:
+        max_pages = max(1, settings.REMAX_UNLOCATED_MAX_PAGES)
     page_size = max(1, settings.REMAX_PAGE_SIZE)
 
     results: list[RawProperty] = []
@@ -2038,6 +2100,38 @@ class ApifyService(BaseApifyService):
         filters: ScrapingFilters,
         on_progress: ProgressCb,
     ) -> list[RawProperty]:
+        """Scrape one portal, walking the zona's candidate chain until a
+        candidate returns something.
+
+        Resolving a barrio fails in three ways and only the last is visible
+        from inside a resolver: no autocomplete match at all (Argenprop
+        answers "Casco Urbano" with a barrio in San Luis), a match that is
+        the wrong place (RE/MAX's only literal one is the gated community
+        "Los Eucaliptus Casco Urbano"), or a good slug over an empty listing.
+        Text inspection cannot separate the second from a real hit, so the
+        retry keys on the only honest signal — zero results — and lives here,
+        the one entry point every portal shares.
+        """
+        results: list[RawProperty] = []
+        for candidate in zona_candidates(filters.zona or '') or [filters.zona or '']:
+            # `localidades` outranks `zona` in every portal's resolver, so a
+            # stale barrio left there would re-resolve the same dead slug.
+            update: dict[str, Any] = {'zona': candidate}
+            if filters.localidades:
+                update['localidades'] = [candidate]
+            results = await self._scrape_source_once(
+                source, filters.model_copy(update=update), on_progress,
+            )
+            if results:
+                break
+        return results
+
+    async def _scrape_source_once(
+        self,
+        source: str,
+        filters: ScrapingFilters,
+        on_progress: ProgressCb,
+    ) -> list[RawProperty]:
         if source == 'mercadolibre':
             return await _scrape_mercadolibre_api(filters, on_progress)
         if source == 'remax':
@@ -2084,8 +2178,6 @@ class ApifyService(BaseApifyService):
     # dies after page 1 (every run returns one page regardless of maxResults),
     # so WE paginate: one actor run per `...-pagina-N.html` URL.
     _ZP_PAGE_SIZE = 30
-    # Hard page ceiling when ZONAPROP_MAX_RESULTS is 0 (uncapped).
-    _ZP_MAX_PAGES_UNCAPPED = 20
 
     async def _scrape_zonaprop_paginated(
         self, actor_id: str, filters: ScrapingFilters,
@@ -2095,14 +2187,16 @@ class ApifyService(BaseApifyService):
         base_input = self._input_for('zonaprop', filters)
         base_url: str = base_input['searchUrl']
         phrases = _guard_phrases(filters)
-        max_pages = (
-            -(-cap // self._ZP_PAGE_SIZE) if cap > 0 else self._ZP_MAX_PAGES_UNCAPPED
-        )
+        # `cap <= 0` = no cap: the loop below already stops on an empty page, an
+        # all-duplicate page (an out-of-range `-pagina-N` redirects to page 1),
+        # an all-rejected page, or a short page — no synthetic page ceiling
+        # needed on top, and the old 20-page one was truncating busy zonas.
+        max_pages = -(-cap // self._ZP_PAGE_SIZE) if cap > 0 else 0
 
         results: list[RawProperty] = []
         seen: set[str] = set()
         page = 1
-        while page <= max_pages and (cap <= 0 or len(results) < cap):
+        while (max_pages <= 0 or page <= max_pages) and (cap <= 0 or len(results) < cap):
             input_data = dict(base_input)
             if page > 1:
                 input_data['searchUrl'] = base_url.replace('.html', f'-pagina-{page}.html')

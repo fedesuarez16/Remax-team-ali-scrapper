@@ -16,12 +16,20 @@ class Settings(BaseSettings):
     SCRAPE_ZONAPROP_ONLY: bool = False   # test mode: only fan out ZonaProp, skip ML + agencies
     SCRAPE_GOOGLEMAPS_ONLY: bool = False  # test mode: agencies-only — skip portal + Instagram scrapers
     MAX_WEBSITE_URLS: int = 10           # cap agency websites scraped per search
-    ZONAPROP_MAX_RESULTS: int = 200      # cap items per ZonaProp run; 0 = no cap (actor default)
-    ARGENPROP_MAX_PAGES: int = 3         # cap pages crawled per Argenprop search (hard-capped at 10, robots.txt)
-    REMAX_MAX_PAGES: int = 5             # cap pages per RE/MAX search (5 × 20 = 100 items); 0 = no cap (follow totalPages)
-    REMAX_PAGE_SIZE: int = 20            # items per RE/MAX API page
-    INMOBUSQUEDA_MAX_PAGES: int = 5      # cap pages per InmoBusqueda search (5 × 15 = 75 items)
-    MUDAFY_MAX_PAGES: int = 4            # cap pages per Mudafy search (4 × 25 = 100 items)
+    # ── Portal paging depth ───────────────────────────────────────────────────
+    # `0` means NO CAP on every source below: page until the portal itself runs
+    # out (totalPages / an empty page / a short page / a page with nothing new).
+    # These used to ship with low defaults, which is why a search topped out at
+    # exactly 100 RE/MAX items (5 pages × 20) — a self-imposed ceiling, never a
+    # portal constraint. Set a positive value to re-cap a source (cost/latency).
+    ZONAPROP_MAX_RESULTS: int = 0        # items per ZonaProp search; PAID — one Apify actor run PER PAGE
+    ARGENPROP_MAX_PAGES: int = 0         # 0 = the robots.txt ceiling (Allow: pagina-1..pagina-10)
+    REMAX_MAX_PAGES: int = 0             # pages per RE/MAX search (API serves 3300+; verified live)
+    REMAX_PAGE_SIZE: int = 200           # items per RE/MAX API page — 200 is the max the API honours
+    REMAX_UNLOCATED_MAX_PAGES: int = 15  # ceiling ONLY for the nationwide fallback (zona unresolved)
+    MERCADOLIBRE_MAX_PAGES: int = 0      # pages per MercadoLibre search (50 items each)
+    INMOBUSQUEDA_MAX_PAGES: int = 0      # pages per InmoBusqueda search (15 items each)
+    MUDAFY_MAX_PAGES: int = 0            # pages per Mudafy search (25 items each)
     GOOGLEMAPS_MAX_PLACES: int = 20      # cap billed places per zona in agency discovery (raise after testing)
     INSTAGRAM_RESULTS_LIMIT: int = 10    # cap posts per agency profile (raise after testing)
     AGENCY_CACHE_TTL_DAYS: int = 30      # reuse cached agencies per zona within N days (skip paid Google Maps actor)

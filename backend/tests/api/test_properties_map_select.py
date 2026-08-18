@@ -35,6 +35,9 @@ class _Query:
     def limit(self, *args, **kwargs) -> '_Query':
         return self
 
+    def range(self, *args, **kwargs) -> '_Query':
+        return self
+
     async def execute(self) -> _Res:
         return _Res([], 0)
 
@@ -63,6 +66,9 @@ async def test_map_select_includes_filter_columns() -> None:
         resp = await client.get('/properties/map')
 
     assert resp.status_code == 200
+    # The route funnels every exception into a 200 carrying an `error` key, so
+    # the status alone proves nothing — assert the query actually went through.
+    assert 'error' not in resp.json(), resp.json().get('error')
     # The first select against `properties` is the located-markers query.
     located_select = fake_sb.selects['properties'][0]
     for column in ('fuente', 'ambientes', 'banos', 'cocheras', 'm2_total', 'enviada_at'):

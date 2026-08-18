@@ -385,7 +385,7 @@ async def get_job_properties(job_id: str, request: Request) -> dict[str, Any]:
     query_raw = job_res.data[0].get('query_raw')
     polygon = job_res.data[0].get('polygon')
 
-    properties: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
     try:
         try:
             join_res = await sb.table('search_property_results').select(
@@ -401,14 +401,26 @@ async def get_job_properties(job_id: str, request: Request) -> dict[str, Any]:
             prop = row.get('properties')
             if prop:
                 prop['matches_criteria'] = row.get('matches_criteria') is not False
-                properties.append(prop)
+                by_id[str(prop.get('id'))] = prop
     except Exception as exc:
         log.warning('search_property_results unavailable (%s) — falling back to scraping_job_id lookup', exc)
 
-    # Fallback: table missing or empty → return all properties scraped in this job
-    if not properties:
-        fallback = await sb.table('properties').select('*').eq('scraping_job_id', job_id).execute()
-        properties = fallback.data or []
+    # Union, not either/or. Links carry the `matches_criteria` verdict, but a
+    # row stamped with this job's id is proof the job scraped it, and the two
+    # sets can disagree: link writing is best-effort and has been observed
+    # failing PARTWAY (job bb382a74 wrote 757 rows and only 30 links, so the
+    # old `if not properties` guard never fired and the view showed 30). A job
+    # whose links failed completely was recovered; one that half-succeeded was
+    # not. Rows recovered here have no link and therefore no criteria verdict —
+    # they count as matching, same as legacy links without the flag.
+    try:
+        owned = await sb.table('properties').select('*').eq('scraping_job_id', job_id).execute()
+        for prop in (owned.data or []):
+            by_id.setdefault(str(prop.get('id')), {**prop, 'matches_criteria': True})
+    except Exception as exc:
+        log.warning('scraping_job_id lookup failed (%s) — serving linked rows only', exc)
+
+    properties = list(by_id.values())
 
     # Rank by relevance to the original query so the best matches surface first.
     if query_raw and properties:

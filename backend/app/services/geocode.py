@@ -173,20 +173,85 @@ async def reverse_geocode(
     return barrio
 
 
-# "502 e/ 17 y 18" / "31 entre 425 y 426" — Nominatim can't parse the
-# between-streets part, and it poisons the match; keep only the street itself.
-# Negative lookahead excludes "Entre Ríos" (the province), which is NOT the
-# between-streets marker even though it starts with the same word.
-_ENTRE_RE = re.compile(r'\s+(?:e/|entre)\s+(?!r[íi]os\b).*$', re.IGNORECASE)
+# Portals write the between-streets marker four different ways — "502 e/ 17 y
+# 18", "19 E/41 y 42", "29 E / 418 y 419" and the bare "509 E 14 y 15" — and
+# Nominatim can parse none of them. The marker and the cross streets have to go,
+# but only up to the NEXT COMMA: everything after it is the locality ("48 e/ 7 y
+# 8, La Plata"), and dropping that sends La Plata's numbered grid streets to the
+# Buenos Aires viewbox, where the same numbers exist and resolve to the wrong
+# district. The bare-"e" branch demands a following "<num> y <num>" so ordinary
+# street tokens are never mistaken for the marker, and the "entre" branch
+# excludes "Entre Ríos" (the province, not a marker).
+_ENTRE_RE = re.compile(
+    r'\s+(?:e\s*/|entre\s+(?!r[íi]os\b)|e(?=\s+\d+\s*(?:y|a)\s+\d))[^,]*',
+    re.IGNORECASE,
+)
+# La Plata's grid is often written with the "e/" marker simply left out —
+# "11 43 y 44" means calle 11 between 43 and 44. Requires THREE numbers so a
+# plain corner ("3 y 42") is not mistaken for it; keeps the locality past the
+# comma for the same reason `_ENTRE_RE` does.
+_IMPLICIT_ENTRE_RE = re.compile(
+    r'^(\d+\s*(?:bis|[a-z])?)\s+\d+\s+y\s+\d+[^,]*', re.IGNORECASE,
+)
 # "48 esq 6" → "48 y 6": Nominatim resolves corners in "X y Z" form, not "esq".
-_ESQ_RE = re.compile(r'\s+esq\.?\s+', re.IGNORECASE)
+# Both the abbreviation and the full word appear in the data.
+_ESQ_RE = re.compile(r'\s+esq(?:uina|\.)?\s+', re.IGNORECASE)
+# "S/N" = sin número. It is a sentinel, not part of the address.
+_SIN_NUMERO_RE = re.compile(r'\s*\bs/n\b\.?', re.IGNORECASE)
+# Street-number markers ("N°380", "nro 1301", "al 2500") — keep the digits,
+# drop the marker, which Nominatim reads as a street-name token.
+_ALTURA_MARKER_RE = re.compile(r'\s*\b(?:n|nro|n°|nº|al)\s*[°º]?\s*(?=\d)', re.IGNORECASE)
+# "UF 1" — unidad funcional, an internal unit id with no map meaning.
+_UF_RE = re.compile(r'\s*\buf\s*\d+\b', re.IGNORECASE)
+# InmoBusqueda closes every address with "Pdo. de <partido>". Nominatim has no
+# idea what "Pdo." is and reads it as a street-name token, which poisons the
+# whole query — that source failed on 93.5% of its rows. Unwrapping the
+# abbreviation leaves the bare partido name, which Nominatim resolves fine.
+_PARTIDO_WRAPPER_RE = re.compile(r'\b(?:pdo\.?|partido)\s+de\s+', re.IGNORECASE)
+# "Cno." = Camino, another abbreviation Nominatim does not expand on its own.
+_CNO_RE = re.compile(r'\bcno\.?\s+', re.IGNORECASE)
+# Inmobusqueda prefixes the listing type onto the address ("Oficina en 48 ...").
+_TYPE_PREFIX_RE = re.compile(
+    r'^(?:departamento|depto\.?|dpto\.?|casa|ph|oficina|local|terreno|lote|cochera|'
+    r'galp[oó]n|quinta|campo|d[uú]plex|monoambiente)\s+en\s+',
+    re.IGNORECASE,
+)
+# Argenprop appends the floor; Nominatim has no concept of it and the trailing
+# token only poisons the match.
+_PISO_RE = re.compile(r'\s*,?\s*piso\s+\S+\s*$', re.IGNORECASE)
+# RE/MAX writes a bare trailing 0 when the street number is unknown.
+_ZERO_ALTURA_RE = re.compile(r'\s+0\s*$')
+# Some portals ship a breadcrumb ("19 y 45, Argentina | G.B.A. Zona Sur | La
+# Plata"); commas are the separator Nominatim understands.
+_PIPE_RE = re.compile(r'\s*\|\s*')
+_SPACE_BEFORE_COMMA_RE = re.compile(r'\s+,')
+_MULTI_SPACE_RE = re.compile(r'\s{2,}')
 
 
 def _clean_street(direccion: str) -> str:
-    """Strip the between-streets/corner notation grid addresses use, which
-    Nominatim can't parse and which poisons the match otherwise."""
-    cleaned = _ENTRE_RE.sub('', direccion.strip())
+    """Normalise the notations the portals use into something Nominatim can
+    resolve, preserving the locality that disambiguates numbered grid streets.
+
+    Order matters: the floor suffix is dropped before the between-streets rule
+    runs, so "473 bis e/15 a y 17 , Piso 0" loses the floor first and the
+    cross-streets rule then has a clean tail to eat.
+    """
+    cleaned = _PIPE_RE.sub(', ', direccion.strip())
+    cleaned = _PARTIDO_WRAPPER_RE.sub('', cleaned)
+    cleaned = _CNO_RE.sub('Camino ', cleaned)
+    cleaned = _TYPE_PREFIX_RE.sub('', cleaned)
+    cleaned = _PISO_RE.sub('', cleaned)
+    cleaned = _UF_RE.sub('', cleaned)
+    cleaned = _SIN_NUMERO_RE.sub('', cleaned)
+    cleaned = _ENTRE_RE.sub('', cleaned)
+    # After `_ESQ_RE` a corner reads "X y Z", which must not then look like an
+    # implicit "<street> <a> y <b>" — so the implicit rule runs first.
+    cleaned = _IMPLICIT_ENTRE_RE.sub(r'\1', cleaned)
     cleaned = _ESQ_RE.sub(' y ', cleaned)
+    cleaned = _ALTURA_MARKER_RE.sub(' ', cleaned)
+    cleaned = _ZERO_ALTURA_RE.sub('', cleaned)
+    cleaned = _SPACE_BEFORE_COMMA_RE.sub(',', cleaned)
+    cleaned = _MULTI_SPACE_RE.sub(' ', cleaned).strip().strip(',').strip()
     if re.match(r'^\d', cleaned):
         cleaned = f'Calle {cleaned}'
     return cleaned

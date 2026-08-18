@@ -95,3 +95,44 @@ def normalize_zona(zona: str) -> str:
                 s = s[: -len(suf)].strip()
                 changed = True
     return s
+
+
+# Terms that name a whole province/city rather than a locality. Degrading a
+# barrio search down to one of these stops being a barrio search — "Palermo,
+# CABA" falling back to "CABA" would hand back the entire city — so the
+# candidate chain stops before them.
+_WIDE_JURISDICTIONS = frozenset({
+    'caba', 'capital federal', 'ciudad autonoma de buenos aires',
+    'provincia de buenos aires', 'buenos aires', 'argentina',
+})
+
+
+def zona_candidates(zona: str) -> list[str]:
+    """A zona → the phrases to try for it, most specific first.
+
+    No two portals model the same barrio alike: for La Plata's casco urbano,
+    InmoBusqueda has an exact localidad, RE/MAX's only literal match is a
+    gated community, Argenprop's is a homonym in San Luis, and ZonaProp and
+    Mudafy have no such concept — so there is no canonical phrase to rewrite
+    a zona INTO. Callers instead walk this chain, falling back to the
+    containing localidad when a portal's own autocomplete does not know (or
+    misreads) the barrio.
+
+    The chain doubles as the zona guard's phrase set: a listing that only
+    names the localidad ("calle 47 e/ 12 y 13, La Plata") still survives, which
+    is what a barrio-level guard was rejecting outright.
+    """
+    parts = [' '.join(p.split()) for p in zona.split(',')]
+    parts = [p for p in parts if p]
+
+    chain: list[str] = []
+    while parts:
+        phrase = ', '.join(parts)
+        if phrase not in chain:
+            chain.append(phrase)
+        # Stop at a bare term, or when the next fallback would be a whole
+        # province/city rather than a locality.
+        if len(parts) < 2 or normalize_address(', '.join(parts[1:])) in _WIDE_JURISDICTIONS:
+            break
+        parts = parts[1:]
+    return chain

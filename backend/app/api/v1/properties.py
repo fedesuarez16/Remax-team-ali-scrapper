@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,6 +9,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app.core.database import chunk_for_in_filter
 from app.services.ficha import enrich_ficha as _enrich_ficha
 from app.services.importer import import_property_from_url as _import_property
 from app.services.geocode import backfill_state as _backfill_state
@@ -95,8 +97,38 @@ async def list_properties(
         return {'properties': [], 'total': 0, 'error': str(e)}
 
 
+# PostgREST caps every response at its server-side `max_rows` (1000 by default
+# on Supabase — see supabase/config.toml). A client-side `.limit(n)` above that
+# does NOT lift the cap, it just gets silently truncated, which is why the /map
+# tab froze at exactly 1000 markers while the table held ~2000 located rows.
+# Requesting one cap-sized page at a time and stopping on a short page is the
+# only way to drain the table without depending on a dashboard setting.
+MAP_PAGE_SIZE = 1000
+
+
+async def _fetch_paged(
+    build_query: Callable[[], Any], *, limit: int, page_size: int = MAP_PAGE_SIZE,
+) -> list[dict[str, Any]]:
+    """Drain `build_query()` in `page_size` chunks, up to `limit` rows.
+
+    `build_query` has to return a FRESH query builder on every call — the
+    supabase-py builders accumulate state, so a single instance cannot be
+    re-ranged.
+    """
+    rows: list[dict[str, Any]] = []
+    while len(rows) < limit:
+        want = min(page_size, limit - len(rows))
+        offset = len(rows)
+        res = await build_query().range(offset, offset + want - 1).execute()
+        batch = res.data or []
+        rows.extend(batch)
+        if len(batch) < want:
+            break  # short page → table exhausted
+    return rows
+
+
 @router.get('/map')
-async def properties_map(request: Request, limit: int = 2000) -> dict[str, Any]:
+async def properties_map(request: Request, limit: int = 50000) -> dict[str, Any]:
     """Geocoded properties only — backs the `/map` dashboard tab.
 
     NOTE: this route MUST stay declared before the `/{property_id}` catch-all
@@ -107,16 +139,17 @@ async def properties_map(request: Request, limit: int = 2000) -> dict[str, Any]:
         return {'properties': [], 'total': 0, 'missing': 0, 'message': 'Supabase no configurado'}
 
     try:
-        located = await (
-            sb.table('properties')
-            .select(
-                'id,titulo,precio,moneda,direccion,tipo_operacion,tipo_propiedad,'
-                'imagenes,lat,lng,fuente,ambientes,banos,cocheras,m2_total,enviada_at'
-            )
-            .not_.is_('lat', 'null')
-            .not_.is_('lng', 'null')
-            .limit(limit)
-            .execute()
+        located = await _fetch_paged(
+            lambda: (
+                sb.table('properties')
+                .select(
+                    'id,titulo,precio,moneda,direccion,tipo_operacion,tipo_propiedad,'
+                    'imagenes,lat,lng,fuente,ambientes,banos,cocheras,m2_total,enviada_at'
+                )
+                .not_.is_('lat', 'null')
+                .not_.is_('lng', 'null')
+            ),
+            limit=limit,
         )
         missing_res = await (
             sb.table('properties').select('id', count='exact').is_('lat', 'null').execute()
@@ -124,15 +157,15 @@ async def properties_map(request: Request, limit: int = 2000) -> dict[str, Any]:
         cartera: list[dict[str, Any]] = []
         cartera_missing = 0
         try:
-            cartera_res = await (
-                sb.table('propiedades')
-                .select('id,direccion,zona,valor,tipo_de_propiedad,dormitorios,link,lat,lng')
-                .not_.is_('lat', 'null')
-                .not_.is_('lng', 'null')
-                .limit(limit)
-                .execute()
+            cartera = await _fetch_paged(
+                lambda: (
+                    sb.table('propiedades')
+                    .select('id,direccion,zona,valor,tipo_de_propiedad,dormitorios,link,lat,lng')
+                    .not_.is_('lat', 'null')
+                    .not_.is_('lng', 'null')
+                ),
+                limit=limit,
             )
-            cartera = cartera_res.data or []
             cartera_missing_res = await (
                 sb.table('propiedades').select('id', count='exact').is_('lat', 'null').execute()
             )
@@ -142,8 +175,8 @@ async def properties_map(request: Request, limit: int = 2000) -> dict[str, Any]:
             # el mapa de scrapeadas tiene que seguir funcionando igual
             pass
         return {
-            'properties': located.data or [],
-            'total': len(located.data or []),
+            'properties': located,
+            'total': len(located),
             'missing': missing_res.count or 0,
             'cartera': cartera,
             'cartera_missing': cartera_missing,
@@ -257,11 +290,16 @@ async def mark_properties_sent(request: Request, body: dict) -> dict[str, Any]:
     enviada = body.get('enviada', True)
     stamp = datetime.now(timezone.utc).isoformat() if enviada else None
 
-    try:
-        res = await sb.table('properties').update({'enviada_at': stamp}).in_('id', ids).execute()
-    except Exception as e:
-        return {'updated': 0, 'properties': [], 'error': str(e)}
-    rows = res.data or []
+    # Chunked: `in_` values ride in the URL, which PostgREST rejects past ~39 KB
+    # (~1000 uuids). A partial failure leaves earlier batches ALREADY updated,
+    # so report those instead of a `0` that contradicts the stored data.
+    rows: list[dict[str, Any]] = []
+    for chunk in chunk_for_in_filter(ids):
+        try:
+            res = await sb.table('properties').update({'enviada_at': stamp}).in_('id', chunk).execute()
+        except Exception as e:
+            return {'updated': len(rows), 'properties': rows, 'error': str(e)}
+        rows.extend(res.data or [])
     return {'updated': len(rows), 'properties': rows}
 
 
@@ -289,11 +327,19 @@ async def bulk_delete_properties(request: Request, body: dict) -> dict[str, Any]
     if not ids:
         raise HTTPException(status_code=400, detail='ids requerido')
 
-    try:
-        res = await sb.table('properties').delete().in_('id', ids).execute()
-    except Exception as e:
-        return {'deleted': 0, 'ids': [], 'error': str(e)}
-    rows = res.data or []
+    # Chunked: `in_` values ride in the URL, which PostgREST rejects past ~39 KB
+    # (~1000 uuids). Batches already executed are ALREADY deleted, so a failure
+    # partway reports what is really gone — never `0` over deleted rows.
+    rows: list[dict[str, Any]] = []
+    done: list[str] = []
+    for chunk in chunk_for_in_filter(ids):
+        try:
+            res = await sb.table('properties').delete().in_('id', chunk).execute()
+        except Exception as e:
+            deleted_ids = [r.get('id') for r in rows if r.get('id')] or done
+            return {'deleted': len(rows), 'ids': deleted_ids, 'error': str(e)}
+        rows.extend(res.data or [])
+        done.extend(chunk)
     # PostgREST devuelve las filas borradas; si el representation viene vacío
     # caemos a los ids pedidos para no reportar 0 sobre un borrado real.
     deleted_ids = [r.get('id') for r in rows if r.get('id')] or ids

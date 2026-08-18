@@ -9,6 +9,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Send, interrupt
 
 from app.core.config import settings
+from app.core.database import chunk_for_in_filter
 from app.models.property import Agency, NormalizedProperty, ScrapingFilters
 from app.graphs.extraction.state import ScrapingState
 from app.graphs.extraction.tools import (
@@ -449,12 +450,15 @@ async def _fill_missing_images(sb: Any, props: list[NormalizedProperty]) -> None
     if sb is None or not scraped:
         return
     try:
-        res = await sb.table('properties').select(
-            'id,direccion,precio,tipo_operacion,imagenes'
-        ).in_('direccion', list({d for d, _, _ in scraped})).execute()
+        rows: list[dict[str, Any]] = []
+        for chunk in chunk_for_in_filter(list({d for d, _, _ in scraped})):
+            res = await sb.table('properties').select(
+                'id,direccion,precio,tipo_operacion,imagenes'
+            ).in_('direccion', chunk).execute()
+            rows.extend(res.data or [])
 
         pending: list[tuple[str, list[str]]] = []
-        for row in (res.data or []):
+        for row in rows:
             if row.get('imagenes'):  # curated or already filled — hands off
                 continue
             imgs = scraped.get(_dedup_triple(
@@ -529,14 +533,17 @@ async def _link_job_properties(
 
         if priced:
             direcciones = list({p.direccion for p in priced})
-            res = await sb.table('properties').select(
-                'id,direccion,precio,tipo_operacion'
-            ).in_('direccion', direcciones).execute()
+            priced_rows: list[dict[str, Any]] = []
+            for chunk in chunk_for_in_filter(direcciones):
+                res = await sb.table('properties').select(
+                    'id,direccion,precio,tipo_operacion'
+                ).in_('direccion', chunk).execute()
+                priced_rows.extend(res.data or [])
             priced_triples = {
                 (p.direccion, float(p.precio), p.tipo_operacion)
                 for p in priced
             }
-            for row in (res.data or []):
+            for row in priced_rows:
                 row_precio = float(row['precio']) if row['precio'] is not None else None
                 triple = (row['direccion'], row_precio, row['tipo_operacion'])
                 if triple in priced_triples:
@@ -544,11 +551,14 @@ async def _link_job_properties(
 
         if null_priced:
             direcciones_null = list({p.direccion for p in null_priced})
-            res_null = await sb.table('properties').select(
-                'id,direccion,tipo_operacion'
-            ).in_('direccion', direcciones_null).is_('precio', 'null').execute()
+            null_rows: list[dict[str, Any]] = []
+            for chunk in chunk_for_in_filter(direcciones_null):
+                res_null = await sb.table('properties').select(
+                    'id,direccion,tipo_operacion'
+                ).in_('direccion', chunk).is_('precio', 'null').execute()
+                null_rows.extend(res_null.data or [])
             null_pairs = {(p.direccion, p.tipo_operacion) for p in null_priced}
-            for row in (res_null.data or []):
+            for row in null_rows:
                 if (row['direccion'], row['tipo_operacion']) in null_pairs:
                     id_flags[row['id']] = (row['direccion'], None, row['tipo_operacion']) in matched_triples
 
