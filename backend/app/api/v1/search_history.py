@@ -5,6 +5,8 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from app.core.database import chunk_for_in_filter
+
 router = APIRouter()
 
 # Sidebar shows at most this many recent searches; POST trims older rows
@@ -25,17 +27,22 @@ async def _attach_apify_costs(sb: Any, history: list[dict[str, Any]]) -> list[di
     if not job_ids:
         return history
 
+    # Chunked: `in_` values ride in the URL, which PostgREST rejects past ~39 KB
+    # (~1000 uuids) — a long history page would silently lose every cost.
+    rows: list[dict[str, Any]] = []
     try:
-        res = await (
-            sb.table('scraping_jobs')
-            .select('id,apify_cost_usd,apify_cost_breakdown')
-            .in_('id', job_ids)
-            .execute()
-        )
+        for chunk in chunk_for_in_filter(job_ids):
+            res = await (
+                sb.table('scraping_jobs')
+                .select('id,apify_cost_usd,apify_cost_breakdown')
+                .in_('id', chunk)
+                .execute()
+            )
+            rows.extend(res.data or [])
     except Exception:
         return history
 
-    jobs = {row['id']: row for row in (res.data or [])}
+    jobs = {row['id']: row for row in rows}
     for entry in history:
         job = jobs.get(entry.get('job_id') or '')
         if job is None:
@@ -233,4 +240,8 @@ async def _trim_cap(sb: Any, cap: int = CAP) -> None:
     rows = res.data or []
     if len(rows) > cap:
         stale_ids = [r['id'] for r in rows[cap:]]
-        await sb.table('search_history').delete().in_('id', stale_ids).execute()
+        # Chunked: `in_` values ride in the URL, which PostgREST rejects past
+        # ~39 KB (~1000 uuids). A trim that raises leaves the cap unenforced
+        # forever; batching keeps it working however far past the cap we are.
+        for chunk in chunk_for_in_filter(stale_ids):
+            await sb.table('search_history').delete().in_('id', chunk).execute()

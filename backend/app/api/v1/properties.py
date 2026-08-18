@@ -9,6 +9,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app.core.database import chunk_for_in_filter
 from app.services.ficha import enrich_ficha as _enrich_ficha
 from app.services.importer import import_property_from_url as _import_property
 from app.services.geocode import backfill_state as _backfill_state
@@ -289,11 +290,16 @@ async def mark_properties_sent(request: Request, body: dict) -> dict[str, Any]:
     enviada = body.get('enviada', True)
     stamp = datetime.now(timezone.utc).isoformat() if enviada else None
 
-    try:
-        res = await sb.table('properties').update({'enviada_at': stamp}).in_('id', ids).execute()
-    except Exception as e:
-        return {'updated': 0, 'properties': [], 'error': str(e)}
-    rows = res.data or []
+    # Chunked: `in_` values ride in the URL, which PostgREST rejects past ~39 KB
+    # (~1000 uuids). A partial failure leaves earlier batches ALREADY updated,
+    # so report those instead of a `0` that contradicts the stored data.
+    rows: list[dict[str, Any]] = []
+    for chunk in chunk_for_in_filter(ids):
+        try:
+            res = await sb.table('properties').update({'enviada_at': stamp}).in_('id', chunk).execute()
+        except Exception as e:
+            return {'updated': len(rows), 'properties': rows, 'error': str(e)}
+        rows.extend(res.data or [])
     return {'updated': len(rows), 'properties': rows}
 
 
@@ -321,11 +327,19 @@ async def bulk_delete_properties(request: Request, body: dict) -> dict[str, Any]
     if not ids:
         raise HTTPException(status_code=400, detail='ids requerido')
 
-    try:
-        res = await sb.table('properties').delete().in_('id', ids).execute()
-    except Exception as e:
-        return {'deleted': 0, 'ids': [], 'error': str(e)}
-    rows = res.data or []
+    # Chunked: `in_` values ride in the URL, which PostgREST rejects past ~39 KB
+    # (~1000 uuids). Batches already executed are ALREADY deleted, so a failure
+    # partway reports what is really gone — never `0` over deleted rows.
+    rows: list[dict[str, Any]] = []
+    done: list[str] = []
+    for chunk in chunk_for_in_filter(ids):
+        try:
+            res = await sb.table('properties').delete().in_('id', chunk).execute()
+        except Exception as e:
+            deleted_ids = [r.get('id') for r in rows if r.get('id')] or done
+            return {'deleted': len(rows), 'ids': deleted_ids, 'error': str(e)}
+        rows.extend(res.data or [])
+        done.extend(chunk)
     # PostgREST devuelve las filas borradas; si el representation viene vacío
     # caemos a los ids pedidos para no reportar 0 sobre un borrado real.
     deleted_ids = [r.get('id') for r in rows if r.get('id')] or ids
