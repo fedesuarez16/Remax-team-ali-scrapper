@@ -126,3 +126,23 @@ def test_altura_markers_and_sentinels_are_normalised(raw: str, expected: str) ->
 
 def test_empty_address_stays_empty() -> None:
     assert _clean_street('   ') == ''
+
+
+@pytest.mark.parametrize(('raw', 'expected'), [
+    # InmoBusqueda's format: "<tipo> en <calle> [N°alt] [e/ a y b] <barrio>, Pdo. de <partido>".
+    # "Pdo." (partido) is an abbreviation Nominatim does not know — it reads as a
+    # street-name token and poisons the whole query. 316 of the 963 rows still
+    # unlocated carry it, and inmobusqueda alone failed on 93.5% of its rows.
+    ('Casa en 121 e/ 73 y 74 Villa Elvira, Pdo. de La Plata', 'Calle 121, La Plata'),
+    ('Cochera en 34 e/ 12 y 13 La Plata (Casco Urbano), Pdo. de La Plata',
+     'Calle 34, La Plata'),
+    ('Casa en 115 N°829 e/ 523 y 524 Tolosa, Pdo. de La Plata', 'Calle 115 829, La Plata'),
+    # Spelled out in full, same meaning.
+    ('Casa en 12 e/ 3 y 4, Partido de Ensenada', 'Calle 12, Ensenada'),
+])
+def test_partido_abbreviation_is_unwrapped(raw: str, expected: str) -> None:
+    assert _clean_street(raw) == expected
+
+
+def test_camino_abbreviation_is_expanded() -> None:
+    assert _clean_street('Cno. Rivadavia 1200') == 'Camino Rivadavia 1200'

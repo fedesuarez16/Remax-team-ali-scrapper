@@ -203,6 +203,13 @@ _SIN_NUMERO_RE = re.compile(r'\s*\bs/n\b\.?', re.IGNORECASE)
 _ALTURA_MARKER_RE = re.compile(r'\s*\b(?:n|nro|n°|nº|al)\s*[°º]?\s*(?=\d)', re.IGNORECASE)
 # "UF 1" — unidad funcional, an internal unit id with no map meaning.
 _UF_RE = re.compile(r'\s*\buf\s*\d+\b', re.IGNORECASE)
+# InmoBusqueda closes every address with "Pdo. de <partido>". Nominatim has no
+# idea what "Pdo." is and reads it as a street-name token, which poisons the
+# whole query — that source failed on 93.5% of its rows. Unwrapping the
+# abbreviation leaves the bare partido name, which Nominatim resolves fine.
+_PARTIDO_WRAPPER_RE = re.compile(r'\b(?:pdo\.?|partido)\s+de\s+', re.IGNORECASE)
+# "Cno." = Camino, another abbreviation Nominatim does not expand on its own.
+_CNO_RE = re.compile(r'\bcno\.?\s+', re.IGNORECASE)
 # Inmobusqueda prefixes the listing type onto the address ("Oficina en 48 ...").
 _TYPE_PREFIX_RE = re.compile(
     r'^(?:departamento|depto\.?|dpto\.?|casa|ph|oficina|local|terreno|lote|cochera|'
@@ -230,6 +237,8 @@ def _clean_street(direccion: str) -> str:
     cross-streets rule then has a clean tail to eat.
     """
     cleaned = _PIPE_RE.sub(', ', direccion.strip())
+    cleaned = _PARTIDO_WRAPPER_RE.sub('', cleaned)
+    cleaned = _CNO_RE.sub('Camino ', cleaned)
     cleaned = _TYPE_PREFIX_RE.sub('', cleaned)
     cleaned = _PISO_RE.sub('', cleaned)
     cleaned = _UF_RE.sub('', cleaned)
