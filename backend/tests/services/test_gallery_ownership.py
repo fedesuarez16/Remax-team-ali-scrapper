@@ -86,6 +86,68 @@ def test_pruning_does_not_eat_the_real_gallery() -> None:
     assert len(imgs) == 3
 
 
+def test_chrome_tags_are_pruned_like_in_visible_text() -> None:
+    """`_visible_text` ya podaba header/footer/nav; esta función no, y por eso se
+    colaban el logo del portal, el sello de data fiscal y el QR de registro.
+
+    Medido en vivo: `qr-registro.png` de ZonaProp vive dentro de `<footer>`.
+    """
+    html = f'''
+    <html><body>
+      <header><img src="https://x.com/portal-brand.jpg"></header>
+      <nav><img src="https://x.com/nav-thumb.jpg"></nav>
+      <div class="gallery"><img src="{_OWN}/propia.jpg"></div>
+      <footer><a class="copyright-datafiscal"><img src="https://img.com/qr-registro.png"></a></footer>
+    </body></html>'''
+    imgs = _extract_images_from_html(html, _BASE)
+    assert imgs == [f'{_OWN}/propia.jpg']
+
+
+def test_logo_containers_are_pruned() -> None:
+    """InmoBusqueda mete su isotipo en `div.logoresultados` — y es un .jpg, así
+    que ningún filtro por extensión lo iba a distinguir de una foto."""
+    html = f'''
+    <html><body>
+      <div class="headerresultados"><div class="logoresultados">
+        <img src="https://www.inmobusqueda.com.ar/imagenes/casita.home.jpg">
+      </div></div>
+      <img src="{_OWN}/propia.jpg">
+    </body></html>'''
+    imgs = _extract_images_from_html(html, _BASE)
+    assert imgs == [f'{_OWN}/propia.jpg']
+
+
+def test_map_containers_are_pruned() -> None:
+    """El mapa de la ficha no es una foto de la propiedad.
+
+    Medido en ZonaProp: `no-location-map.png` en `div.static-map-container`,
+    que NO está en el footer — por eso hace falta el patrón propio.
+    """
+    html = f'''
+    <html><body>
+      <img src="{_OWN}/propia.jpg">
+      <div class="article-map article-map-property"><div class="static-map-container">
+        <img src="https://img10.naventcdn.com/ficha/images/no-location-map.png">
+      </div></div>
+    </body></html>'''
+    imgs = _extract_images_from_html(html, _BASE)
+    assert imgs == [f'{_OWN}/propia.jpg']
+
+
+def test_pruning_keeps_a_gallery_that_merely_says_header() -> None:
+    """La poda mira TAGS chrome y clases de logo/mapa, no cualquier 'header'.
+
+    Un `div.gallery-header` es parte de la ficha: llevárselo puesto sería
+    cambiar un bug por otro peor.
+    """
+    html = f'''
+    <html><body><div class="gallery-header property-header">
+      <img src="{_OWN}/a.jpg"><img src="{_OWN}/b.jpg">
+    </div></body></html>'''
+    imgs = _extract_images_from_html(html, _BASE)
+    assert len(imgs) == 2
+
+
 # ── 2. Fotos en background inline ─────────────────────────────────────────────
 
 def test_background_url_photos_are_collected() -> None:
