@@ -1490,7 +1490,19 @@ _IMG_JUNK = (
 _FOREIGN_CONTAINER_PATTERNS = (
     'similar', 'related', 'relacionad', 'recomend', 'sugerid',
     'otras-propiedades', 'otras_propiedades', 'form-widget',
+    # Isotipo del portal: InmoBusqueda lo sirve como .jpg desde
+    # `div.logoresultados`, así que por extensión es indistinguible de una foto.
+    'logo',
+    # El mapa de la ficha no es una foto de la propiedad. ZonaProp lo pone en
+    # `div.static-map-container`, FUERA del footer.
+    'static-map', 'article-map', 'map-container',
 )
+
+# Chrome del sitio. `_visible_text` ya los podaba; esta función no, y por eso se
+# colaban el logo del portal, el sello de data fiscal y el QR de registro.
+# Se podan por TAG, nunca por clase: un `div.gallery-header` es parte de la
+# ficha y llevárselo puesto sería cambiar un bug por otro peor.
+_CHROME_TAGS = ('header', 'footer', 'nav')
 
 # `style="background: center url(...)"`. El visor de Argenprop no usa <img>:
 # sin esto la ficha queda con UNA foto (la del og:image) aunque el DOM traiga 5.
@@ -1526,6 +1538,8 @@ def _extract_images_from_html(html: str, base: str, anchor_to_og: bool = False) 
     from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 
     soup = BeautifulSoup(html, 'html.parser')
+    for tag in soup(list(_CHROME_TAGS)):
+        tag.decompose()
     for tag in soup.find_all(_is_foreign_container):
         tag.decompose()
 
