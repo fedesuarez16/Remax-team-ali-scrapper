@@ -1247,6 +1247,41 @@ def _remax_photo_urls(item: dict[str, Any]) -> list[str]:
     return urls[:_MAX_GALLERY]
 
 
+_REMAX_LISTING_SLUG_RE = re.compile(r'remax\.com\.ar/listings/([^/?#]+)', re.I)
+
+
+async def remax_gallery_from_url(url: str) -> list[str]:
+    """Galería completa de una ficha de RE/MAX, por su API pública.
+
+    remax.com.ar es una SPA de Angular: el HTML servido — aun renderizado con
+    Playwright — trae UNA sola URL de foto, la del `og:image`. El resto las pide
+    el front por API después de hidratar, así que NO están en el DOM y ningún
+    scraping las va a encontrar. Verificado en vivo sobre una ficha real: 380KB
+    de HTML, 3 URLs de imagen, dos de ellas banderas de países.
+
+    La misma API pública que usa `_scrape_remax_api` sirve el aviso completo por
+    slug, y `_remax_photo_urls` ya arma las URLs del CDN. Es el mismo patrón que
+    `ficha._mercadolibre_gallery`: cuando el portal tiene API oficial, se le
+    pregunta a la API en vez de pelearse con el DOM.
+
+    Devuelve ``[]`` ante cualquier fallo — la galería es un extra y no puede
+    tumbar un import que ya tiene los datos de la propiedad.
+    """
+    m = _REMAX_LISTING_SLUG_RE.search(url or '')
+    if not m:
+        return []
+    slug = m.group(1)
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get(f'{_REMAX_API_BASE}/listings/findBySlug/{slug}')
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        return []
+    item = data.get('data') if isinstance(data, dict) else None
+    return _remax_photo_urls(item) if isinstance(item, dict) else []
+
+
 def _norm_remax(item: dict[str, Any], zona: str) -> RawProperty | None:
     precio = item.get('price')
     if not precio:

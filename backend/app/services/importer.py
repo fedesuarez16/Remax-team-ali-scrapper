@@ -24,6 +24,7 @@ from app.services.apify import (
     _extract_images_from_html,
     fetch_page_html_via_actor,
     harvest_page_images,
+    remax_gallery_from_url,
     render_page_html,
 )
 from app.services.llm_costs import SCOPE_FICHA_PROPIO, record_llm_usage
@@ -243,6 +244,14 @@ async def import_property_from_url(sb: Any, url: str) -> dict[str, Any]:
     await record_llm_usage(sb, scope=SCOPE_FICHA_PROPIO, model=MODEL, usage=usage, url=url)
     if not data:
         raise RuntimeError('No se encontró una propiedad en esa página')
+
+    # Portales con API oficial primero: sirven la galería COMPLETA y exacta, sin
+    # browser ni adivinanzas. RE/MAX es una SPA de Angular y su HTML trae una
+    # sola foto (la del og:image), así que sin este paso la ficha nace con 1 de
+    # 37. Mismo criterio que `ficha._mercadolibre_gallery`.
+    portal_gallery = await remax_gallery_from_url(url)
+    if len(portal_gallery) > len(images):
+        images = portal_gallery
 
     if len(images) < _MIN_GALLERY:
         try:
