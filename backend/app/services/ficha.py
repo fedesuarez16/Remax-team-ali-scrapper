@@ -13,12 +13,9 @@ from app.services.llm_costs import SCOPE_FICHA_ENRICH, SCOPE_FICHA_PROPIO, recor
 
 logger = logging.getLogger(__name__)
 
-_ML_API_BASE = 'https://api.mercadolibre.com'
-# permalink → item id: .../MLA-1234567890-titulo... → MLA1234567890
-_ML_ID_RE = re.compile(r'(ML[A-Z])-?(\d+)')
-
 # Browser-like headers: ZonaProp serves the full listing HTML to these (its
-# gallery lives in an embedded JSON blob) but 403s bare clients.
+# gallery lives in an embedded JSON blob) but 403s bare clients. MercadoLibre's
+# listing page needs the same treatment now that its API is closed.
 _BROWSER_HEADERS = {
     'User-Agent': (
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
@@ -146,32 +143,61 @@ def _merge_images(existing: list[str], extra: list[str]) -> list[str]:
     return out
 
 
-async def _mercadolibre_gallery(url_origen: str) -> list[str]:
-    """Full photo gallery from MercadoLibre's official item API (no scraping).
+# Una foto del aviso: `D_NQ_NP[_2X]_<id>-MLA<n>_<fecha>` + sufijo de tamaño.
+# El `NP_` es lo que la separa del chrome del sitio: la misma página trae
+# `D_NQ_871042-MLA96631608403_102025-OO.webp`, que no es de la propiedad.
+_ML_PIC_RE = re.compile(
+    r'https://http2\.mlstatic\.com/(D_NQ_NP_(?:2X_)?[0-9A-Za-z]+-MLA\d+_\d+)-[0-9A-Za-z-]+\.(?:jpg|webp)'
+)
 
-    The search feed only carries the thumbnail; the complete ``pictures[]`` array
-    lives at ``/items/{id}``. The item id is parsed from the permalink.
+
+def _parse_mercadolibre_pictures(html: str) -> list[str]:
+    """Las fotos del aviso, normalizadas al original `-O.jpg`.
+
+    Cada foto aparece varias veces con distinto sufijo de tamaño (`-F-null.webp`
+    en la galería, `-E.webp` en el thumbnail del feed, `-V.webp` en el visor):
+    todas cuelgan de la misma base, así que se deduplica por base y se pide
+    `-O.jpg`, que es el original (200 image/jpeg, verificado en vivo) y el
+    formato que ya usa el resto del repo.
     """
-    m = _ML_ID_RE.search(url_origen or '')
-    if not m:
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _ML_PIC_RE.finditer(html or ''):
+        base = m.group(1)
+        if base in seen:
+            continue
+        seen.add(base)
+        out.append(f'https://http2.mlstatic.com/{base}-O.jpg')
+    return out
+
+
+async def _mercadolibre_gallery(url_origen: str) -> list[str]:
+    """Full photo gallery from the listing page HTML.
+
+    NOT the official API: `api.mercadolibre.com/items/{id}` answers **403** even
+    with a real application token (client_credentials returns HTTP 200 and scope
+    `read`, and the call still comes back
+    `PA_UNAUTHORIZED_RESULT_FROM_POLICIES` / `blocked_by: PolicyAgent`) — ML
+    closed its public catalogue to third-party apps and the DevCenter offers no
+    catalogue permission to tick. Every MercadoLibre ficha was left with the
+    single feed thumbnail while the listing carried the whole gallery.
+
+    The listing page itself still serves 200 to browser-like headers, which is
+    the same route `_zonaprop_gallery` already takes.
+    """
+    if not url_origen:
         return []
-    item_id = f'{m.group(1)}{m.group(2)}'
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f'{_ML_API_BASE}/items/{item_id}',
-                params={'attributes': 'pictures'},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        async with httpx.AsyncClient(
+            timeout=20, headers=_BROWSER_HEADERS, follow_redirects=True
+        ) as client:
+            resp = await client.get(url_origen)
+            if resp.status_code != 200:
+                return []
+            return _parse_mercadolibre_pictures(resp.text)
     except Exception as exc:
-        logger.warning('ML gallery fetch failed for %s: %s', item_id, exc)
+        logger.warning('ML gallery fetch failed for %s: %s', url_origen, exc)
         return []
-    return [
-        p.get('secure_url') or p.get('url', '')
-        for p in (data.get('pictures') or [])
-        if isinstance(p, dict) and (p.get('secure_url') or p.get('url'))
-    ]
 
 
 def _parse_zonaprop_pictures(html: str) -> list[str]:
@@ -245,7 +271,8 @@ async def _fetch_full_gallery(prop: dict[str, Any]) -> list[str]:
     Source-aware and verified against real data:
     - zonaprop → parse the detail page's embedded gallery JSON (biggest gap:
       the feed stores ~2 photos while listings carry 15-34).
-    - mercadolibre → official item API (best-effort; ML now gates its API).
+    - mercadolibre → parse the listing page HTML. Its API is closed (403 to
+      everything, even with a real app token), so this is the only route left.
     - googlemaps → url_origen is the agency-site ficha of a single property,
       so its harvested images belong to it unambiguously.
     - argenprop/remax → generic Playwright harvest of the listing's own ficha

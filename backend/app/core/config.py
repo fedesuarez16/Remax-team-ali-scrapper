@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     GOOGLEMAPS_MAX_PLACES: int = 20      # cap billed places per zona in agency discovery (raise after testing)
     INSTAGRAM_RESULTS_LIMIT: int = 10    # cap posts per agency profile (raise after testing)
     AGENCY_CACHE_TTL_DAYS: int = 30      # reuse cached agencies per zona within N days (skip paid Google Maps actor)
+    # MercadoLibre bloquea por IP de DATACENTER y lo hace con un 200: misma URL
+    # y mismos headers devuelven 1.98 MB de listado desde una IP residencial y
+    # 39 KB de /gz/account-verification desde una de datacenter (medido en vivo,
+    # 2026-08-20). Railway sale por datacenter, así que producción reportaba
+    # `0 propiedades` en TODA búsqueda mientras local traía 96.
+    # Formato Apify: http://groups-RESIDENTIAL:<proxy_password>@proxy.apify.com:8000
+    # (la password del proxy NO es el APIFY_API_TOKEN — está en Apify → Proxy).
+    # Vacío = salida directa, que es lo correcto en local: el tráfico residencial
+    # se factura por GB y una página de ML pesa ~2 MB.
+    SCRAPER_PROXY_URL: str = ""
     YCLOUD_API_KEY: str = ""
     ALLOWED_ORIGINS: str = "http://localhost:3000"
 

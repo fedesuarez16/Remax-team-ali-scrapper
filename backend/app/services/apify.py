@@ -29,13 +29,14 @@ _ACTORS: dict[str, str] = {
     'website':    'apify~website-content-crawler',
 }
 
-# ── MercadoLibre public REST API (no Apify) ───────────────────────────────────
-_ML_API_BASE = 'https://api.mercadolibre.com'
-_ML_CATEGORY = 'MLA1459'   # Inmuebles Argentina
-_ML_PAGE_SIZE = 50          # the API maximum per request
-# Paging depth is `settings.MERCADOLIBRE_MAX_PAGES` (0 = no cap): page until the
-# response is empty or `paging.total` is covered. It used to be a hard-coded 5,
-# which silently truncated every busy zona at 250 items.
+# ── MercadoLibre: listing HTML, NOT the REST API ──────────────────────────────
+# `api.mercadolibre.com` answers 403 to everything — `/sites/MLA/search`,
+# `/items/{id}` and even `/sites/MLA` — with a REAL application token
+# (client_credentials → HTTP 200, scope `read`), and the DevCenter offers no
+# catalogue permission to enable. Verified live; the constants for that API are
+# gone rather than left around to look usable. See `_scrape_mercadolibre`.
+# Paging depth is `settings.MERCADOLIBRE_MAX_PAGES` (0 = no cap): page until a
+# page yields nothing new.
 
 # ── RE/MAX public REST API (no Apify) — same undocumented-but-open API its own
 # Angular frontend calls (confirmed via live requests, no auth required) ──────
@@ -1144,14 +1145,59 @@ def _ml_search_urls(
         yield f'{base}/_Desde_{n * _ML_HTML_PAGE_SIZE + 1}'
 
 
+# Dos números unidos por un separador de rango. MercadoLibre usa DOS, y en la
+# MISMA card (relevado en vivo): " a " en ambientes y baños ("3 a 4 baños"),
+# guion en la superficie ("139 - 166 m² cubiertos"). Cazar sólo el primero deja
+# pasar los m², que es justo el dato del que cuelga el precio por m².
+# Exige dígitos a ambos lados, así que "2 ambientes a estrenar" no engancha.
+_ML_RANGE_RE = re.compile(r'\d[^\d]*(?:\sa\s|[-–—])[^\d]*\d')
+
+
 def _ml_card_number(text: str) -> float | None:
     """"55.000" → 55000.0. The dot is a thousands separator on MercadoLibre,
-    never a decimal point, so it is stripped rather than parsed."""
+    never a decimal point, so it is stripped rather than parsed.
+
+    A RANGE reads as no number at all. An emprendimiento publishes the span of
+    its units instead of one value per attribute ("1 a 4 ambs.", "33 m² a 92 m²
+    cubiertos"), and stripping every non-digit glued both ends together: 14
+    ambientes, 3392 m² cubiertos. Invented figures are worse than missing ones
+    here — they reach the properties table and skew any price-per-m² read,
+    whereas a None is already handled by `_matches_filters` without dropping
+    the listing. Relevado en vivo: `/departamentos/venta/palermo` page 1 is
+    48 of 48 emprendimientos, so this is the common path on a venta search,
+    not an edge case.
+    """
+    if _ML_RANGE_RE.search(text):
+        return None
     cleaned = re.sub(r'[^\d,]', '', text.replace('.', '')).replace(',', '.')
     try:
         return float(cleaned) if cleaned else None
     except ValueError:
         return None
+
+
+# El muro anti-bot de MercadoLibre. Marcadores del HTML servido a IPs de
+# datacenter (relevado en vivo): la URL de listado redirige a una pantalla de
+# verificación de cuenta de ~39 KB, contra 1.98 MB del listado real.
+_ML_BLOCK_MARKERS = ('account-verification', 'account_verification')
+
+
+def _ml_page_is_blocked(page: str) -> bool:
+    """True cuando MercadoLibre sirvió el muro en vez del listado.
+
+    Hace falta mirar el CUERPO porque el bloqueo llega como **200 con HTML
+    válido**: no hay excepción que atrapar ni status que revisar. Sin esto, una
+    IP bloqueada y una zona sin avisos son indistinguibles — que es exactamente
+    cómo producción estuvo devolviendo `0 propiedades en mercadolibre` en cada
+    búsqueda sin que nada lo dijera.
+
+    Una página vacía NO es un bloqueo: una zona sin publicaciones es un
+    resultado legítimo y confundirlos rompería la cadena de candidatos de zona.
+    """
+    if not page:
+        return False
+    low = page.lower()
+    return any(m in low for m in _ML_BLOCK_MARKERS)
 
 
 def _parse_mercadolibre_page(page: str, filters: ScrapingFilters) -> list[RawProperty]:
@@ -1246,14 +1292,24 @@ async def _scrape_mercadolibre(
     old code swallowed that into an empty list — so this portal reported
     `0 props` on every single search and read as "nothing matched" rather than
     "this source is broken".
+
+    Egress goes through `settings.SCRAPER_PROXY_URL` when set, because the
+    listing HTML is only open to RESIDENTIAL IPs: the same URL with the same
+    headers returns 1.98 MB of listings from a home connection and 39 KB of
+    account-verification from a datacenter one (measured live). Railway is a
+    datacenter, so without a proxy production gets the wall — as a 200, which
+    is why it read as an empty zona instead of a blocked source.
     """
     from app.core.config import settings
+    import logging
+    log = logging.getLogger(__name__)
     await on_progress('mercadolibre', 'running', 0)
 
     results: list[RawProperty] = []
     seen: set[str] = set()
     async with httpx.AsyncClient(
         timeout=30, follow_redirects=True,
+        proxy=settings.SCRAPER_PROXY_URL or None,
         headers={
             'User-Agent': (
                 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
@@ -1267,8 +1323,27 @@ async def _scrape_mercadolibre(
                 try:
                     resp = await client.get(url)
                     resp.raise_for_status()
-                except Exception:
-                    break  # 404 on an unknown slug → try the next slug
+                except Exception as exc:
+                    # 404 on an unknown slug → try the next slug. Anything else
+                    # has to be SAYABLE: the REST scraper this replaced ate a
+                    # 403 in a bare `except Exception: break` and still reported
+                    # `done, 0`, so a dead portal looked exactly like a zona
+                    # with no listings and stayed broken for weeks.
+                    log.warning(
+                        'mercadolibre: %s falló (%s) — se corta la paginación de este slug',
+                        url, exc,
+                    )
+                    break
+
+                if _ml_page_is_blocked(resp.text):
+                    log.warning(
+                        'mercadolibre: BLOQUEADO en %s — sirvió la pantalla de '
+                        'verificación de cuenta en vez del listado (%d KB). La IP de '
+                        'salida es de datacenter; configurá SCRAPER_PROXY_URL con un '
+                        'proxy RESIDENCIAL. Esto NO es una zona sin avisos.',
+                        url, len(resp.text) // 1024,
+                    )
+                    break
 
                 new = 0
                 for prop in _parse_mercadolibre_page(resp.text, filters):

@@ -6,6 +6,8 @@ answers 403 forbidden without OAuth for every query, and swallowed it in
 indistinguishable from "nothing matched". These tests pin the replacement:
 page through the public listing HTML with the parser, and stop cleanly.
 """
+import logging
+
 import httpx
 import pytest
 
@@ -143,6 +145,49 @@ class TestFailuresAreVisible:
 
         monkeypatch.setattr(httpx, 'AsyncClient', _Boom)
         assert await service.scrape_source('mercadolibre', _filters(), _noop) == []
+
+    async def test_http_failure_is_logged(self, service, fetched, monkeypatch, caplog):
+        """Not raising is only half the job — the failure has to be SAYABLE.
+
+        This is the exact hole that cost us the portal: the REST scraper ate a
+        403 in a bare `except Exception: break` and reported `done, 0`, so a
+        broken source was indistinguishable from a zona with no listings. It
+        stayed broken for weeks because nothing ever said so.
+        """
+        class _Boom:
+            def __init__(self, *a, **kw) -> None: pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, *a, **kw): raise RuntimeError('403 forbidden')
+
+        monkeypatch.setattr(httpx, 'AsyncClient', _Boom)
+        with caplog.at_level(logging.WARNING):
+            await service.scrape_source('mercadolibre', _filters(), _noop)
+
+        assert any(
+            r.levelno >= logging.WARNING and 'mercadolibre' in r.getMessage().lower()
+            for r in caplog.records
+        ), f'la falla no quedó registrada: {[r.getMessage() for r in caplog.records]}'
+
+    async def test_the_offending_url_is_in_the_message(self, service, fetched, monkeypatch):
+        """Un log que no dice QUÉ URL falló no sirve para diagnosticar."""
+        class _Boom:
+            def __init__(self, *a, **kw) -> None: pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url, *a, **kw): raise RuntimeError('403 forbidden')
+
+        monkeypatch.setattr(httpx, 'AsyncClient', _Boom)
+        seen: list[str] = []
+        monkeypatch.setattr(
+            logging.getLogger('app.services.apify'), 'warning',
+            lambda msg, *a, **kw: seen.append(msg % a if a else msg),
+        )
+        await service.scrape_source('mercadolibre', _filters(), _noop)
+
+        assert seen, 'no se emitió ningún warning'
+        assert any('inmuebles.mercadolibre.com.ar' in m for m in seen), seen
+        assert any('403 forbidden' in m for m in seen), seen
 
 
 class TestProgressReporting:

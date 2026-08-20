@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 import pytest
 
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.models.property import ScrapingFilters
 from app.services import apify
 from app.services.apify import (
@@ -36,12 +36,21 @@ async def _noop_progress(_src: str, _status: str, _count: int) -> None:
 # ── shipped defaults ──────────────────────────────────────────────────────────
 
 def test_shipped_defaults_impose_no_page_ceiling() -> None:
-    assert settings.REMAX_MAX_PAGES == 0
-    assert settings.MERCADOLIBRE_MAX_PAGES == 0
-    assert settings.INMOBUSQUEDA_MAX_PAGES == 0
-    assert settings.MUDAFY_MAX_PAGES == 0
-    assert settings.ARGENPROP_MAX_PAGES == 0
-    assert settings.ZONAPROP_MAX_RESULTS == 0
+    """Lo que SE ENVÍA, no lo que esta máquina tiene configurado.
+
+    Se leen los defaults declarados en la clase y no `settings.X`, porque
+    `settings` ya viene resuelto contra el `.env` y el entorno: capear un portal
+    en local o en Railway (p. ej. `MERCADOLIBRE_MAX_PAGES=5` para acotar el
+    ancho de banda del proxy residencial) es una decisión de despliegue
+    legítima, y ponía en rojo un test que habla del contrato del código.
+    """
+    defaults = {n: f.default for n, f in Settings.model_fields.items()}
+    assert defaults['REMAX_MAX_PAGES'] == 0
+    assert defaults['MERCADOLIBRE_MAX_PAGES'] == 0
+    assert defaults['INMOBUSQUEDA_MAX_PAGES'] == 0
+    assert defaults['MUDAFY_MAX_PAGES'] == 0
+    assert defaults['ARGENPROP_MAX_PAGES'] == 0
+    assert defaults['ZONAPROP_MAX_RESULTS'] == 0
 
 
 def test_remax_page_size_uses_the_api_maximum() -> None:

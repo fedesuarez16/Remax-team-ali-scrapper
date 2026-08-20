@@ -112,6 +112,79 @@ class TestPreciosEnPesosYSinPrecio:
         assert _parse_mercadolibre_page(html, _filters()) == []
 
 
+class TestEmprendimientosPublicanRangos:
+    """Un emprendimiento (edificio en pozo) no publica un valor por atributo
+    sino el RANGO de sus unidades: "1 a 4 ambs.", "33 - 92 m² cubiertos".
+
+    Relevado en vivo: la primera página de `/departamentos/venta/palermo` son
+    48 de 48 emprendimientos, así que esto no es un caso de borde — es lo que
+    devuelve una búsqueda de venta entera. `_ml_card_number` borraba todo lo
+    que no fuese dígito y concatenaba las dos puntas del rango, publicando
+    `banos=34` y `m2_cubiertos=139166.0`. Números inventados, no medidos, que
+    envenenan cualquier análisis de precio por m².
+
+    MercadoLibre usa DOS separadores de rango, relevados en vivo en la MISMA
+    card: `" a "` para ambientes y baños ("3 a 4 baños") pero un GUION para la
+    superficie ("139 - 166 m² cubiertos"). Una guarda que sólo mire " a " deja
+    pasar los m², que es justo el dato que rompe el precio por m².
+
+    Un rango se reporta como AUSENTE. La ficha se conserva igual: título,
+    precio, dirección y URL son datos reales del aviso, y `_matches_filters`
+    ya trata el dato faltante sin excluir la propiedad.
+    """
+
+    @pytest.fixture
+    def prop(self):
+        html = _page(_card(
+            titulo='Edificio En Palermo',
+            attrs=('1 a 4 ambs.', '1 a 2 baños', '33 - 92 m² cubiertos'),
+            monto='133.705',
+            location='Avenida Dorrego 1516, Palermo, Capital Federal',
+        ))
+        props = _parse_mercadolibre_page(html, _filters(zona='Palermo'))
+        assert len(props) == 1
+        return props[0]
+
+    def test_ambientes_en_rango_no_se_concatenan(self, prop):
+        """"1 a 4 ambs." valía 14 ambientes."""
+        assert prop.ambientes is None
+
+    def test_banos_en_rango_no_se_concatenan(self, prop):
+        """"1 a 2 baños" valía 12 baños."""
+        assert prop.banos is None
+
+    def test_m2_en_rango_con_guion_no_se_concatenan(self, prop):
+        """"33 - 92 m² cubiertos" valía 3392 m² cubiertos."""
+        assert prop.m2_cubiertos is None
+
+    def test_m2_totales_en_rango_con_guion(self):
+        """El mismo guion aparece en la superficie total."""
+        html = _page(_card(attrs=('2 ambs.', '1 baño', '139 - 166 m²')))
+        assert _parse_mercadolibre_page(html, _filters())[0].m2_total is None
+
+    def test_el_guion_tambien_se_corta_sin_espacios(self):
+        """Defensivo: el markup no siempre espacia el guion."""
+        html = _page(_card(attrs=('33-92 m² cubiertos',)))
+        assert _parse_mercadolibre_page(html, _filters())[0].m2_cubiertos is None
+
+    def test_el_aviso_se_conserva_con_sus_datos_reales(self, prop):
+        assert prop.precio == 133705.0
+        assert prop.direccion.startswith('Avenida Dorrego 1516')
+        assert 'MLA-' in (prop.url_origen or '')
+
+    def test_el_valor_unico_sigue_leyendose(self):
+        """La guarda no puede comerse el caso sano: alquiler publica unidades
+        individuales con un valor por atributo."""
+        html = _page(_card(attrs=('2 ambs.', '1 baño', '48 m² cubiertos')))
+        prop = _parse_mercadolibre_page(html, _filters())[0]
+        assert (prop.ambientes, prop.banos, prop.m2_cubiertos) == (2, 1, 48.0)
+
+    def test_el_precio_no_se_toca(self):
+        """El monto nunca es un rango — "826.800" son separadores de miles."""
+        html = _page(_card(monto='826.800'))
+        assert _parse_mercadolibre_page(html, _filters())[0].precio == 826800.0
+
+
 class TestOperacionYTipo:
     def test_alquiler_se_detecta_del_headline(self):
         html = _page(_card(headline='Departamento en alquiler'))
