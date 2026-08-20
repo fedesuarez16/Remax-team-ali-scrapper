@@ -1091,124 +1091,203 @@ async def _scrape_mudafy(
     return results
 
 
-def _norm_mercadolibre_api(item: dict[str, Any], zona: str) -> RawProperty | None:
-    precio = item.get('price')
-    if not precio:
+# ── MercadoLibre via public listing HTML ──────────────────────────────────────
+# `api.mercadolibre.com/sites/MLA/search` now answers 403 forbidden without
+# OAuth (verified live, every query). The public listing pages are still open,
+# so we parse those — same route argenprop/inmobusqueda/mudafy already take.
+_ML_HTML_BASE = 'https://inmuebles.mercadolibre.com.ar'
+_ML_HTML_PAGE_SIZE = 48          # cards per listing page, counted live
+_ML_HTML_URL_TIPO: dict[str, str] = {
+    'departamento': 'departamentos', 'casa': 'casas', 'ph': 'ph',
+    'oficina': 'oficinas', 'terreno': 'terrenos-y-lotes', 'local': 'locales',
+}
+
+
+def _ml_zona_slugs(filters: ScrapingFilters) -> list[str]:
+    """Zona → the slugs to try, most specific first.
+
+    A composite slug is usually unknown to MercadoLibre: `gonnet-la-plata`
+    404s while the bare `gonnet` serves the real Gonnet listings (verified
+    live). Without the bare fallback the whole slug fails and the zona
+    candidate chain degrades to the localidad, answering a Gonnet search with
+    the centre of La Plata. Same idea as ZonaProp's composite retry.
+
+    Precision does not suffer: the caller keeps guarding on the ORIGINAL
+    composite zona, so `gonnet` results still have to name La Plata too and a
+    homonym in another province stays out.
+    """
+    zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
+    slugs = [_slugify(zona)]
+    head = _slugify(zona.split(',')[0])
+    if head and head not in slugs:
+        slugs.append(head)
+    return [x for x in slugs if x]
+
+
+def _ml_search_urls(
+    filters: ScrapingFilters, max_pages: int, zona_slug: str | None = None,
+) -> Iterator[str]:
+    """Listing URLs, page 1..N — lazily, so `max_pages=0` means "no cap" and the
+    caller stops on the first page that yields nothing new. Later pages take the
+    site's own `/_Desde_<offset>` suffix (49, 97, ... — read off its pagination
+    links), which keeps the crawl on plain paths with no query string."""
+    if zona_slug is None:
+        zona_slug = _ml_zona_slugs(filters)[0]
+    op = 'alquiler' if filters.tipo_operacion == 'alquiler' else 'venta'
+    tipos = filters.tipos_propiedad or []
+    tipo = _ML_HTML_URL_TIPO.get(tipos[0], 'inmuebles') if len(tipos) == 1 else 'inmuebles'
+    base = f'{_ML_HTML_BASE}/{tipo}/{op}/{zona_slug}'
+    yield base
+    for n in count(1):
+        if max_pages > 0 and n >= max_pages:
+            return
+        yield f'{base}/_Desde_{n * _ML_HTML_PAGE_SIZE + 1}'
+
+
+def _ml_card_number(text: str) -> float | None:
+    """"55.000" → 55000.0. The dot is a thousands separator on MercadoLibre,
+    never a decimal point, so it is stripped rather than parsed."""
+    cleaned = re.sub(r'[^\d,]', '', text.replace('.', '')).replace(',', '.')
+    try:
+        return float(cleaned) if cleaned else None
+    except ValueError:
         return None
 
-    addr = item.get('address') or {}
-    parts = [p for p in [addr.get('street_name'), addr.get('city_name')] if p]
-    direccion = ', '.join(parts) if parts else zona
 
-    attrs: dict[str, str] = {
-        a['id']: (a.get('value_name') or '')
-        for a in (item.get('attributes') or [])
-    }
+def _parse_mercadolibre_page(page: str, filters: ScrapingFilters) -> list[RawProperty]:
+    """Every `li.ui-search-layout__item` on a listing page → RawProperty.
 
-    def parse_area(s: str) -> float | None:
-        m = re.search(r'[\d.]+', s.replace(',', '.'))
-        return float(m.group()) if m else None
+    Zona-guarded: an unknown slug does not 404 here, it quietly serves a wider
+    set — `manuel-b-gonnet` returns a SANTA FE listing among the Buenos Aires
+    ones (verified live) — so the searched zona is enforced over whatever the
+    page returned, same as every other portal.
+    """
+    from bs4 import BeautifulSoup
 
-    def parse_int(s: str) -> int | None:
-        return int(s) if isinstance(s, str) and s.isdigit() else (int(s) if isinstance(s, int) else None)
+    phrase_parts = [
+        parts for parts in
+        ([_slugify(p) for p in z.split(',') if _slugify(p)] for z in _guard_phrases(filters))
+        if parts
+    ]
+    soup = BeautifulSoup(page, 'html.parser')
+    results: list[RawProperty] = []
+    for card in soup.select('li.ui-search-layout__item'):
+        location_el = card.select_one('.poly-component__location')
+        direccion = location_el.get_text(' ', strip=True) if location_el else ''
+        if not direccion:
+            continue
+        # Guard on the LOCATION only, never the whole card. MercadoLibre repeats
+        # the city in the title ("Departamento En Venta, 2 Dormitorios, Centro,
+        # La Plata"), so a full-text haystack would let a Rosario listing
+        # through on the strength of a La Plata title.
+        if phrase_parts:
+            haystack = _slugify(direccion)
+            if not any(all(part in haystack for part in parts) for parts in phrase_parts):
+                continue
 
-    rooms_str = attrs.get('ROOMS', '')
-    ambientes = int(rooms_str) if rooms_str.isdigit() else None
+        fraction = card.select_one('.andes-money-amount__fraction')
+        precio = _ml_card_number(fraction.get_text(strip=True)) if fraction else None
+        if not precio:
+            continue
+        symbol_el = card.select_one('.andes-money-amount__currency-symbol')
+        symbol = symbol_el.get_text(strip=True) if symbol_el else 'US$'
 
-    op_val = attrs.get('OPERATION_TYPE', '').lower()
-    tipo_operacion = 'alquiler' if 'alquiler' in op_val else 'venta'
+        title_el = card.select_one('a.poly-component__title')
+        headline_el = card.select_one('.poly-component__headline')
+        headline = headline_el.get_text(' ', strip=True).lower() if headline_el else ''
 
-    prop_type_raw = attrs.get('PROPERTY_TYPE', '').lower()
-    tipo_propiedad = _ML_PROP_TYPE.get(prop_type_raw)
-    if not tipo_propiedad:
-        title = item.get('title', '').lower()
-        if 'casa' in title:
-            tipo_propiedad = 'casa'
-        elif ' ph ' in title or title.startswith('ph ') or title.endswith(' ph'):
-            tipo_propiedad = 'ph'
-        elif 'local' in title:
-            tipo_propiedad = 'local'
-        elif 'oficina' in title:
-            tipo_propiedad = 'oficina'
-        elif 'terreno' in title or 'lote' in title:
-            tipo_propiedad = 'terreno'
-        else:
-            tipo_propiedad = 'departamento'
+        ambientes = banos = None
+        m2_total = m2_cubiertos = None
+        for item in card.select('.poly-attributes_list__item'):
+            text = item.get_text(' ', strip=True).lower()
+            value = _ml_card_number(text)
+            if value is None:
+                continue
+            if 'amb' in text:
+                ambientes = int(value)
+            elif 'baño' in text or 'bano' in text:
+                banos = int(value)
+            elif 'cubierto' in text:
+                m2_cubiertos = value
+            elif 'm²' in text or 'm2' in text:
+                m2_total = value
 
-    thumbnail = item.get('thumbnail', '')
-    imagenes = [thumbnail.replace('-I.jpg', '-O.jpg')] if thumbnail else []
+        img = card.select_one('img')
+        imagen = str((img.get('data-src') or img.get('src') or '')) if img else ''
 
-    return RawProperty(
-        fuente='mercadolibre',
-        titulo=item.get('title', ''),
-        direccion=direccion,
-        precio=float(precio),
-        moneda=item.get('currency_id', 'USD'),
-        tipo_operacion=tipo_operacion,
-        tipo_propiedad=tipo_propiedad,
-        ambientes=ambientes,
-        banos=parse_int(attrs.get('FULL_BATHROOMS', '')),
-        cocheras=parse_int(attrs.get('PARKING_LOTS', '')),
-        m2_total=parse_area(attrs.get('TOTAL_AREA', '')),
-        m2_cubiertos=parse_area(attrs.get('COVERED_AREA', '')),
-        antiguedad=None,
-        amenities=[],
-        imagenes=imagenes,
-        url_origen=item.get('permalink', ''),
-    )
+        tipo = next((t for t in ('casa', 'ph', 'local', 'oficina', 'terreno')
+                     if t in headline), 'departamento')
+
+        results.append(RawProperty(
+            fuente='mercadolibre',
+            titulo=title_el.get_text(' ', strip=True) if title_el else None,
+            direccion=direccion,
+            precio=precio,
+            moneda='ARS' if symbol.strip() == '$' else 'USD',
+            tipo_operacion='alquiler' if 'alquiler' in headline else 'venta',
+            tipo_propiedad=tipo,  # type: ignore[arg-type]
+            ambientes=ambientes,
+            banos=banos,
+            m2_total=m2_total,
+            m2_cubiertos=m2_cubiertos,
+            imagenes=[imagen] if imagen.startswith('http') else [],
+            url_origen=str(title_el.get('href')) if title_el and title_el.get('href') else None,
+        ))
+    return results
 
 
-async def _scrape_mercadolibre_api(
-    filters: ScrapingFilters,
-    on_progress: ProgressCb,
+async def _scrape_mercadolibre(
+    filters: ScrapingFilters, on_progress: ProgressCb,
 ) -> list[RawProperty]:
-    zona = filters.zona or 'Buenos Aires'
-    op = filters.tipo_operacion or 'venta'
-    tipos = filters.tipos_propiedad or []
+    """Page MercadoLibre's public listing HTML.
 
-    q_parts = [zona, op]
-    if tipos:
-        q_parts.append(tipos[0])
-    q = ' '.join(q_parts)
-
+    Replaces `_scrape_mercadolibre_api`: `api.mercadolibre.com/sites/MLA/search`
+    answers 403 forbidden without OAuth for EVERY query (verified live), and the
+    old code swallowed that into an empty list — so this portal reported
+    `0 props` on every single search and read as "nothing matched" rather than
+    "this source is broken".
+    """
+    from app.core.config import settings
     await on_progress('mercadolibre', 'running', 0)
 
-    from app.core.config import settings
-    max_pages = settings.MERCADOLIBRE_MAX_PAGES   # 0 = uncapped
-
     results: list[RawProperty] = []
-    async with httpx.AsyncClient(timeout=20) as client:
-        page = 0
-        while max_pages <= 0 or page < max_pages:
-            offset = page * _ML_PAGE_SIZE
-            try:
-                resp = await client.get(
-                    f'{_ML_API_BASE}/sites/MLA/search',
-                    params={
-                        'category': _ML_CATEGORY, 'q': q,
-                        'limit': _ML_PAGE_SIZE, 'offset': offset,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            except Exception:
-                break
+    seen: set[str] = set()
+    async with httpx.AsyncClient(
+        timeout=30, follow_redirects=True,
+        headers={
+            'User-Agent': (
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            ),
+            'Accept-Language': 'es-AR,es;q=0.9',
+        },
+    ) as client:
+        for zona_slug in _ml_zona_slugs(filters):
+            for url in _ml_search_urls(filters, settings.MERCADOLIBRE_MAX_PAGES, zona_slug):
+                try:
+                    resp = await client.get(url)
+                    resp.raise_for_status()
+                except Exception:
+                    break  # 404 on an unknown slug → try the next slug
 
-            items = data.get('results', [])
-            if not items:
-                break
-
-            for item in items:
-                prop = _norm_mercadolibre_api(item, zona)
-                if prop is not None:
+                new = 0
+                for prop in _parse_mercadolibre_page(resp.text, filters):
+                    key = str(prop.url_origen or '')
+                    if key and key in seen:
+                        continue
+                    if key:
+                        seen.add(key)
                     results.append(prop)
+                    new += 1
 
-            paging = data.get('paging', {})
-            if offset + _ML_PAGE_SIZE >= paging.get('total', 0):
-                break
-
-            page += 1
-            await on_progress('mercadolibre', 'running', len(results))
+                # Nothing new means the listing is exhausted, the page fell
+                # outside the zona, or an out-of-range `_Desde_` offset
+                # re-served page 1 — all three are reasons to stop paging.
+                if new == 0:
+                    break
+                await on_progress('mercadolibre', 'running', len(results))
+            if results:
+                break  # this slug answered; no need for the broader one
 
     await on_progress('mercadolibre', 'done', len(results))
     return results
@@ -2168,7 +2247,7 @@ class ApifyService(BaseApifyService):
         on_progress: ProgressCb,
     ) -> list[RawProperty]:
         if source == 'mercadolibre':
-            return await _scrape_mercadolibre_api(filters, on_progress)
+            return await _scrape_mercadolibre(filters, on_progress)
         if source == 'remax':
             return await _scrape_remax_api(filters, on_progress)
         if source == 'argenprop':

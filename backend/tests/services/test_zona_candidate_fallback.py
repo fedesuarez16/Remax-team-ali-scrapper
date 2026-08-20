@@ -106,7 +106,7 @@ class TestAppliesToEveryPortal:
     @pytest.mark.parametrize('source,fn', [
         ('remax', '_scrape_remax_api'),
         ('inmobusqueda', '_scrape_inmobusqueda'),
-        ('mercadolibre', '_scrape_mercadolibre_api'),
+        ('mercadolibre', '_scrape_mercadolibre'),
     ])
     async def test_direct_http_portals_degrade(
         self, service, calls, monkeypatch, source, fn,

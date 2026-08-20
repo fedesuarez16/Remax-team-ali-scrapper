@@ -25,7 +25,6 @@ from app.services.apify import (
     _argenprop_search_urls,
     _inmobusqueda_search_urls,
     _mudafy_search_urls,
-    _scrape_mercadolibre_api,
     _scrape_remax_api,
 )
 
@@ -87,70 +86,6 @@ def test_mudafy_zero_yields_pages_lazily_without_end() -> None:
 def test_explicit_page_caps_still_truncate() -> None:
     assert len(list(_inmobusqueda_search_urls(_zona_filters(), 3, 'villa-elisa'))) == 3
     assert len(list(_mudafy_search_urls(_zona_filters(), 3))) == 3
-
-
-# ── MercadoLibre: cap comes from settings, 0 pages to `paging.total` ─────────
-
-@pytest.fixture()
-def _mock_ml_api(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    captured: dict[str, Any] = {'offsets': []}
-    total = 50 * 12
-
-    def _item(i: int) -> dict[str, Any]:
-        return {
-            'id': f'MLA{i}', 'price': 100_000 + i, 'currency_id': 'USD',
-            'title': f'Depto {i}', 'permalink': f'https://x/{i}',
-            'address': {'street_name': f'Calle {i}', 'city_name': 'Palermo'},
-            'attributes': [], 'pictures': [],
-        }
-
-    class _FakeResponse:
-        def __init__(self, payload: dict[str, Any]) -> None:
-            self._payload = payload
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict[str, Any]:
-            return self._payload
-
-    class _FakeAsyncClient:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
-
-        async def __aenter__(self) -> '_FakeAsyncClient':
-            return self
-
-        async def __aexit__(self, *args: Any) -> None:
-            return None
-
-        async def get(self, url: str, params: dict[str, Any] | None = None, **kw: Any):
-            params = params or {}
-            offset = int(params.get('offset', 0))
-            captured['offsets'].append(offset)
-            items = [_item(offset + i) for i in range(50)] if offset < total else []
-            return _FakeResponse({'results': items, 'paging': {'total': total}})
-
-    monkeypatch.setattr(httpx, 'AsyncClient', _FakeAsyncClient)
-    return captured
-
-
-async def test_mercadolibre_zero_pages_until_total_is_reached(
-    _mock_ml_api: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(settings, 'MERCADOLIBRE_MAX_PAGES', 0)
-    results = await _scrape_mercadolibre_api(_zona_filters(), _noop_progress)
-    assert _mock_ml_api['offsets'] == [i * 50 for i in range(12)]
-    assert len(results) == 600
-
-
-async def test_mercadolibre_cap_comes_from_settings(
-    _mock_ml_api: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(settings, 'MERCADOLIBRE_MAX_PAGES', 3)
-    results = await _scrape_mercadolibre_api(_zona_filters(), _noop_progress)
-    assert len(_mock_ml_api['offsets']) == 3
-    assert len(results) == 150
 
 
 # ── RE/MAX: uncapped when the zona resolved; bounded sweep when it did not ───
