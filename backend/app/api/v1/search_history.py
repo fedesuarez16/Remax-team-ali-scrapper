@@ -182,6 +182,33 @@ async def list_search_history_folders(request: Request) -> dict[str, Any]:
         return {'folders': [], 'total': 0, 'error': str(e)}
 
 
+@router.delete('/folders/{folder_id}')
+async def delete_search_history_folder(request: Request, folder_id: str) -> dict[str, Any]:
+    """Borrar una carpeta. Sus búsquedas NO se borran: quedan sin carpeta.
+
+    La FK `search_history.folder_id` es `on delete set null` (ver
+    20260727000000_search_history_folders_and_labels.sql), así que Postgres
+    suelta las entradas en la misma transacción del delete. Por eso acá NO
+    tocamos `search_history`: hacerlo a mano duplicaría la garantía y abriría
+    el caso feo de dejar entradas desasignadas si el delete de la carpeta
+    fallara después.
+
+    Declarado ANTES de `/{entry_id}` (ADR-3) para que el segmento estático
+    `folders` no pueda quedar tapado por una ruta con path-param.
+
+    Idempotente: borrar un id inexistente no es un error.
+    """
+    sb = request.app.state.supabase
+    if sb is None:
+        return {'deleted': False, 'error': 'Supabase no configurado'}
+
+    try:
+        await sb.table('search_history_folders').delete().eq('id', folder_id).execute()
+        return {'deleted': True}
+    except Exception as e:
+        return {'deleted': False, 'error': str(e)}
+
+
 @router.patch('/{entry_id}')
 async def update_search_history_entry(request: Request, entry_id: str, body: dict) -> dict[str, Any]:
     """Update `label` and/or `folder_id` on a single entry.

@@ -177,6 +177,23 @@ export async function createFolder(name: string): Promise<Folder | null> {
   }
 }
 
+/**
+ * Borrar una carpeta. Las búsquedas que tenía adentro NO se pierden: el FK es
+ * `on delete set null`, así que vuelven a "Sin carpeta". Por eso refrescamos
+ * también el historial — si sólo recargáramos las carpetas, esas entradas
+ * quedarían invisibles hasta el próximo reload.
+ */
+export async function deleteFolder(id: string): Promise<void> {
+  try {
+    const res = await fetch(`${FOLDERS_URL}/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (!res.ok) return
+    await Promise.all([fetchFolders(), fetchHistory()])
+    notify()
+  } catch {
+    // Swallow — keep last known state, never throw into the UI.
+  }
+}
+
 import { useEffect, useState } from 'react'
 
 export function useSearchHistory() {
@@ -213,5 +230,5 @@ export function useSearchHistory() {
     }
   }, [])
 
-  return { searches, folders, addSearch, updateEntry, deleteEntry, createFolder, loading }
+  return { searches, folders, addSearch, updateEntry, deleteEntry, createFolder, deleteFolder, loading }
 }

@@ -18,6 +18,7 @@ from app.services.cleaner import (
     DEFAULT_LIMIT,
     check_links,
     cleanup_state,
+    delete_dead_links,
     read_schedule,
     save_schedule,
 )
@@ -81,6 +82,28 @@ async def check_links_endpoint(body: dict) -> dict[str, Any]:
         return await check_links(_parse_urls(body.get('urls')))
     except ValueError as e:
         return {'activos': [], 'rotos': [], 'sin_definir': [], 'total': 0, 'error': str(e)}
+
+
+@router.post('/delete-links')
+async def delete_links_endpoint(request: Request, body: dict) -> dict[str, Any]:
+    """Borra de la base las propiedades detrás de los links rotos.
+
+    Body: ``{"urls": [...]}`` o el bloque de texto pegado tal cual — la misma
+    forma que ``/check-links``, para que el front pueda mandar de vuelta lo que
+    esa verificación clasificó como roto.
+
+    Cada aviso se VUELVE A VERIFICAR acá adentro y sólo un veredicto ``dead``
+    borra: la lista que manda el front es una intención, no una orden. Devuelve
+    ``eliminadas``, ``conservadas`` (no dieron muertas al revisar) y
+    ``no_encontradas`` (no están en la base).
+    """
+    sb = request.app.state.supabase
+    try:
+        return await delete_dead_links(sb, _parse_urls(body.get('urls')))
+    except ValueError as e:
+        return {
+            'eliminadas': [], 'conservadas': [], 'no_encontradas': [], 'total': 0, 'error': str(e),
+        }
 
 
 @router.get('/status')

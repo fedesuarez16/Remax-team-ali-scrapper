@@ -2,13 +2,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   Check, ChevronDown, ChevronUp, Copy, ExternalLink, FileText, Link2, Loader2,
-  Pencil, Send, Sparkles, UserRound,
+  Pencil, RotateCcw, Send, Sparkles, UserRound,
 } from 'lucide-react'
 import type { Property } from '@/hooks/useSSEStream'
-import { AGENTES, agenteByEmail, enrichFicha, fichaUrl } from '@/lib/ficha'
+import { AGENTES, agenteByEmail, enrichFicha, fichaUrl, marcarEnviadas } from '@/lib/ficha'
 import { PropertyFicha, fmtPrice } from '@/components/ficha/PropertyFicha'
 import { FichaEditor } from '@/components/ficha/FichaEditor'
 import { AgenteSelector } from '@/components/ficha/AgenteSelector'
+import { SelectionBar } from '@/components/properties/SelectionBar'
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
@@ -17,6 +18,53 @@ type ImportResult =
   | { url: string; status: 'error'; error: string }
 
 type Stats = { total_fichas: number; gasto_usd: number; llamadas: number }
+
+/** Las fichas se agrupan por el ÚNICO estado que el sistema ya conoce de
+ *  verdad: `enviada_at`, el sello que deja "Enviar". No hay un campo inventado
+ *  a mano que pueda quedar desfasado — una ficha o se mandó o no se mandó. */
+type Estado = 'pendientes' | 'enviadas' | 'todas'
+
+const esEnviada = (p: Property) => !!p.enviada_at
+
+const FILTROS: { id: Estado; label: string }[] = [
+  { id: 'pendientes', label: 'Faltan enviar' },
+  { id: 'enviadas', label: 'Enviadas' },
+  { id: 'todas', label: 'Todas' },
+]
+
+function FiltroEstado({
+  value,
+  onChange,
+  counts,
+}: {
+  value: Estado
+  onChange: (e: Estado) => void
+  counts: Record<Estado, number>
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {FILTROS.map((f) => {
+        const active = value === f.id
+        return (
+          <button
+            key={f.id}
+            onClick={() => onChange(f.id)}
+            className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition ${
+              active
+                ? 'border-foreground bg-foreground text-background'
+                : 'border-border bg-background text-muted-foreground hover:bg-muted'
+            }`}
+          >
+            {f.label}
+            <span className={`font-mono tabular-nums ${active ? 'opacity-70' : 'opacity-60'}`}>
+              {counts[f.id]}
+            </span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
 
 /** Contadores automáticos: ambos números los deriva el backend (fichas =
  *  propiedades `fuente='manual'`, gasto = suma real de tokens facturados), así
@@ -54,11 +102,17 @@ function StatsBar({ stats, loading }: { stats: Stats | null; loading: boolean })
 function FichaRow({
   p,
   defaultOpen,
+  selected,
+  onSelect,
   onSaved,
+  onEnviada,
 }: {
   p: Property
   defaultOpen: boolean
+  selected: boolean
+  onSelect: (checked: boolean) => void
   onSaved: (updated: Property) => void
+  onEnviada: (id: string, enviada: boolean) => void
 }) {
   const url = fichaUrl(p.id)
   const [open, setOpen] = useState(defaultOpen)
@@ -78,14 +132,36 @@ function FichaRow({
   // Firma del mensaje = el agente asignado a ESTA ficha, no el titular global.
   const agente = agenteByEmail(p.agente_email)
 
+  const enviada = esEnviada(p)
+
+  // El `window.open` va PRIMERO y sin await: si esperamos la marca antes de
+  // abrir, el navegador ya no lo cuenta como gesto del usuario y bloquea el
+  // popup. La marca es informativa — si falla, el envío igual salió.
   const enviarWhatsApp = () => {
     const texto = `Hola! Te comparto esta propiedad:\n\n• ${p.titulo ?? p.direccion} — ${fmtPrice(p)}\n  ${url}\n\n${agente.nombre} · ${agente.inmobiliaria}\n${agente.telefono}`
     window.open(`https://wa.me/?text=${encodeURIComponent(texto)}`, '_blank', 'noopener')
+    if (p.id) void marcarEnviadas([p.id]).then((ok) => ok.length > 0 && onEnviada(p.id!, true))
+  }
+
+  // Mismo criterio que al marcar: la fila sólo cambia de solapa si el backend
+  // confirmó. Si el server no contestó, la ficha sigue figurando como enviada
+  // — mentirle al usuario sobre lo que ya mandó es peor que no mover nada.
+  const desmarcar = () => {
+    if (!p.id) return
+    void marcarEnviadas([p.id], false).then((ok) => ok.length > 0 && onEnviada(p.id!, false))
   }
 
   return (
     <div className="rounded-2xl border border-border bg-card shadow-sm">
       <div className="flex items-center gap-3 px-4 py-3">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={(e) => onSelect(e.target.checked)}
+          disabled={!p.id}
+          title={p.id ? 'Seleccionar para eliminar' : 'Esta ficha todavía no está guardada'}
+          className="size-4 shrink-0 accent-foreground disabled:opacity-30"
+        />
         <FileText className="size-4 shrink-0 text-muted-foreground" />
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium text-foreground">
@@ -100,13 +176,31 @@ function FichaRow({
           <UserRound className="size-3" />
           {agente.nombre}
         </span>
+        {enviada && (
+          <span
+            title={`Enviada el ${new Date(p.enviada_at!).toLocaleString('es-AR')}`}
+            className="hidden shrink-0 items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-600 sm:flex dark:text-emerald-400"
+          >
+            <Check className="size-3" />
+            Enviada
+          </span>
+        )}
         <button
           onClick={enviarWhatsApp}
           className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground transition hover:bg-muted"
         >
           <Send className="size-3.5" />
-          Enviar
+          {enviada ? 'Reenviar' : 'Enviar'}
         </button>
+        {enviada && (
+          <button
+            onClick={desmarcar}
+            title="Volver a «Faltan enviar»"
+            className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-background px-2 py-1 text-xs font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground"
+          >
+            <RotateCcw className="size-3.5" />
+          </button>
+        )}
         <button
           onClick={() => {
             setEditing(true)
@@ -200,6 +294,8 @@ export default function FichaPropioPage() {
   const [errors, setErrors] = useState<{ url: string; error: string }[]>([])
   const [stats, setStats] = useState<Stats | null>(null)
   const [statsLoading, setStatsLoading] = useState(true)
+  const [estado, setEstado] = useState<Estado>('todas')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
 
   // Se llama al montar y después de cada generación: así los contadores se
   // actualizan solos, sin que el usuario tenga que refrescar.
@@ -231,6 +327,33 @@ export default function FichaPropioPage() {
     load()
     refreshStats()
   }, [refreshStats])
+
+  const counts: Record<Estado, number> = {
+    pendientes: items.filter((p) => !esEnviada(p)).length,
+    enviadas: items.filter(esEnviada).length,
+    todas: items.length,
+  }
+  const visibles =
+    estado === 'todas' ? items : items.filter((p) => (estado === 'enviadas' ? esEnviada(p) : !esEnviada(p)))
+
+  // Sólo se puede borrar lo que está guardado Y a la vista: si el usuario
+  // cambia de solapa, lo que dejó marcado en la otra no se lleva puesto.
+  const selectedIds = visibles.map((p) => p.id).filter((id): id is string => !!id && selected.has(id))
+
+  const toggleSelect = (id: string, checked: boolean) =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+
+  const marcarLocal = (id: string, enviada: boolean) =>
+    setItems((prev) =>
+      prev.map((it) =>
+        it.id === id ? { ...it, enviada_at: enviada ? new Date().toISOString() : null } : it,
+      ),
+    )
 
   const urls = Array.from(
     new Set(
@@ -329,11 +452,16 @@ export default function FichaPropioPage() {
 
         {/* Fichas generadas */}
         <div>
-          <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            {loading
-              ? 'Cargando...'
-              : `${items.length} ficha${items.length === 1 ? '' : 's'} propia${items.length === 1 ? '' : 's'}`}
-          </p>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              {loading
+                ? 'Cargando...'
+                : `${visibles.length} ficha${visibles.length === 1 ? '' : 's'} propia${visibles.length === 1 ? '' : 's'}`}
+            </p>
+            {!loading && items.length > 0 && (
+              <FiltroEstado value={estado} onChange={setEstado} counts={counts} />
+            )}
+          </div>
 
           {!loading && items.length === 0 ? (
             <div className="flex flex-col items-center gap-2 rounded-2xl border border-dashed border-border py-10 text-center">
@@ -342,22 +470,53 @@ export default function FichaPropioPage() {
                 Todavía no generaste ninguna ficha. Pegá un link arriba para empezar.
               </p>
             </div>
+          ) : !loading && visibles.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 rounded-2xl border border-dashed border-border py-10 text-center">
+              <FileText className="size-8 text-muted-foreground/40" />
+              <p className="text-sm text-muted-foreground">
+                {estado === 'enviadas'
+                  ? 'Todavía no enviaste ninguna ficha.'
+                  : 'No queda ninguna ficha pendiente de enviar.'}
+              </p>
+            </div>
           ) : (
             <div className="space-y-3">
-              {items.map((p, i) => (
+              {visibles.map((p, i) => (
                 <FichaRow
                   key={p.id ?? i}
                   p={p}
                   defaultOpen={!!p.id && newIds.has(p.id)}
+                  selected={!!p.id && selected.has(p.id)}
+                  onSelect={(checked) => p.id && toggleSelect(p.id, checked)}
                   onSaved={(updated) =>
                     setItems((prev) => prev.map((it) => (it.id === updated.id ? updated : it)))
                   }
+                  onEnviada={marcarLocal}
                 />
               ))}
             </div>
           )}
         </div>
       </div>
+
+      {selectedIds.length > 0 && (
+        <div className="sticky bottom-0 z-10">
+          <SelectionBar
+            count={selectedIds.length}
+            ids={selectedIds}
+            onClear={() => setSelected(new Set())}
+            onDeleted={(ids) => {
+              const gone = new Set(ids)
+              setItems((prev) => prev.filter((it) => !it.id || !gone.has(it.id)))
+              setSelected(new Set())
+              // El contador de "Fichas Propio generadas" lo deriva el backend
+              // de las propiedades `fuente='manual'`: si borramos, hay que
+              // volver a pedirlo o queda mostrando fichas que ya no existen.
+              refreshStats()
+            }}
+          />
+        </div>
+      )}
     </div>
   )
 }

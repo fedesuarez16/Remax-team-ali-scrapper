@@ -14,13 +14,14 @@ const CostChip = ({ entry }: { entry: SearchEntry }) => (
 )
 
 export default function HistorialPage() {
-  const { searches, folders, updateEntry, deleteEntry, createFolder, loading } = useSearchHistory()
+  const { searches, folders, updateEntry, deleteEntry, createFolder, deleteFolder, loading } = useSearchHistory()
   const router = useRouter()
   const [openFolderId, setOpenFolderId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
+  const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null)
 
   const ungrouped = searches.filter((s) => !s.folder_id)
   const entriesFor = (folderId: string) => searches.filter((s) => s.folder_id === folderId)
@@ -32,6 +33,14 @@ export default function HistorialPage() {
     setNewFolderName('')
     setCreating(false)
     if (folder) setOpenFolderId(folder.id)
+  }
+
+  // Borrar la carpeta NO borra sus búsquedas: vuelven a "Sin carpeta" (el FK
+  // es `on delete set null`). Por eso alcanza con confirmar inline.
+  const handleDeleteFolder = async (id: string) => {
+    setDeletingFolderId(null)
+    if (openFolderId === id) setOpenFolderId(null)
+    await deleteFolder(id)
   }
 
   const navigate = (entry: SearchEntry) =>
@@ -153,17 +162,18 @@ export default function HistorialPage() {
             {folders.map((f) => {
               const entries = entriesFor(f.id)
               const isOpen = openFolderId === f.id
+              const isConfirming = deletingFolderId === f.id
               return (
                 <div key={f.id} className="rounded-2xl border border-border bg-card">
-                  <button
-                    onClick={() => setOpenFolderId(isOpen ? null : f.id)}
-                    className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left"
-                  >
-                    <span className="flex items-center gap-2 text-sm font-medium text-foreground">
-                      <FolderIcon className="size-4 text-muted-foreground" />
-                      {f.name}
-                    </span>
-                    <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <div className="flex w-full flex-wrap items-center gap-2 px-4 py-3">
+                    <button
+                      onClick={() => setOpenFolderId(isOpen ? null : f.id)}
+                      className="flex min-w-0 flex-1 items-center gap-2 text-left text-sm font-medium text-foreground"
+                    >
+                      <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
+                      <span className="truncate">{f.name}</span>
+                    </button>
+                    <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
                       <span>
                         {entries.length} búsqueda{entries.length === 1 ? '' : 's'}
                       </span>
@@ -171,7 +181,36 @@ export default function HistorialPage() {
                         {usd(sumCost(entries))}
                       </span>
                     </span>
-                  </button>
+                    {isConfirming ? (
+                      <div className="flex shrink-0 items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-2 py-1">
+                        <span className="text-xs text-foreground">
+                          {entries.length === 0
+                            ? '¿Eliminar carpeta?'
+                            : `¿Eliminar? ${entries.length === 1 ? 'La búsqueda pasa' : `Las ${entries.length} búsquedas pasan`} a «Sin carpeta»`}
+                        </span>
+                        <button
+                          onClick={() => setDeletingFolderId(null)}
+                          className="rounded-md px-2 py-1 text-xs font-medium text-muted-foreground transition hover:text-foreground"
+                        >
+                          Cancelar
+                        </button>
+                        <button
+                          onClick={() => handleDeleteFolder(f.id)}
+                          className="rounded-md bg-destructive px-3 py-1 text-xs font-medium text-white transition hover:bg-destructive/85"
+                        >
+                          Sí, eliminar
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setDeletingFolderId(f.id)}
+                        title="Eliminar carpeta"
+                        className="shrink-0 rounded p-1 text-muted-foreground transition hover:bg-muted hover:text-destructive"
+                      >
+                        <Trash2 className="size-3.5" />
+                      </button>
+                    )}
+                  </div>
                   {isOpen && (
                     <ul className="space-y-1.5 border-t border-border p-3">
                       {entries.length === 0 ? (

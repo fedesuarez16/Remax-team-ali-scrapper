@@ -17,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.services import cleaner
 
-from tests.services.test_cleaner_run import _FakeSupabase
+from tests.services.test_cleaner_run import _FakeSupabase, _prop
 
 
 def _make_app(fake_sb: Any) -> FastAPI:
@@ -262,4 +262,93 @@ async def test_runs_failure_returns_error_without_raising() -> None:
 
     assert resp.status_code == 200
     assert resp.json()['runs'] == []
+    assert 'error' in resp.json()
+
+
+# ── POST /delete-links ───────────────────────────────────────────────────────
+
+
+async def test_delete_links_removes_the_properties_behind_the_dead_ones(monkeypatch) -> None:
+    """El botón "borrar rotos": la lista de rotos deja de ser sólo un informe."""
+    from app.services import cleaner as cleaner_module
+
+    async def fake_check(url: str, *, client: Any):
+        verdict = 'dead' if 'muerta' in url else 'alive'
+        return cleaner_module.CheckResult(verdict, f'fake:{verdict}')
+
+    monkeypatch.setattr(cleaner_module, 'check_url', fake_check)
+
+    dead = _prop('https://portal.com/muerta')
+    alive = _prop('https://portal.com/viva')
+    sb = _FakeSupabase(properties=[dead, alive])
+
+    async with _client(sb) as client:
+        resp = await client.post('/cleanup/delete-links', json={
+            'urls': ['https://portal.com/muerta'],
+        })
+
+    body = resp.json()
+    assert resp.status_code == 200
+    assert [i['url_origen'] for i in body['eliminadas']] == ['https://portal.com/muerta']
+    assert [r['id'] for r in sb.store('properties')] == [alive['id']]
+
+
+async def test_delete_links_never_deletes_what_is_not_provably_dead(monkeypatch) -> None:
+    """El front manda lo que vio hace un rato: el backend NO le cree de una."""
+    from app.services import cleaner as cleaner_module
+
+    async def fake_check(url: str, *, client: Any):
+        return cleaner_module.CheckResult('unknown', 'el portal nos bloqueó')
+
+    monkeypatch.setattr(cleaner_module, 'check_url', fake_check)
+
+    sb = _FakeSupabase(properties=[_prop('https://portal.com/dudosa')])
+
+    async with _client(sb) as client:
+        resp = await client.post('/cleanup/delete-links', json={
+            'urls': ['https://portal.com/dudosa'],
+        })
+
+    body = resp.json()
+    assert body['eliminadas'] == []
+    assert [i['url'] for i in body['conservadas']] == ['https://portal.com/dudosa']
+    assert len(sb.store('properties')) == 1
+
+
+async def test_delete_links_accepts_a_pasted_block_of_text(monkeypatch) -> None:
+    from app.services import cleaner as cleaner_module
+
+    async def fake_check(url: str, *, client: Any):
+        return cleaner_module.CheckResult('dead', 'fake:dead')
+
+    monkeypatch.setattr(cleaner_module, 'check_url', fake_check)
+
+    sb = _FakeSupabase(properties=[
+        _prop('https://portal.com/a'), _prop('https://portal.com/b'),
+    ])
+
+    async with _client(sb) as client:
+        resp = await client.post('/cleanup/delete-links', json={
+            'urls': 'https://portal.com/a\nhttps://portal.com/b',
+        })
+
+    assert len(resp.json()['eliminadas']) == 2
+    assert sb.store('properties') == []
+
+
+async def test_delete_links_rejects_an_empty_payload() -> None:
+    async with _client(_FakeSupabase()) as client:
+        resp = await client.post('/cleanup/delete-links', json={'urls': []})
+
+    assert resp.status_code == 200
+    assert 'error' in resp.json()
+
+
+async def test_delete_links_needs_supabase() -> None:
+    async with _client(None) as client:
+        resp = await client.post('/cleanup/delete-links', json={
+            'urls': ['https://portal.com/a'],
+        })
+
+    assert resp.json()['eliminadas'] == []
     assert 'error' in resp.json()

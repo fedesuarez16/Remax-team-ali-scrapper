@@ -1,26 +1,39 @@
 'use client'
 import { useState } from 'react'
-import { Check, Copy, HelpCircle, Link2, Loader2, XCircle } from 'lucide-react'
-import { useLinkChecker, type CheckedLink } from '@/hooks/useCleanup'
+import { Check, Copy, HelpCircle, Link2, Loader2, Trash2, XCircle } from 'lucide-react'
+import { useLinkChecker, type CheckedLink, type LinkDeleteResult } from '@/hooks/useCleanup'
 
 const PLACEHOLDER = `https://www.zonaprop.com.ar/propiedades/...
 https://www.argenprop.com/departamento-en-venta/...
 https://articulo.mercadolibre.com.ar/MLA-...`
 
 export default function LinkChecker() {
-  const { result, checking, error, check, reset } = useLinkChecker()
+  const { result, checking, error, check, reset, deleteBroken, deleting, deleted } =
+    useLinkChecker()
   const [raw, setRaw] = useState('')
   const [copied, setCopied] = useState(false)
+  // Borrar no se deshace: el botón pide confirmación en el lugar antes de tirar.
+  const [confirming, setConfirming] = useState(false)
 
   const handleCheck = () => {
     setCopied(false)
+    setConfirming(false)
     void check(raw)
   }
 
   const handleClear = () => {
     setRaw('')
     setCopied(false)
+    setConfirming(false)
     reset()
+  }
+
+  const removedUrls = new Set((deleted?.eliminadas ?? []).map((p) => p.url_origen))
+  const pendingBroken = (result?.rotos ?? []).filter((l) => !removedUrls.has(l.url))
+
+  const handleDelete = async () => {
+    setConfirming(false)
+    await deleteBroken()
   }
 
   const copyActive = async () => {
@@ -43,7 +56,8 @@ export default function LinkChecker() {
         </h2>
         <p className="text-xs text-muted-foreground">
           Pegá los links que le mandaste a un cliente y fijate cuáles siguen funcionando antes de
-          reenviarlos. Esto no borra nada de la base — sólo revisa y clasifica.
+          reenviarlos. Verificar no toca nada; los que den rotos los podés sacar de la base con el
+          botón que aparece sobre esa lista.
         </p>
       </div>
 
@@ -105,12 +119,60 @@ export default function LinkChecker() {
               tone="ok"
               empty="Ninguno sigue publicado"
             />
-            <LinkList
-              title="Rotos o eliminados"
-              links={result.rotos}
-              tone="bad"
-              empty="Ninguno se cayó"
-            />
+            <div className="space-y-2">
+              <LinkList
+                title="Rotos o eliminados"
+                links={result.rotos}
+                tone="bad"
+                empty="Ninguno se cayó"
+                removed={removedUrls}
+              />
+
+              {pendingBroken.length > 0 &&
+                (confirming ? (
+                  <div className="space-y-2 rounded-lg border border-destructive/40 bg-destructive/5 p-2">
+                    <p className="text-[11px] text-muted-foreground">
+                      Se van a borrar de la base las propiedades detrás de {pendingBroken.length}{' '}
+                      link{pendingBroken.length === 1 ? '' : 's'} roto
+                      {pendingBroken.length === 1 ? '' : 's'}. Esto no se deshace. Antes de borrar
+                      se entra a cada aviso una vez más: el que haya vuelto a estar publicado se
+                      conserva.
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={handleDelete}
+                        className="flex items-center gap-1.5 rounded-lg bg-destructive px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-destructive/85"
+                      >
+                        <Trash2 className="size-3.5" />
+                        Sí, borrarlas
+                      </button>
+                      <button
+                        onClick={() => setConfirming(false)}
+                        className="rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium transition hover:bg-muted"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setConfirming(true)}
+                    disabled={deleting}
+                    className="flex items-center gap-1.5 rounded-lg border border-destructive/40 px-2.5 py-1.5 text-xs font-medium text-destructive transition hover:bg-destructive/10 disabled:opacity-40"
+                  >
+                    {deleting ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="size-3.5" />
+                    )}
+                    {deleting
+                      ? 'Revisando y borrando...'
+                      : `Borrar de la base (${pendingBroken.length})`}
+                  </button>
+                ))}
+
+              {deleted && <DeleteSummary result={deleted} />}
+            </div>
           </div>
 
           {result.sin_definir.length > 0 && (
@@ -139,16 +201,45 @@ const TONE = {
   unknown: { icon: HelpCircle, color: 'text-muted-foreground' },
 } as const
 
+function DeleteSummary({ result }: { result: LinkDeleteResult }) {
+  const { eliminadas, conservadas, no_encontradas } = result
+
+  return (
+    <div className="space-y-1 rounded-lg bg-muted/40 p-2 text-[11px] text-muted-foreground">
+      <p className="font-medium text-foreground">
+        {eliminadas.length} propiedad{eliminadas.length === 1 ? '' : 'es'} eliminada
+        {eliminadas.length === 1 ? '' : 's'} de la base
+      </p>
+      {conservadas.length > 0 && (
+        <p>
+          {conservadas.length} se conservó{conservadas.length === 1 ? '' : 'n'}: al revisarla
+          {conservadas.length === 1 ? '' : 's'} de nuevo no dio{conservadas.length === 1 ? '' : 'ron'}{' '}
+          caída{conservadas.length === 1 ? '' : 's'} — seguía publicada o el portal no respondió.
+        </p>
+      )}
+      {no_encontradas.length > 0 && (
+        <p>
+          {no_encontradas.length} link{no_encontradas.length === 1 ? '' : 's'} no estaba
+          {no_encontradas.length === 1 ? '' : 'n'} guardado
+          {no_encontradas.length === 1 ? '' : 's'} en la base — no había nada que borrar.
+        </p>
+      )}
+    </div>
+  )
+}
+
 function LinkList({
   title,
   links,
   tone,
   empty,
+  removed,
 }: {
   title: string
   links: CheckedLink[]
   tone: keyof typeof TONE
   empty: string
+  removed?: Set<string>
 }) {
   const { icon: Icon, color } = TONE[tone]
 
@@ -162,20 +253,32 @@ function LinkList({
         empty ? <p className="text-xs text-muted-foreground">{empty}</p> : null
       ) : (
         <ul className="space-y-1.5">
-          {links.map((link) => (
-            <li key={link.url} className="min-w-0">
-              <a
-                href={link.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block truncate font-mono text-xs text-foreground hover:underline"
-                title={link.url}
-              >
-                {link.url}
-              </a>
-              <p className="truncate text-[11px] text-muted-foreground">{link.motivo}</p>
-            </li>
-          ))}
+          {links.map((link) => {
+            const gone = removed?.has(link.url) ?? false
+            return (
+              <li key={link.url} className="min-w-0">
+                <a
+                  href={link.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={`block truncate font-mono text-xs hover:underline ${
+                    gone ? 'text-muted-foreground/60 line-through' : 'text-foreground'
+                  }`}
+                  title={link.url}
+                >
+                  {link.url}
+                </a>
+                <p className="truncate text-[11px] text-muted-foreground">
+                  {link.motivo}
+                  {gone && (
+                    <span className="ml-1.5 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-foreground">
+                      borrada de la base
+                    </span>
+                  )}
+                </p>
+              </li>
+            )
+          })}
         </ul>
       )}
     </div>

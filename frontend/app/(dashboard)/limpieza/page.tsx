@@ -11,7 +11,7 @@ import {
   Sparkles,
   Trash2,
 } from 'lucide-react'
-import { useCleanup, type CleanupRun } from '@/hooks/useCleanup'
+import { useCleanup, type CleanupRun, type LinkDeleteResult } from '@/hooks/useCleanup'
 import LinkChecker from '@/components/cleanup/LinkChecker'
 
 const PRESETS = [7, 15, 30, 90]
@@ -24,7 +24,7 @@ function formatDate(value: string | null): string {
 }
 
 export default function LimpiezaPage() {
-  const { state, schedule, runs, error, runNow, saveSchedule } = useCleanup()
+  const { state, schedule, runs, error, runNow, saveSchedule, deleteUrls } = useCleanup()
   const [enabled, setEnabled] = useState(false)
   const [intervalDays, setIntervalDays] = useState(7)
   const [saving, setSaving] = useState(false)
@@ -238,6 +238,7 @@ export default function LimpiezaPage() {
                   run={run}
                   open={openRun === run.id}
                   onToggle={() => setOpenRun(openRun === run.id ? null : run.id)}
+                  onDelete={deleteUrls}
                 />
               ))}
             </ul>
@@ -274,12 +275,29 @@ function RunRow({
   run,
   open,
   onToggle,
+  onDelete,
 }: {
   run: CleanupRun
   open: boolean
   onToggle: () => void
+  onDelete: (urls: string[]) => Promise<LinkDeleteResult>
 }) {
   const removed = run.eliminadas ?? []
+  // Borrar no se deshace: se confirma en el lugar antes de tirar.
+  const [confirming, setConfirming] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [outcome, setOutcome] = useState<LinkDeleteResult | null>(null)
+
+  // Una simulación deja la lista de caídas SIN borrar: acá está el paso que
+  // faltaba para sacarlas sin esperar a la próxima corrida del bot.
+  const pending = run.dry_run && !outcome ? removed.map((p) => p.url_origen).filter(Boolean) : []
+
+  const handleDelete = async () => {
+    setConfirming(false)
+    setDeleting(true)
+    setOutcome(await onDelete(pending))
+    setDeleting(false)
+  }
 
   return (
     <li className="rounded-xl border border-border bg-card">
@@ -333,6 +351,69 @@ function RunRow({
                 </li>
               ))}
             </ul>
+          )}
+
+          {pending.length > 0 &&
+            (confirming ? (
+              <div className="mt-2 space-y-2 rounded-lg border border-destructive/40 bg-destructive/5 p-2">
+                <p className="text-[11px] text-muted-foreground">
+                  La simulación no borró nada. Se van a borrar ahora {pending.length} propiedad
+                  {pending.length === 1 ? '' : 'es'}, revisando cada aviso una vez más: el que haya
+                  vuelto a estar publicado se conserva.
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={handleDelete}
+                    className="flex items-center gap-1.5 rounded-lg bg-destructive px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-destructive/85"
+                  >
+                    <Trash2 className="size-3.5" />
+                    Sí, borrarlas
+                  </button>
+                  <button
+                    onClick={() => setConfirming(false)}
+                    className="rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium transition hover:bg-muted"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirming(true)}
+                disabled={deleting}
+                className="mt-2 flex items-center gap-1.5 rounded-lg border border-destructive/40 px-2.5 py-1.5 text-xs font-medium text-destructive transition hover:bg-destructive/10 disabled:opacity-40"
+              >
+                {deleting ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="size-3.5" />
+                )}
+                {deleting
+                  ? 'Revisando y borrando...'
+                  : `Borrar estas ${pending.length} de la base`}
+              </button>
+            ))}
+
+          {outcome && (
+            <p className="mt-2 rounded-lg bg-muted/40 p-2 text-[11px] text-muted-foreground">
+              <span className="font-medium text-foreground">
+                {outcome.eliminadas.length} eliminada
+                {outcome.eliminadas.length === 1 ? '' : 's'} de la base
+              </span>
+              {outcome.conservadas.length > 0 &&
+                ` · ${outcome.conservadas.length} se conservó${
+                  outcome.conservadas.length === 1 ? '' : 'n'
+                } porque al revisarla${
+                  outcome.conservadas.length === 1 ? '' : 's'
+                } de nuevo no dio${outcome.conservadas.length === 1 ? '' : 'ron'} caída${
+                  outcome.conservadas.length === 1 ? '' : 's'
+                }`}
+              {outcome.no_encontradas.length > 0 &&
+                ` · ${outcome.no_encontradas.length} ya no estaba${
+                  outcome.no_encontradas.length === 1 ? '' : 'n'
+                } en la base`}
+              {outcome.error && ` · ${outcome.error}`}
+            </p>
           )}
         </div>
       )}

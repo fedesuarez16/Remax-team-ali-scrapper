@@ -507,3 +507,64 @@ async def test_folders_get_when_supabase_not_configured() -> None:
 
     assert resp.status_code == 200
     assert resp.json() == {'folders': [], 'total': 0, 'error': 'Supabase no configurado'}
+
+
+# -- Folders: DELETE -------------------------------------------------------
+
+
+async def test_folders_delete_removes_folder() -> None:
+    keep, gone = _folder('Quedan', minutes_ago=5), _folder('Se borra', minutes_ago=1)
+    fake_sb = _FakeSupabase([], folders=[keep, gone])
+    async with _client(fake_sb) as client:
+        resp = await client.delete(f'/search-history/folders/{gone["id"]}')
+
+    assert resp.status_code == 200
+    assert resp.json() == {'deleted': True}
+    assert [f['id'] for f in fake_sb._folders] == [keep['id']]
+
+
+async def test_folders_delete_never_deletes_its_searches() -> None:
+    """Borrar una carpeta suelta sus búsquedas, no las destruye.
+
+    El FK es `on delete set null`, así que Postgres las deja en "Sin carpeta".
+    Lo que este test blinda es que el endpoint NO borre filas de
+    `search_history` por su cuenta: perder búsquedas al ordenar carpetas sería
+    destructivo y silencioso.
+    """
+    folder = _folder('Zona Norte')
+    rows = [_row('depto belgrano', minutes_ago=2, folder_id=folder['id'])]
+    fake_sb = _FakeSupabase(rows, folders=[folder])
+    async with _client(fake_sb) as client:
+        resp = await client.delete(f'/search-history/folders/{folder["id"]}')
+
+    assert resp.status_code == 200
+    assert resp.json()['deleted'] is True
+    assert len(fake_sb._store) == 1
+
+
+async def test_folders_delete_nonexistent_id_is_idempotent() -> None:
+    fake_sb = _FakeSupabase([], folders=[_folder('A')])
+    async with _client(fake_sb) as client:
+        resp = await client.delete('/search-history/folders/folder-inexistente')
+
+    assert resp.status_code == 200
+    assert resp.json() == {'deleted': True}
+    assert len(fake_sb._folders) == 1
+
+
+async def test_folders_delete_failure_returns_error_without_raising() -> None:
+    async with _client(_RaisingSupabase()) as client:
+        resp = await client.delete('/search-history/folders/folder-1')
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['deleted'] is False
+    assert 'error' in data
+
+
+async def test_folders_delete_when_supabase_not_configured() -> None:
+    async with _client(None) as client:
+        resp = await client.delete('/search-history/folders/folder-1')
+
+    assert resp.status_code == 200
+    assert resp.json() == {'deleted': False, 'error': 'Supabase no configurado'}

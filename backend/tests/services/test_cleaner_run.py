@@ -81,6 +81,10 @@ class _FakeQuery:
         self._filters.append(('is', field, value))
         return self
 
+    def in_(self, field: str, values: object) -> '_FakeQuery':
+        self._filters.append(('in', field, list(values)))  # type: ignore[arg-type]
+        return self
+
     @property
     def not_(self) -> _Not:
         return _Not(self)
@@ -106,6 +110,8 @@ class _FakeQuery:
             if op == 'is' and value == 'null' and current is not None:
                 return False
             if op == 'not_is' and value == 'null' and current is None:
+                return False
+            if op == 'in' and current not in value:  # type: ignore[operator]
                 return False
         return True
 

@@ -338,21 +338,26 @@ async def _record_run(
     finished_at: datetime,
     deleted: list[dict[str, Any]],
     error: str | None,
+    counts: dict[str, int] | None = None,
 ) -> None:
     """Deja la corrida en `cleanup_runs`, con la foto de cada propiedad borrada.
 
     El snapshot es la red de contención: si el bot se equivoca, quedó registrado
     QUÉ borró y POR QUÉ en vez de desaparecer sin rastro. Best-effort — que
     falle la auditoría no puede tumbar la limpieza.
+
+    ``counts`` deja registrar una corrida que NO es la del bot — el borrado a
+    mano desde la pantalla — sin pasar por el estado global que el front sondea.
     """
+    stats = counts if counts is not None else _state
     payload = {
         'origen': origen,
         'dry_run': dry_run,
-        'revisadas': _state['checked'],
-        'activas': _state['alive'],
-        'caidas': _state['dead'],
-        'indeterminadas': _state['unknown'],
-        'eliminadas_count': _state['deleted'],
+        'revisadas': stats['checked'],
+        'activas': stats['alive'],
+        'caidas': stats['dead'],
+        'indeterminadas': stats['unknown'],
+        'eliminadas_count': stats['deleted'],
         'eliminadas': deleted,
         'error': error,
         'started_at': started_at.isoformat(),
@@ -457,6 +462,38 @@ def _normalize_link(raw: str) -> str | None:
     return None
 
 
+async def _verify_all(
+    links: list[str], *, check: Checker, concurrency: int,
+) -> dict[str, CheckResult]:
+    """Verifica links en paralelo y devuelve `{url: veredicto}`.
+
+    Un checker que explota es exactamente el caso "no sabemos": se traduce a
+    `unknown`, nunca a `dead`. Un link repetido se pide una sola vez.
+    """
+    unique = list(dict.fromkeys(links))
+    sem = asyncio.Semaphore(max(1, concurrency))
+    results: dict[str, CheckResult] = {}
+
+    async def verify(url: str, client: Any) -> None:
+        async with sem:
+            try:
+                results[url] = await check(url, client=client)
+            except Exception as exc:
+                results[url] = CheckResult('unknown', f'error al verificar ({type(exc).__name__})')
+
+    client = httpx.AsyncClient(
+        headers={'User-Agent': _USER_AGENT, 'Accept-Language': 'es-AR,es;q=0.9'},
+        timeout=_REQUEST_TIMEOUT,
+        follow_redirects=True,
+    )
+    try:
+        await asyncio.gather(*(verify(url, client) for url in unique))
+    finally:
+        await client.aclose()
+
+    return results
+
+
 async def check_links(
     urls: list[str], *, checker: Checker | None = None, concurrency: int = _LINKS_CONCURRENCY,
 ) -> dict[str, Any]:
@@ -486,43 +523,143 @@ async def check_links(
     if len(seen) > MAX_LINKS:
         raise ValueError(f'Máximo {MAX_LINKS} links por vez')
 
-    check: Checker = checker or check_url
-    sem = asyncio.Semaphore(max(1, concurrency))
-    results: dict[str, CheckResult] = {}
-
-    async def verify(original: str, normalized: str, client: Any) -> None:
-        async with sem:
-            try:
-                results[original] = await check(normalized, client=client)
-            except Exception as exc:
-                results[original] = CheckResult(
-                    'unknown', f'error al verificar ({type(exc).__name__})',
-                )
-
-    client = httpx.AsyncClient(
-        headers={'User-Agent': _USER_AGENT, 'Accept-Language': 'es-AR,es;q=0.9'},
-        timeout=_REQUEST_TIMEOUT,
-        follow_redirects=True,
+    results = await _verify_all(
+        [link for link in seen.values() if link is not None],
+        check=checker or check_url,
+        concurrency=concurrency,
     )
-    try:
-        await asyncio.gather(*(
-            verify(original, normalized, client)
-            for original, normalized in seen.items()
-            if normalized is not None
-        ))
-    finally:
-        await client.aclose()
 
     buckets: dict[str, list[dict[str, str]]] = {'activos': [], 'rotos': [], 'sin_definir': []}
     for original, normalized in seen.items():
         if normalized is None:
             buckets['rotos'].append({'url': original, 'motivo': 'no es un link válido'})
             continue
-        result = results[original]
+        result = results[normalized]
         bucket = {'alive': 'activos', 'dead': 'rotos', 'unknown': 'sin_definir'}[result.verdict]
         buckets[bucket].append({'url': normalized, 'motivo': result.reason})
 
     return {**buckets, 'total': len(seen)}
+
+
+# ── borrado a mano de los links rotos ────────────────────────────────────────
+
+
+async def delete_dead_links(
+    sb: Any,
+    urls: list[str],
+    *,
+    checker: Checker | None = None,
+    concurrency: int = _LINKS_CONCURRENCY,
+) -> dict[str, Any]:
+    """Borra de la base las propiedades detrás de los links que siguen muertos.
+
+    Es el paso que le faltaba a `check_links`: ver la lista de rotos y sacarlos
+    del sistema sin esperar a la próxima corrida del bot.
+
+    ## La lista que llega es una INTENCIÓN, no una orden de borrado
+
+    Cada aviso se vuelve a verificar acá adentro y sólo un veredicto ``dead``
+    borra. Es la misma regla ternaria del resto del módulo aplicada al punto más
+    peligroso de la API: una lista vieja (el aviso se republicó), un doble click
+    o un payload armado a mano no pueden vaciar la base. Verificar de nuevo
+    cuesta unos segundos; borrar de más no se deshace.
+
+    Devuelve ``eliminadas`` (la foto de cada fila borrada, con motivo),
+    ``conservadas`` (las que al revisar NO dieron muertas) y ``no_encontradas``
+    (links que no están guardados en la base — no hay nada que borrar).
+    """
+    normalized: dict[str, str] = {}  # url normalizada → texto original
+    invalid: list[str] = []
+    for raw in urls:
+        candidate = (raw or '').strip()
+        if not candidate:
+            continue
+        link = _normalize_link(candidate)
+        if link is None:
+            if candidate not in invalid:
+                invalid.append(candidate)
+            continue
+        normalized.setdefault(link, candidate)
+
+    if not normalized and not invalid:
+        raise ValueError('Elegí al menos un link para borrar')
+    if len(normalized) + len(invalid) > MAX_LINKS:
+        raise ValueError(f'Máximo {MAX_LINKS} links por vez')
+
+    empty: dict[str, Any] = {
+        'eliminadas': [],
+        'conservadas': [],
+        'no_encontradas': [*invalid, *normalized],
+        'total': len(normalized) + len(invalid),
+    }
+    if sb is None:
+        return {**empty, 'error': 'Supabase no configurado'}
+
+    try:
+        res = await (
+            sb.table('properties')
+            .select(_PROPERTY_COLUMNS)
+            .in_('url_origen', list(normalized))
+            .execute()
+        )
+    except Exception as exc:
+        logger.warning('cleaner: no se pudieron buscar las propiedades a borrar: %s', exc)
+        return {**empty, 'error': str(exc)}
+
+    rows = res.data or []
+    found = {(row.get('url_origen') or '').strip() for row in rows}
+    # Un link que no está en la base no es un error: se verifica una lista suelta
+    # (la que se le mandó a un cliente), no necesariamente lo que tenemos guardado.
+    missing = [*invalid, *(original for link, original in normalized.items() if link not in found)]
+
+    started_at = _now()
+    verdicts = await _verify_all(sorted(found), check=checker or check_url, concurrency=concurrency)
+
+    counts = {'checked': 0, 'alive': 0, 'dead': 0, 'unknown': 0, 'deleted': 0}
+    deleted: list[dict[str, Any]] = []
+    kept: list[dict[str, str]] = []
+
+    for row in rows:
+        url = (row.get('url_origen') or '').strip()
+        result = verdicts[url]
+        counts['checked'] += 1
+        counts[result.verdict] += 1
+
+        if result.verdict != 'dead':
+            kept.append({'url': url, 'motivo': result.reason})
+            continue
+
+        snapshot = {
+            'id': row.get('id'),
+            'titulo': row.get('titulo'),
+            'direccion': row.get('direccion'),
+            'fuente': row.get('fuente'),
+            'url_origen': url,
+            'motivo': result.reason,
+        }
+        try:
+            await sb.table('properties').delete().eq('id', row['id']).execute()
+        except Exception as exc:
+            # Una fila que no se pudo borrar no aborta el resto: el usuario ve
+            # qué quedó en pie en vez de un error que tapa lo que sí se borró.
+            logger.warning('cleaner: no se pudo borrar %s: %s', row.get('id'), exc)
+            kept.append({'url': url, 'motivo': f'no se pudo borrar ({type(exc).__name__})'})
+            continue
+        counts['deleted'] += 1
+        deleted.append(snapshot)
+
+    if counts['checked']:
+        await _record_run(
+            sb, origen='manual', dry_run=False, started_at=started_at,
+            finished_at=_now(), deleted=deleted, error=None, counts=counts,
+        )
+
+    return {
+        'eliminadas': deleted,
+        'conservadas': kept,
+        'no_encontradas': missing,
+        'total': len(normalized) + len(invalid),
+    }
 
 
 # ── programación automática ──────────────────────────────────────────────────
