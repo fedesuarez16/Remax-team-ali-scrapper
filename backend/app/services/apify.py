@@ -902,6 +902,29 @@ _MUDAFY_CABA_ZONAS = frozenset({
     'nunez', 'colegiales', 'puerto-madero', 'san-telmo', 'flores', 'devoto',
 })
 
+# Mudafy DOES serve city and barrio pages — the earlier read that "city and
+# barrio slugs 404" was true only for a BARE slug (`/la-plata` → 404). The real
+# segment carries its full ancestry: `{region}-{city}` and
+# `{region}-{city}-{barrio}` (verified live, all 200).
+#
+# This matters far more than tidiness. The region pages are huge — GBA Sur is 14
+# pages of ~25 — while a city like La Plata has ~10 listings in the whole
+# portal. Searching the region for a city means sweeping ~350 rows to keep ~10,
+# and the paging heuristic gives up on the first page that contributes none.
+#
+# Only zonas whose Mudafy spelling differs from ours need an entry; everything
+# else derives as `{region}-{zona}` and falls through to the region on a 404.
+_MUDAFY_ZONA_LOCATION: dict[str, str] = {
+    'la-plata': 'provincia-de-buenos-aires-gba-sur-la-plata',
+    'city-bell': 'provincia-de-buenos-aires-gba-sur-la-plata-city-bell',
+    'gonnet': 'provincia-de-buenos-aires-gba-sur-la-plata-manuel-b-gonnet',
+    'manuel-b-gonnet': 'provincia-de-buenos-aires-gba-sur-la-plata-manuel-b-gonnet',
+    'villa-elisa': 'provincia-de-buenos-aires-gba-sur-la-plata-villa-elisa',
+    'tolosa': 'provincia-de-buenos-aires-gba-sur-la-plata-tolosa',
+    'berisso': 'provincia-de-buenos-aires-gba-sur-berisso',
+    'ensenada': 'provincia-de-buenos-aires-gba-sur-ensenada',
+}
+
 _MUDAFY_URL_OP: dict[str, str] = {'venta': 'venta', 'alquiler': 'alquiler', 'alquiler_temp': 'alquiler'}
 _MUDAFY_URL_TIPO: dict[str, str] = {
     'departamento': 'departamentos', 'casa': 'casas', 'ph': 'ph',
@@ -929,22 +952,51 @@ def _mudafy_region_for(zona: str) -> str:
     return _MUDAFY_DEFAULT_REGION
 
 
-def _mudafy_search_urls(filters: ScrapingFilters, max_pages: int) -> Iterator[str]:
-    """Listing URLs, page 1..N — lazily, so `max_pages=0` means "no cap" and the
-    caller stops on the first page that yields nothing new. Later pages take the
-    `/{N}-p` suffix — read off the site's own pagination hrefs, and query-string
-    free so the crawl stays inside what robots.txt allows."""
+def _mudafy_location_slug(zona: str, region: str) -> str | None:
+    """The most precise location segment Mudafy might serve for this zona, or
+    None when the zona IS the region and there is nothing narrower to try."""
+    key = _slugify(zona)
+    if not key or key == region or key in _MUDAFY_REGIONS:
+        return None
+    if key in _MUDAFY_ZONA_LOCATION:
+        return _MUDAFY_ZONA_LOCATION[key]
+    return f'{region}-{key}'
+
+
+def _mudafy_search_bases(filters: ScrapingFilters) -> list[str]:
+    """Listing bases to walk, most precise first.
+
+    The city page is tried before the region so a city search reads ~10 rows
+    instead of sweeping ~350. A derived slug that 404s costs one request and
+    then falls through to the region, which is exactly the old behaviour.
+    """
     zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
     region = _mudafy_region_for(zona)
     op = _MUDAFY_URL_OP.get(filters.tipo_operacion or 'venta', 'venta')
     tipos = filters.tipos_propiedad or []
     tipo = _MUDAFY_URL_TIPO.get(tipos[0], 'propiedades') if len(tipos) == 1 else 'propiedades'
-    base = f'{_MUDAFY_BASE}/{op}/{tipo}/{region}'
-    yield base
+
+    bases = []
+    location = _mudafy_location_slug(zona, region)
+    if location:
+        bases.append(f'{_MUDAFY_BASE}/{op}/{tipo}/{location}')
+    bases.append(f'{_MUDAFY_BASE}/{op}/{tipo}/{region}')
+    return bases
+
+
+def _mudafy_search_urls(
+    filters: ScrapingFilters, max_pages: int, base: str | None = None,
+) -> Iterator[str]:
+    """Listing URLs for one base, page 1..N — lazily, so `max_pages=0` means "no
+    cap" and the caller stops when a page brings nothing new. Later pages take
+    the `/{N}-p` suffix — read off the site's own pagination hrefs, and
+    query-string free so the crawl stays inside what robots.txt allows."""
+    root = base or _mudafy_search_bases(filters)[0]
+    yield root
     for n in count(2):
         if max_pages > 0 and n > max_pages:
             return
-        yield f'{base}/{n}-p'
+        yield f'{root}/{n}-p'
 
 
 # Mudafy ships each photo as a bag of pre-rendered CDN variants rather than one
@@ -1044,24 +1096,20 @@ def _norm_mudafy(pub: dict[str, Any]) -> RawProperty | None:
     )
 
 
-def _parse_mudafy_payload(page: str, filters: ScrapingFilters) -> list[RawProperty]:
-    """Every `"publication":{…}` in the flight payload → RawProperty, zona-guarded.
+def _mudafy_publications(page: str) -> list[dict[str, Any]]:
+    """Every `"publication":{…}` in the flight payload, deduplicated by id.
 
-    Mudafy only filters by broad region, so the searched zona is enforced here
-    over whatever the region page returned.
+    Kept separate from the zona filtering so the scraper can tell "this page was
+    empty" (the base is exhausted) apart from "this page held nothing for the
+    searched zona" — which is NOT a reason to stop paging.
     """
     import json
 
     # The payload lives JSON-escaped inside a JS string literal.
     text = page.replace('\\"', '"').replace('\\\\', '\\')
     decoder = json.JSONDecoder()
-    phrase_parts = [
-        parts for parts in
-        ([_slugify(p) for p in z.split(',') if _slugify(p)] for z in _guard_phrases(filters))
-        if parts
-    ]
 
-    results: list[RawProperty] = []
+    pubs: list[dict[str, Any]] = []
     seen: set[Any] = set()
     marker = '"publication":'
     idx = text.find(marker)
@@ -1077,16 +1125,58 @@ def _parse_mudafy_payload(page: str, filters: ScrapingFilters) -> list[RawProper
         if not isinstance(pub, dict):
             continue
         pub_id = pub.get('id')
-        if pub_id is not None and pub_id in seen:
-            continue
         if pub_id is not None:
+            if pub_id in seen:
+                continue
             seen.add(pub_id)
+        pubs.append(pub)
+    return pubs
 
+
+def _mudafy_zona_haystack(pub: dict[str, Any], prop: RawProperty) -> str:
+    """What the zona guard matches against.
+
+    `address.full_address` is free text the seller typed — on a live page 17 of
+    25 rows carried no locality in it at all ("Belgrano 838", "LINEO 19"), so
+    matching on the address alone silently drops real hits. The canonical
+    locality rides in the `location_*` fields, which are filled on every row.
+    """
+    return _slugify(' '.join(str(part) for part in (
+        prop.direccion,
+        prop.titulo or '',
+        pub.get('location_name') or '',
+        pub.get('location_short_name') or '',
+        # Already a slug, and it spells the barrio the site itself files it under.
+        str(pub.get('location_slug') or '').replace('-', ' '),
+    )))
+
+
+def _parse_mudafy_payload(page: str, filters: ScrapingFilters) -> list[RawProperty]:
+    """Every publication in the flight payload → RawProperty, zona-guarded.
+
+    The city page already narrows most searches; this guard is what keeps a
+    region-wide fallback honest.
+    """
+    phrase_parts = [
+        parts for parts in
+        ([_slugify(p) for p in z.split(',') if _slugify(p)] for z in _guard_phrases(filters))
+        if parts
+    ]
+    return _mudafy_filter(_mudafy_publications(page), filters, phrase_parts)
+
+
+def _mudafy_filter(
+    pubs: list[dict[str, Any]],
+    filters: ScrapingFilters,
+    phrase_parts: list[list[str]],
+) -> list[RawProperty]:
+    results: list[RawProperty] = []
+    for pub in pubs:
         prop = _norm_mudafy(pub)
         if prop is None:
             continue
         if phrase_parts:
-            haystack = _slugify(f'{prop.direccion} {prop.titulo or ""}')
+            haystack = _mudafy_zona_haystack(pub, prop)
             if not any(all(part in haystack for part in parts) for parts in phrase_parts):
                 continue
         # The payload never names the operation — the listing URL chose it.
@@ -1101,35 +1191,50 @@ async def _scrape_mudafy(
     from app.core.config import settings
     await on_progress('mudafy', 'running', 0)
 
+    phrase_parts = [
+        parts for parts in
+        ([_slugify(p) for p in z.split(',') if _slugify(p)] for z in _guard_phrases(filters))
+        if parts
+    ]
+
     results: list[RawProperty] = []
     seen: set[str] = set()
     async with httpx.AsyncClient(
         timeout=30, follow_redirects=True,
         headers={'User-Agent': 'Mozilla/5.0 (compatible; PropSearchBot/1.0)'},
     ) as client:
-        for url in _mudafy_search_urls(filters, settings.MUDAFY_MAX_PAGES):
-            try:
-                resp = await client.get(url)
-                resp.raise_for_status()
-            except Exception:
-                break
+        for base in _mudafy_search_bases(filters):
+            base_ids: set[Any] = set()
+            for url in _mudafy_search_urls(filters, settings.MUDAFY_MAX_PAGES, base):
+                try:
+                    resp = await client.get(url)
+                    resp.raise_for_status()
+                except Exception:
+                    # A derived city slug that 404s just means "try the region".
+                    break
 
-            page_props = _parse_mudafy_payload(resp.text, filters)
-            new = 0
-            for prop in page_props:
-                key = str(prop.url_origen or '')
-                if key and key in seen:
-                    continue
-                if key:
-                    seen.add(key)
-                results.append(prop)
-                new += 1
+                pubs = _mudafy_publications(resp.text)
+                # City pages serve no pagination hrefs and answer `/{N}-p` with
+                # page 1 again, so exhaustion shows up as a page of repeats.
+                fresh = [pub for pub in pubs if pub.get('id') not in base_ids]
+                base_ids.update(pub.get('id') for pub in fresh)
+                if not fresh:
+                    break
 
-            # A region page that yielded nothing new is either exhausted or
-            # entirely outside the zona — either way, stop paging.
-            if new == 0:
+                for prop in _mudafy_filter(fresh, filters, phrase_parts):
+                    key = str(prop.url_origen or '')
+                    if key and key in seen:
+                        continue
+                    if key:
+                        seen.add(key)
+                    results.append(prop)
+
+                await on_progress('mudafy', 'running', len(results))
+
+            # The precise page answered — sweeping the whole region on top of it
+            # would only re-read what the zona guard already rejected.
+            if results:
                 break
-            await on_progress('mudafy', 'running', len(results))
 
     await on_progress('mudafy', 'done', len(results))
     return results

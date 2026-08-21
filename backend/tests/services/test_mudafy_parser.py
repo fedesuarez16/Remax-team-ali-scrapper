@@ -26,7 +26,7 @@ robots.txt disallows `/api/` and `/*?`, so the scraper only ever walks
 path-based URLs (`/{operacion}/{tipo}/{region}` and `/{N}-p` for later pages).
 """
 from app.models.property import ScrapingFilters
-from app.services.apify import _parse_mudafy_payload
+from app.services.apify import _mudafy_search_bases, _parse_mudafy_payload
 
 # Trimmed verbatim from a live capture of
 # https://mudafy.com.ar/venta/departamentos/provincia-de-buenos-aires-gba-sur
@@ -172,3 +172,84 @@ def test_address_keeps_street_and_number_for_the_dedup_fingerprint():
 
 def test_a_page_with_no_publications_yields_nothing():
     assert _parse('self.__next_f.push([1,"nothing here"])') == []
+
+
+# ── Where the search actually points ─────────────────────────────────────────
+# Mudafy DOES serve city and barrio pages — the slug just has to carry its full
+# ancestry (`{region}-{city}`, `{region}-{city}-{barrio}`); only a bare
+# `/la-plata` 404s. Verified live: `…-gba-sur-la-plata` answers 200 with "10
+# propiedades" and NO pagination, while `…-gba-sur` answers 200 with 14 pages
+# of ~25. Searching the region for a city therefore means sweeping ~350 rows to
+# find ~10, and the zona guard throws away everything else on the way.
+
+def test_searches_the_city_page_before_the_region():
+    """The precise location first — the region is only the safety net."""
+    bases = _mudafy_search_bases(_LA_PLATA)
+    assert bases[0] == (
+        'https://mudafy.com.ar/venta/propiedades/provincia-de-buenos-aires-gba-sur-la-plata'
+    )
+    assert bases[-1] == (
+        'https://mudafy.com.ar/venta/propiedades/provincia-de-buenos-aires-gba-sur'
+    )
+
+
+def test_a_barrio_slug_hangs_off_its_parent_city():
+    """`…-gba-sur-city-bell` 404s; `…-gba-sur-la-plata-city-bell` is the real one."""
+    f = ScrapingFilters(zona='City Bell', zonas=['City Bell'], tipo_operacion='venta')
+    assert _mudafy_search_bases(f)[0].endswith(
+        '/provincia-de-buenos-aires-gba-sur-la-plata-city-bell'
+    )
+
+
+def test_a_zona_that_renames_itself_uses_its_mudafy_spelling():
+    """Mudafy files Gonnet under `manuel-b-gonnet` — the derived slug would 404."""
+    f = ScrapingFilters(zona='Gonnet', zonas=['Gonnet'], tipo_operacion='venta')
+    assert _mudafy_search_bases(f)[0].endswith(
+        '/provincia-de-buenos-aires-gba-sur-la-plata-manuel-b-gonnet'
+    )
+
+
+def test_an_unmapped_zona_derives_its_slug_from_the_region():
+    """`{region}-{zona}` is the site's own convention, so it's worth attempting;
+    a 404 just falls through to the region base."""
+    f = ScrapingFilters(zona='Quilmes', zonas=['Quilmes'], tipo_operacion='venta')
+    assert _mudafy_search_bases(f)[0].endswith('/provincia-de-buenos-aires-gba-sur-quilmes')
+
+
+def test_a_region_wide_search_has_nothing_more_precise_to_try():
+    f = ScrapingFilters(zona='CABA', zonas=['CABA'], tipo_operacion='venta')
+    assert _mudafy_search_bases(f) == ['https://mudafy.com.ar/venta/propiedades/caba']
+
+
+# ── The zona guard ───────────────────────────────────────────────────────────
+# `address.full_address` is free text the seller typed: on a live page 17 of 25
+# rows carried no locality at all ("Belgrano 838", "LINEO 19"). The locality
+# lives in `location_name` / `location_short_name` / `location_slug`, which the
+# guard was ignoring — so real La Plata listings were being discarded.
+_FREE_ADDRESS_PAYLOAD = r'''
+self.__next_f.push([1,"20:[\"$\",\"$L3d\",null,{\"publication\":{\"id\":5150,
+\"price\":{\"currency\":\"USD\",\"amount\":75000},
+\"slug\":\"belgrano-838-departamento-en-venta-1\",
+\"location_name\":\"La Plata, Provincia de Buenos Aires\",
+\"location_short_name\":\"La Plata\",
+\"location_slug\":\"provincia-de-buenos-aires-gba-sur-la-plata\",
+\"address\":{\"full_address\":\"Belgrano 838\",\"public_address\":\"Belgrano 838\"},
+\"dimensions\":{\"total_area\":48},
+\"property\":{\"kind\":\"apartment\",\"rooms\":{\"total_count\":2}},
+\"title\":\"Departamento 2 ambientes\",\"photos\":[]}}]"])
+'''
+
+
+def test_zona_guard_reads_the_location_fields_not_just_the_address():
+    """A listing whose address is bare street text is still a La Plata listing."""
+    props = _parse_mudafy_payload(_FREE_ADDRESS_PAYLOAD, _LA_PLATA)
+    assert [p.direccion for p in props] == ['Belgrano 838']
+
+
+def test_the_location_fields_do_not_smuggle_in_another_zona():
+    """The guard must stay a guard: matching on location cannot turn into
+    matching on the region every row shares."""
+    berazategui = ScrapingFilters(
+        zona='Berazategui', zonas=['Berazategui'], tipo_operacion='venta',
+    )
+    assert _parse_mudafy_payload(_FREE_ADDRESS_PAYLOAD, berazategui) == []
