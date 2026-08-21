@@ -1,7 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { Building2, Check, Globe, Layers, Loader2, MapPin, Pencil, Plus, Trash2, X } from 'lucide-react'
-import { useManualSources, useSourceZonas } from '@/hooks/useManualSources'
+import { useManualSources, useSourceZonas, type ManualSource } from '@/hooks/useManualSources'
 import { usePortals } from '@/hooks/usePortals'
 
 const ZONA_SUGERIDAS = [
@@ -10,7 +10,7 @@ const ZONA_SUGERIDAS = [
 ]
 
 export default function SourcesPage() {
-  const { sources, addSource, deleteSource, toggleSource, renameSource, loading } = useManualSources()
+  const { sources, addSource, deleteSource, toggleSource, updateSource, loading } = useManualSources()
   const { portals, togglePortal, loading: loadingPortals } = usePortals()
   const { zonas } = useSourceZonas()
   const [nombre, setNombre] = useState('')
@@ -21,6 +21,8 @@ export default function SourcesPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editNombre, setEditNombre] = useState('')
+  const [editUrl, setEditUrl] = useState('')
+  const [editZona, setEditZona] = useState('')
   const [editError, setEditError] = useState<string | null>(null)
   const [savingEdit, setSavingEdit] = useState(false)
 
@@ -44,22 +46,28 @@ export default function SourcesPage() {
     // row doesn't mean retyping it every time.
   }
 
-  const startEdit = (id: string, nombreActual: string) => {
-    setEditingId(id)
-    setEditNombre(nombreActual)
+  const startEdit = (s: ManualSource) => {
+    setEditingId(s.id)
+    setEditNombre(s.nombre)
+    setEditUrl(s.url)
+    setEditZona(s.zona ?? '')
     setEditError(null)
   }
 
   const cancelEdit = () => {
     setEditingId(null)
     setEditNombre('')
+    setEditUrl('')
+    setEditZona('')
     setEditError(null)
   }
 
-  const handleRename = async (id: string) => {
+  const handleSaveEdit = async (id: string) => {
     setSavingEdit(true)
     setEditError(null)
-    const err = await renameSource(id, editNombre)
+    // All three always travel: the form is seeded with the current values, so
+    // an untouched field just re-sends what's already stored.
+    const err = await updateSource(id, { nombre: editNombre, url: editUrl, zona: editZona })
     setSavingEdit(false)
     if (err) {
       setEditError(err)
@@ -188,9 +196,9 @@ export default function SourcesPage() {
               {sources.map((s) => (
                 <li
                   key={s.id}
-                  className={`flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5 ${
-                    s.activo ? '' : 'opacity-55'
-                  }`}
+                  className={`flex gap-3 rounded-xl border border-border bg-card px-3 py-2.5 ${
+                    editingId === s.id ? 'items-start' : 'items-center'
+                  } ${s.activo ? '' : 'opacity-55'}`}
                 >
                   <Globe className="size-4 shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">

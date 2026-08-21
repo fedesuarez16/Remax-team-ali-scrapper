@@ -115,17 +115,38 @@ export async function toggleSource(id: string, activo: boolean): Promise<string 
   }
 }
 
-/** Renames a source. The backend PATCH is presence-checked, so sending only
- * `nombre` leaves `activo` untouched. Returns an error message or null. */
-export async function renameSource(id: string, nombre: string): Promise<string | null> {
-  const trimmed = nombre.trim()
-  if (!trimmed) return 'El nombre no puede estar vacío'
+/** Fields the Fuentes tab lets you edit. Omitted keys are left untouched by
+ * the backend (its PATCH is presence-checked), so this is a real partial
+ * update — editing the nombre never resets `activo` or the zona bucket. */
+export type SourceEdit = {
+  nombre?: string
+  url?: string
+  /** Empty string clears the zona bucket; the backend recomputes `zona_norm`. */
+  zona?: string
+}
+
+/** Edits a source's nombre/url/zona. Returns an error message or null. */
+export async function updateSource(id: string, edit: SourceEdit): Promise<string | null> {
+  const body: SourceEdit = {}
+  if (edit.nombre !== undefined) {
+    const nombre = edit.nombre.trim()
+    if (!nombre) return 'El nombre no puede estar vacío'
+    body.nombre = nombre
+  }
+  if (edit.url !== undefined) {
+    const url = edit.url.trim()
+    if (!/^https?:\/\//.test(url)) return 'La URL debe empezar con http:// o https://'
+    body.url = url
+  }
+  if (edit.zona !== undefined) body.zona = edit.zona.trim()
+
+  if (Object.keys(body).length === 0) return null
 
   try {
     const res = await fetch(`${SOURCES_URL}/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nombre: trimmed }),
+      body: JSON.stringify(body),
     })
     const data = await res.json()
     if (data.error) return data.error as string
@@ -177,7 +198,7 @@ export function useManualSources() {
     }
   }, [])
 
-  return { sources, addSource, deleteSource, toggleSource, renameSource, loading }
+  return { sources, addSource, deleteSource, toggleSource, updateSource, loading }
 }
 
 // ── Zonas ────────────────────────────────────────────────────────────────────

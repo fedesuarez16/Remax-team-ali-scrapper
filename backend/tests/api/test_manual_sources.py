@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from app.services.zona import normalize_zona
+
 
 class _Res:
     def __init__(self, data) -> None:
@@ -296,6 +298,89 @@ async def test_patch_toggles_activo() -> None:
     assert resp.status_code == 200
     assert resp.json()['source']['activo'] is False
     assert fake_sb._store[0]['activo'] is False
+
+
+async def test_patch_updates_url() -> None:
+    existing = _row('Inmobiliaria Sur', 'https://inmosur.com.ar', minutes_ago=1)
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(
+            f'/manual-sources/{existing["id"]}', json={'url': 'https://www.inmosur.com.ar/venta'}
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()['source']['url'] == 'https://www.inmosur.com.ar/venta'
+
+
+async def test_patch_url_without_http_scheme_is_rejected() -> None:
+    existing = _row('Inmobiliaria Sur', 'https://inmosur.com.ar', minutes_ago=1)
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(f'/manual-sources/{existing["id"]}', json={'url': 'ftp://x.com'})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['source'] is None
+    assert 'error' in data
+    assert fake_sb._store[0]['url'] == 'https://inmosur.com.ar'
+
+
+async def test_patch_zona_recomputes_zona_norm() -> None:
+    """The zona bucket is matched on `zona_norm` (see list_manual_sources), so
+    editing `zona` without recomputing it would silently orphan the source."""
+    existing = _row('Inmobiliaria Sur', 'https://inmosur.com.ar', minutes_ago=1)
+    existing['zona'] = 'City Bell'
+    existing['zona_norm'] = normalize_zona('City Bell')
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(f'/manual-sources/{existing["id"]}', json={'zona': 'Gonnet'})
+
+    assert resp.status_code == 200
+    source = resp.json()['source']
+    assert source['zona'] == 'Gonnet'
+    assert source['zona_norm'] == normalize_zona('Gonnet')
+
+
+async def test_patch_blank_zona_clears_the_bucket() -> None:
+    existing = _row('Inmobiliaria Sur', 'https://inmosur.com.ar', minutes_ago=1)
+    existing['zona'] = 'City Bell'
+    existing['zona_norm'] = normalize_zona('City Bell')
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(f'/manual-sources/{existing["id"]}', json={'zona': '  '})
+
+    assert resp.status_code == 200
+    source = resp.json()['source']
+    assert source['zona'] is None
+    assert source['zona_norm'] is None
+
+
+async def test_patch_updates_nombre_url_and_zona_together() -> None:
+    existing = _row('Inmobiliaria Sur', 'https://inmosur.com.ar', minutes_ago=1)
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(f'/manual-sources/{existing["id"]}', json={
+            'nombre': 'Inmo Sur', 'url': 'https://inmosur.com.ar/ventas', 'zona': 'Gonnet',
+        })
+
+    assert resp.status_code == 200
+    source = resp.json()['source']
+    assert source['nombre'] == 'Inmo Sur'
+    assert source['url'] == 'https://inmosur.com.ar/ventas'
+    assert source['zona'] == 'Gonnet'
+    assert source['zona_norm'] == normalize_zona('Gonnet')
+
+
+async def test_patch_empty_url_is_rejected() -> None:
+    existing = _row('Inmobiliaria Sur', 'https://inmosur.com.ar', minutes_ago=1)
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(f'/manual-sources/{existing["id"]}', json={'url': '   '})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['source'] is None
+    assert 'error' in data
 
 
 async def test_patch_empty_nombre_is_rejected() -> None:

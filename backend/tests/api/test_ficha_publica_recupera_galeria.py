@@ -1,0 +1,131 @@
+"""La ficha pública `/p/{id}` tiene que curar su propia galería.
+
+`GET /api/v1/properties/{id}` es el ÚNICO endpoint por el que pasa la ficha
+compartible: la página pública sólo lee y renderiza `imagenes`, nunca llama al
+enrich. Por eso una ficha guardada con la galería parcial (importada antes de
+que el import consultara al parser del portal) se veía con 5 fotos de 20 y no
+había forma de que se arreglara sola — abrir el link no disparaba nada.
+
+Curarla acá es barato y se paga UNA vez: el gate `_gallery_looks_incomplete`
+sólo deja pasar las sospechosas, el primer escalón de la escalera es un GET
+gratis, y una vez persistidas las 20 el gate devuelve False para siempre.
+
+Lo que NO puede pasar es que la ficha deje de responder porque el portal está
+caído: la recuperación es un extra y cualquier fallo tiene que devolver la
+propiedad tal como está guardada.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from app.api.v1 import properties
+
+
+def _prop(**kw: Any) -> dict[str, Any]:
+    base = {
+        'id': 'p1',
+        'fuente': 'manual',
+        'url_origen': 'https://www.zonaprop.com.ar/propiedades/clasificado/x-58183410.html',
+        'imagenes': [f'vieja{i}.jpg' for i in range(5)],
+        'ficha_enriched': True,
+    }
+    base.update(kw)
+    return base
+
+
+class _Res:
+    def __init__(self, data): self.data = data
+
+
+def _sb(row: dict | None):
+    updates: list[dict] = []
+
+    class _Q:
+        def select(self, *a, **kw): return self
+        def eq(self, *a, **kw): return self
+        def limit(self, *a, **kw): return self
+        def update(self, payload):
+            updates.append(payload)
+            return self
+        async def execute(self): return _Res([row] if row else [])
+
+    class _Sb:
+        rows_updated = updates
+        def table(self, name): return _Q()
+
+    return _Sb()
+
+
+def _client(sb) -> AsyncClient:
+    app = FastAPI()
+    app.include_router(properties.router, prefix='/properties')
+    app.state.supabase = sb
+    return AsyncClient(transport=ASGITransport(app=app), base_url='http://test')
+
+
+@pytest.fixture
+def galeria_completa(monkeypatch):
+    """El portal contesta con las 20 fotos reales."""
+    llamadas: list[dict] = []
+
+    async def fake(prop: dict) -> list[str]:
+        llamadas.append(prop)
+        return [f'https://imgar.zonapropcdn.com/{i}.jpg' for i in range(20)]
+
+    monkeypatch.setattr(properties, '_fetch_full_gallery', fake)
+    return llamadas
+
+
+async def test_una_ficha_con_galeria_parcial_se_completa(galeria_completa) -> None:
+    sb = _sb(_prop())
+    async with _client(sb) as client:
+        resp = await client.get('/properties/p1')
+
+    assert resp.status_code == 200
+    assert len(resp.json()['property']['imagenes']) == 20
+
+
+async def test_la_galeria_recuperada_se_persiste(galeria_completa) -> None:
+    """Si no se guarda, cada visita a la ficha vuelve a pegarle al portal."""
+    sb = _sb(_prop())
+    async with _client(sb) as client:
+        await client.get('/properties/p1')
+
+    assert len(sb.rows_updated) == 1
+    assert len(sb.rows_updated[0]['imagenes']) == 20
+
+
+async def test_una_ficha_sana_no_toca_el_portal(galeria_completa) -> None:
+    """20 fotos ya guardadas: pedirle al portal otra vez es gasto puro."""
+    sb = _sb(_prop(imagenes=[f'ok{i}.jpg' for i in range(20)]))
+    async with _client(sb) as client:
+        resp = await client.get('/properties/p1')
+
+    assert galeria_completa == []
+    assert len(resp.json()['property']['imagenes']) == 20
+
+
+async def test_un_portal_caido_devuelve_la_ficha_igual(monkeypatch) -> None:
+    """La galería es un extra: si el portal explota, la ficha sigue abriendo."""
+    async def boom(prop: dict) -> list[str]:
+        raise RuntimeError('portal caído')
+
+    monkeypatch.setattr(properties, '_fetch_full_gallery', boom)
+    sb = _sb(_prop())
+    async with _client(sb) as client:
+        resp = await client.get('/properties/p1')
+
+    assert resp.status_code == 200
+    assert len(resp.json()['property']['imagenes']) == 5
+
+
+async def test_una_ficha_inexistente_sigue_dando_404(galeria_completa) -> None:
+    sb = _sb(None)
+    async with _client(sb) as client:
+        resp = await client.get('/properties/p1')
+
+    assert resp.status_code == 404

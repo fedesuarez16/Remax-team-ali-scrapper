@@ -10,6 +10,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 
 from app.core.database import chunk_for_in_filter
+from app.services.ficha import _fetch_full_gallery, _gallery_looks_incomplete
 from app.services.ficha import enrich_ficha as _enrich_ficha
 from app.services.importer import import_property_from_url as _import_property
 from app.services.geocode import backfill_state as _backfill_state
@@ -391,7 +392,19 @@ async def ficha_propio_stats(request: Request) -> dict[str, Any]:
 
 @router.get('/{property_id}')
 async def get_property(property_id: str, request: Request) -> dict[str, Any]:
-    """Fetch a single property by id — backs the shareable per-property ficha page."""
+    """Fetch a single property by id — backs the shareable per-property ficha page.
+
+    De paso RECUPERA la galería cuando la guardada está incompleta. Este es el
+    único endpoint por el que pasa la ficha pública: `/p/{id}` sólo lee y
+    renderiza `imagenes`, nunca llama al enrich. Sin esto, una ficha importada
+    antes de que el import consultara al parser del portal se quedaba con 5
+    fotos de 20 y NO había forma de que se arreglara sola — abrir el link no
+    disparaba nada y repegarlo tampoco, porque el import es idempotente.
+
+    Se paga una sola vez: `_gallery_looks_incomplete` deja pasar sólo las
+    sospechosas, el primer escalón de la escalera es un GET gratis, y una vez
+    persistidas las 20 el gate devuelve False para siempre.
+    """
     sb = request.app.state.supabase
     if sb is None:
         return {'property': None, 'error': 'Supabase no configurado'}
@@ -401,7 +414,33 @@ async def get_property(property_id: str, request: Request) -> dict[str, Any]:
         return {'property': None, 'error': str(e)}
     if not res.data:
         raise HTTPException(status_code=404, detail='Property not found')
-    return {'property': res.data[0]}
+
+    prop = res.data[0]
+    if _gallery_looks_incomplete(prop):
+        await _recuperar_galeria(prop, sb)
+    return {'property': prop}
+
+
+async def _recuperar_galeria(prop: dict[str, Any], sb: Any) -> None:
+    """Completar y persistir la galería. Muta ``prop['imagenes']`` in place.
+
+    NUNCA levanta: la galería es un extra y un portal caído no puede tumbar la
+    ficha compartida — el cliente que recibió el link tiene que verla igual,
+    aunque sea con las fotos que había.
+    """
+    try:
+        full = await _fetch_full_gallery(prop)
+    except Exception as exc:
+        logging.getLogger(__name__).warning('gallery recovery failed for %s: %s', prop.get('id'), exc)
+        return
+    if not full or full == (prop.get('imagenes') or []):
+        return
+    prop['imagenes'] = full
+    try:
+        await sb.table('properties').update({'imagenes': full}).eq('id', prop['id']).execute()
+    except Exception as exc:
+        # Se devuelve la galería completa igual: la próxima visita reintenta.
+        logging.getLogger(__name__).warning('gallery persist failed for %s: %s', prop.get('id'), exc)
 
 
 # Fields the ficha editor may overwrite. Everything else (id, fuente, url_origen,

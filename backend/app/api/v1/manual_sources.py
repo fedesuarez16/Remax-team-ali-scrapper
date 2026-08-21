@@ -101,12 +101,13 @@ async def create_manual_source(request: Request, body: dict) -> dict[str, Any]:
 
 @router.patch('/{source_id}')
 async def update_manual_source(request: Request, source_id: str, body: dict) -> dict[str, Any]:
-    """Rename a source and/or toggle it on/off. `activo=false` excludes it
-    from every future search — the fan-out only reads `.eq('activo', True)`
-    (see `_fetch_active_manual_sources` in app.graphs.extraction.nodes).
+    """Edit a source's nombre/url/zona and/or toggle it on/off. `activo=false`
+    excludes it from every future search — the fan-out only reads
+    `.eq('activo', True)` (see `_fetch_active_manual_sources` in
+    app.graphs.extraction.nodes).
 
-    Presence-checked (`'nombre' in body`) so a rename doesn't clobber `activo`
-    and vice versa — same convention as the saved-zones PATCH.
+    Presence-checked (`'nombre' in body`) so editing one field doesn't clobber
+    the others — same convention as the saved-zones PATCH.
     """
     sb = request.app.state.supabase
     if sb is None:
@@ -118,6 +119,18 @@ async def update_manual_source(request: Request, source_id: str, body: dict) -> 
         if not nombre:
             return {'source': None, 'error': 'nombre no puede estar vacío'}
         payload['nombre'] = nombre
+    if 'url' in body:
+        url = (body.get('url') or '').strip()
+        if not url.startswith(('http://', 'https://')):
+            return {'source': None, 'error': 'url debe empezar con http:// o https://'}
+        payload['url'] = url
+    if 'zona' in body:
+        # `zona_norm` is the key every zona-scoped query filters on, so it has
+        # to be rewritten alongside `zona` — otherwise the source silently
+        # stays in its old bucket. Blank clears both (standalone portal).
+        zona = (body.get('zona') or '').strip()
+        payload['zona'] = zona or None
+        payload['zona_norm'] = normalize_zona(zona) if zona else None
     if 'activo' in body:
         payload['activo'] = bool(body['activo'])
 
