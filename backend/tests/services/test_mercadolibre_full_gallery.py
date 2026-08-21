@@ -105,7 +105,7 @@ class TestDespachaPorHost:
     async def test_una_url_de_mercadolibre_usa_su_parser(self, monkeypatch) -> None:
         llamadas: list[str] = []
 
-        async def fake(url: str) -> list[str]:
+        async def fake(url: str, allow_escalation: bool = True) -> list[str]:
             llamadas.append(url)
             return [f'{_BASE}/foto-O.jpg']
 
@@ -114,7 +114,7 @@ class TestDespachaPorHost:
         assert llamadas == [_ML_URL]
 
     async def test_una_url_de_zonaprop_usa_su_parser(self, monkeypatch) -> None:
-        async def fake(url: str) -> list[str]:
+        async def fake(url: str, allow_escalation: bool = True) -> list[str]:
             return ['https://img.zonapropcdn.com/a.jpg']
 
         monkeypatch.setattr(ficha, '_zonaprop_gallery', fake)
@@ -132,7 +132,7 @@ class TestFichaPropioLlegaAlParser:
     async def test_fuente_manual_despacha_por_host(self, monkeypatch) -> None:
         """Regresión: `fuente='manual'` caía en el `return []` y toda ficha
         propia de MercadoLibre se quedaba con las fotos del HTML de escritorio."""
-        async def fake(url: str) -> list[str]:
+        async def fake(url: str, allow_escalation: bool = True) -> list[str]:
             return [f'{_BASE}/completa-O.jpg']
 
         monkeypatch.setattr(ficha, '_mercadolibre_gallery', fake)
@@ -258,7 +258,7 @@ class TestLasFichasViejasSeCuran:
     ) -> None:
         """Un aviso de ML que de verdad tiene 5 fotos: el reintento cuesta UN
         GET gratis y no toca la base, así que no se paga dos veces."""
-        async def fake(url: str) -> list[str]:
+        async def fake(url: str, allow_escalation: bool = True) -> list[str]:
             return [f'{_BASE}/f{i}.jpg' for i in range(5)]
 
         monkeypatch.setattr(ficha, '_mercadolibre_gallery', fake)
@@ -283,7 +283,7 @@ class TestLasFichasViejasSeCuran:
         assert updates == []
 
     async def test_reintentar_y_encontrar_las_28_las_persiste(self, monkeypatch) -> None:
-        async def fake(url: str) -> list[str]:
+        async def fake(url: str, allow_escalation: bool = True) -> list[str]:
             return [f'{_BASE}/f{i}.jpg' for i in range(28)]
 
         monkeypatch.setattr(ficha, '_mercadolibre_gallery', fake)

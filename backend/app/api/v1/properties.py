@@ -403,7 +403,8 @@ async def get_property(property_id: str, request: Request) -> dict[str, Any]:
 
     Se paga una sola vez: `_gallery_looks_incomplete` deja pasar sólo las
     sospechosas, el primer escalón de la escalera es un GET gratis, y una vez
-    persistidas las 20 el gate devuelve False para siempre.
+    persistidas las 20 el gate devuelve False para siempre. Y con techo: ver
+    `_recuperar_galeria`.
     """
     sb = request.app.state.supabase
     if sb is None:
@@ -421,15 +422,34 @@ async def get_property(property_id: str, request: Request) -> dict[str, Any]:
     return {'property': prop}
 
 
+# Techo de tiempo para completar la galería dentro del request de la ficha
+# pública. El rung barato (httpx) resuelve en ~1-2s contra los tres portales
+# con parser propio; más que esto es un portal que no está contestando y el
+# visitante no tiene por qué esperarlo.
+_GALERIA_TIMEOUT = 6.0
+
+
 async def _recuperar_galeria(prop: dict[str, Any], sb: Any) -> None:
     """Completar y persistir la galería. Muta ``prop['imagenes']`` in place.
 
+    Dos límites duros, los dos aprendidos rompiendo producción — la ficha
+    pública se quedó cargando >90s mientras el resto de la API contestaba en 1s:
+
+    1. `allow_escalation=False`: sólo el escalón barato. El rung 2 levanta un
+       Chromium y el rung 3 dispara un actor de Apify, que tarda MINUTOS y
+       cuesta plata. Nada de eso puede correr dentro de un request.
+    2. `_GALERIA_TIMEOUT`: aun el escalón barato tiene techo. Si el portal no
+       contesta a tiempo, la ficha sale con lo que hay guardado.
+
     NUNCA levanta: la galería es un extra y un portal caído no puede tumbar la
     ficha compartida — el cliente que recibió el link tiene que verla igual,
-    aunque sea con las fotos que había.
+    aunque sea con las fotos que había. Un intento cortado no escribe nada, así
+    que la próxima visita reintenta.
     """
     try:
-        full = await _fetch_full_gallery(prop)
+        full = await asyncio.wait_for(
+            _fetch_full_gallery(prop, allow_escalation=False), timeout=_GALERIA_TIMEOUT
+        )
     except Exception as exc:
         logging.getLogger(__name__).warning('gallery recovery failed for %s: %s', prop.get('id'), exc)
         return

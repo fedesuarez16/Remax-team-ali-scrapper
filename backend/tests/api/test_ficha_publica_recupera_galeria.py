@@ -72,7 +72,7 @@ def galeria_completa(monkeypatch):
     """El portal contesta con las 20 fotos reales."""
     llamadas: list[dict] = []
 
-    async def fake(prop: dict) -> list[str]:
+    async def fake(prop: dict, allow_escalation: bool = True) -> list[str]:
         llamadas.append(prop)
         return [f'https://imgar.zonapropcdn.com/{i}.jpg' for i in range(20)]
 
@@ -111,7 +111,7 @@ async def test_una_ficha_sana_no_toca_el_portal(galeria_completa) -> None:
 
 async def test_un_portal_caido_devuelve_la_ficha_igual(monkeypatch) -> None:
     """La galería es un extra: si el portal explota, la ficha sigue abriendo."""
-    async def boom(prop: dict) -> list[str]:
+    async def boom(prop: dict, allow_escalation: bool = True) -> list[str]:
         raise RuntimeError('portal caído')
 
     monkeypatch.setattr(properties, '_fetch_full_gallery', boom)
@@ -129,3 +129,56 @@ async def test_una_ficha_inexistente_sigue_dando_404(galeria_completa) -> None:
         resp = await client.get('/properties/p1')
 
     assert resp.status_code == 404
+
+
+# ── El presupuesto de tiempo ─────────────────────────────────────────────────
+#
+# REGRESIÓN REAL, medida contra producción: la ficha pública se quedaba
+# cargando para siempre (>90s sin respuesta) mientras el listado contestaba en
+# 0.97s. La causa: recuperar la galería corría la escalera COMPLETA dentro del
+# request — rung 2 levanta un Chromium headless y rung 3 dispara un actor de
+# Apify, que tarda minutos. I/O sin techo en el camino caliente de una página
+# que ya está compartida con un cliente.
+#
+# La ficha pública tiene UNA obligación: responder. La galería es un extra.
+
+
+async def test_la_ficha_responde_aunque_el_portal_tarde_una_eternidad(monkeypatch) -> None:
+    import asyncio
+
+    async def eterno(prop, **kw):
+        await asyncio.sleep(30)
+        return ['nunca-llega.jpg']
+
+    monkeypatch.setattr(properties, '_fetch_full_gallery', eterno)
+    monkeypatch.setattr(properties, '_GALERIA_TIMEOUT', 0.05)
+
+    sb = _sb(_prop())
+    async with _client(sb) as client:
+        resp = await asyncio.wait_for(client.get('/properties/p1'), timeout=5)
+
+    assert resp.status_code == 200
+    assert len(resp.json()['property']['imagenes']) == 5, 'devuelve lo guardado'
+    assert sb.rows_updated == [], 'un intento cortado no escribe nada'
+
+
+async def test_la_ficha_publica_no_paga_browser_ni_actor(monkeypatch) -> None:
+    """Rung 2 (Chromium) y rung 3 (actor de Apify) están prohibidos acá.
+
+    Un GET de httpx alcanza para los tres portales con parser propio. Escalar
+    en el camino caliente es esperar minutos y, en el rung 3, pagar plata — por
+    cada visita a una ficha compartida.
+    """
+    visto: dict = {}
+
+    async def espia(prop, allow_escalation=True):
+        visto['allow_escalation'] = allow_escalation
+        return [f'ok{i}.jpg' for i in range(20)]
+
+    monkeypatch.setattr(properties, '_fetch_full_gallery', espia)
+
+    sb = _sb(_prop())
+    async with _client(sb) as client:
+        await client.get('/properties/p1')
+
+    assert visto['allow_escalation'] is False

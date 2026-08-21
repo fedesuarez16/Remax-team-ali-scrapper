@@ -187,7 +187,7 @@ def _parse_mercadolibre_pictures(html: str) -> list[str]:
     return out
 
 
-async def _mercadolibre_gallery(url_origen: str) -> list[str]:
+async def _mercadolibre_gallery(url_origen: str, allow_escalation: bool = True) -> list[str]:
     """Full photo gallery from the listing page HTML.
 
     NOT the official API: `api.mercadolibre.com/items/{id}` answers **403** even
@@ -206,7 +206,8 @@ async def _mercadolibre_gallery(url_origen: str) -> list[str]:
     comentario de `_MOBILE_HEADERS`.
     """
     return await _gallery_via_ladder(
-        url_origen, _parse_mercadolibre_pictures, headers=_MOBILE_HEADERS
+        url_origen, _parse_mercadolibre_pictures,
+        headers=_MOBILE_HEADERS, allow_escalation=allow_escalation,
     )
 
 
@@ -286,6 +287,7 @@ async def _gallery_via_ladder(
     url_origen: str,
     parser: Callable[[str], list[str]],
     headers: dict[str, str] | None = None,
+    allow_escalation: bool = True,
 ) -> list[str]:
     """Fetch a listing's HTML and parse its gallery, escalating only on a block.
 
@@ -312,6 +314,12 @@ async def _gallery_via_ladder(
     if html and (imgs := parser(html)):
         return imgs
 
+    # `allow_escalation=False` corta acá: los escalones 2 y 3 tardan segundos y
+    # minutos respectivamente, así que no pueden correr dentro de un request que
+    # tiene que contestar ya (la ficha pública). Ver `_recuperar_galeria`.
+    if not allow_escalation:
+        return []
+
     from app.services.apify import fetch_page_html_via_actor, render_page_html
 
     rendered = await render_page_html(url_origen, user_agent=(headers or {}).get('User-Agent'))
@@ -322,7 +330,7 @@ async def _gallery_via_ladder(
     return parser(via_actor) if via_actor else []
 
 
-async def _zonaprop_gallery(url_origen: str) -> list[str]:
+async def _zonaprop_gallery(url_origen: str, allow_escalation: bool = True) -> list[str]:
     """Full ZonaProp gallery from the detail page, escalating past a WAF block.
 
     ZonaProp serves complete HTML (gallery embedded as JSON) to browser-like
@@ -330,7 +338,9 @@ async def _zonaprop_gallery(url_origen: str) -> list[str]:
     ladder then falls through to a headless render and, last, an Apify actor.
     A stale listing simply parses to [].
     """
-    return await _gallery_via_ladder(url_origen, _parse_zonaprop_pictures)
+    return await _gallery_via_ladder(
+        url_origen, _parse_zonaprop_pictures, allow_escalation=allow_escalation
+    )
 
 
 # Portales con parser propio, por host. La clave es un fragmento del dominio
@@ -339,7 +349,7 @@ async def _zonaprop_gallery(url_origen: str) -> list[str]:
 _PORTAL_HOSTS = ('mercadolibre', 'zonaprop', 'remax')
 
 
-async def portal_gallery_from_url(url: str) -> list[str]:
+async def portal_gallery_from_url(url: str, allow_escalation: bool = True) -> list[str]:
     """La galería completa de un aviso, deducida por el HOST de la URL.
 
     Existe porque el despacho por `fuente` no alcanza: Ficha Propio guarda todo
@@ -354,16 +364,18 @@ async def portal_gallery_from_url(url: str) -> list[str]:
     if not host:
         return []
     if 'mercadolibre' in host:
-        return await _mercadolibre_gallery(url)
+        return await _mercadolibre_gallery(url, allow_escalation)
     if 'zonaprop' in host:
-        return await _zonaprop_gallery(url)
+        return await _zonaprop_gallery(url, allow_escalation)
     if 'remax' in host:
         from app.services.apify import remax_gallery_from_url
         return await remax_gallery_from_url(url)
     return []
 
 
-async def _fetch_full_gallery(prop: dict[str, Any]) -> list[str]:
+async def _fetch_full_gallery(
+    prop: dict[str, Any], allow_escalation: bool = True
+) -> list[str]:
     """Recover the complete photo gallery from the original listing.
 
     Source-aware and verified against real data:
@@ -382,9 +394,9 @@ async def _fetch_full_gallery(prop: dict[str, Any]) -> list[str]:
     fuente = (prop.get('fuente') or '').lower()
     url_origen = prop.get('url_origen') or ''
     if fuente == 'zonaprop':
-        return await _zonaprop_gallery(url_origen)
+        return await _zonaprop_gallery(url_origen, allow_escalation)
     if fuente == 'mercadolibre':
-        return await _mercadolibre_gallery(url_origen)
+        return await _mercadolibre_gallery(url_origen, allow_escalation)
     if fuente in ('googlemaps', 'argenprop', 'remax') and url_origen.startswith('http'):
         from app.services.apify import harvest_page_images
         galleries = await harvest_page_images([url_origen])
@@ -392,7 +404,7 @@ async def _fetch_full_gallery(prop: dict[str, Any]) -> list[str]:
     # `fuente` no identifica al portal (típicamente 'manual', que es como Ficha
     # Propio guarda TODO lo que importa). La URL sí: se despacha por host.
     if fuente not in ('instagram',) and url_origen.startswith('http'):
-        return await portal_gallery_from_url(url_origen)
+        return await portal_gallery_from_url(url_origen, allow_escalation)
     return []
 
 
