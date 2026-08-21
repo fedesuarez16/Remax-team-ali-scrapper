@@ -5,6 +5,7 @@ import logging
 import re
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -24,6 +25,20 @@ _BROWSER_HEADERS = {
     ),
     'Accept-Language': 'es-AR,es;q=0.9',
 }
+
+_MOBILE_UA = (
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 '
+    '(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+)
+# MercadoLibre sirve DOS markups distintos para la misma URL y sólo el de
+# celular trae la galería entera. Relevado en vivo sobre 7 avisos de inmuebles:
+# con UA de escritorio siempre 5 fotos (y el alt diciendo "Imagen 1 de 28"),
+# con UA de iPhone las 28. El VIP nuevo de inmuebles arma un mosaico de 5 y pide
+# el resto por JS al abrir el visor; el carrusel mobile ya viene entero en el
+# HTML servido. Verificado con Playwright que ni el click en "28 fotos", ni el
+# scroll, ni las flechas disparan el XHR que falta — headless no hidrata esa
+# parte. O sea: el arreglo es un header, no más browser ni más Apify.
+_MOBILE_HEADERS = {**_BROWSER_HEADERS, 'User-Agent': _MOBILE_UA}
 # ZonaProp embeds its gallery as `'pictures': [ {..} ]` (single OR double quoted
 # key). Each picture object carries several resolutions; we take the largest.
 _ZP_PICTURES_KEY = re.compile(r"""["']pictures["']\s*:\s*\[""")
@@ -185,8 +200,14 @@ async def _mercadolibre_gallery(url_origen: str) -> list[str]:
 
     The listing page itself still serves 200 to browser-like headers, which is
     the same route (and same escalation ladder) `_zonaprop_gallery` takes.
+
+    Se pide con `_MOBILE_HEADERS`: la misma URL con UA de escritorio devuelve
+    sólo las 5 fotos del mosaico, con UA de celular la galería completa. Ver el
+    comentario de `_MOBILE_HEADERS`.
     """
-    return await _gallery_via_ladder(url_origen, _parse_mercadolibre_pictures)
+    return await _gallery_via_ladder(
+        url_origen, _parse_mercadolibre_pictures, headers=_MOBILE_HEADERS
+    )
 
 
 def _parse_zonaprop_pictures(html: str) -> list[str]:
@@ -233,7 +254,9 @@ def _parse_zonaprop_pictures(html: str) -> list[str]:
     return out
 
 
-async def _fetch_listing_html(url_origen: str) -> tuple[bool, str | None]:
+async def _fetch_listing_html(
+    url_origen: str, headers: dict[str, str] | None = None
+) -> tuple[bool, str | None]:
     """Browser-headed GET of a listing page — the cheap first rung of the ladder.
 
     Returns ``(gone, html)``:
@@ -248,7 +271,7 @@ async def _fetch_listing_html(url_origen: str) -> tuple[bool, str | None]:
         return False, None
     try:
         async with httpx.AsyncClient(
-            timeout=20, headers=_BROWSER_HEADERS, follow_redirects=True
+            timeout=20, headers=headers or _BROWSER_HEADERS, follow_redirects=True
         ) as client:
             resp = await client.get(url_origen)
             if resp.status_code in (404, 410):
@@ -260,7 +283,9 @@ async def _fetch_listing_html(url_origen: str) -> tuple[bool, str | None]:
 
 
 async def _gallery_via_ladder(
-    url_origen: str, parser: Callable[[str], list[str]]
+    url_origen: str,
+    parser: Callable[[str], list[str]],
+    headers: dict[str, str] | None = None,
 ) -> list[str]:
     """Fetch a listing's HTML and parse its gallery, escalating only on a block.
 
@@ -272,11 +297,16 @@ async def _gallery_via_ladder(
 
     A 404/410 (listing gone) short-circuits to [] with NO escalation. Each rung
     reuses the SAME `parser`, so the escalation is source-agnostic.
+
+    `headers` viaja por TODA la escalera, no sólo por el primer escalón: si el
+    portal sirve markup distinto según el User-Agent (MercadoLibre), un rung 2
+    que renderiza con otro UA devolvería una galería recortada y el llamador no
+    tendría cómo notar la diferencia.
     """
     if not url_origen:
         return []
 
-    gone, html = await _fetch_listing_html(url_origen)
+    gone, html = await _fetch_listing_html(url_origen, headers)
     if gone:
         return []
     if html and (imgs := parser(html)):
@@ -284,7 +314,7 @@ async def _gallery_via_ladder(
 
     from app.services.apify import fetch_page_html_via_actor, render_page_html
 
-    rendered = await render_page_html(url_origen)
+    rendered = await render_page_html(url_origen, user_agent=(headers or {}).get('User-Agent'))
     if rendered and (imgs := parser(rendered)):
         return imgs
 
@@ -301,6 +331,36 @@ async def _zonaprop_gallery(url_origen: str) -> list[str]:
     A stale listing simply parses to [].
     """
     return await _gallery_via_ladder(url_origen, _parse_zonaprop_pictures)
+
+
+# Portales con parser propio, por host. La clave es un fragmento del dominio
+# porque MercadoLibre reparte los avisos entre subdominios por tipo de
+# propiedad (`casa.`, `departamento.`, `ph.`, `terreno.`, `articulo.`).
+_PORTAL_HOSTS = ('mercadolibre', 'zonaprop', 'remax')
+
+
+async def portal_gallery_from_url(url: str) -> list[str]:
+    """La galería completa de un aviso, deducida por el HOST de la URL.
+
+    Existe porque el despacho por `fuente` no alcanza: Ficha Propio guarda todo
+    con `fuente='manual'`, así que una ficha importada de MercadoLibre nunca
+    llegaba a su parser y se quedaba con lo que hubiera en el HTML genérico.
+    La URL, en cambio, siempre dice de qué portal salió.
+
+    Devuelve [] para un portal sin parser propio — ahí el harvest genérico del
+    llamador sigue siendo la mejor opción disponible.
+    """
+    host = urlparse(url or '').netloc.lower()
+    if not host:
+        return []
+    if 'mercadolibre' in host:
+        return await _mercadolibre_gallery(url)
+    if 'zonaprop' in host:
+        return await _zonaprop_gallery(url)
+    if 'remax' in host:
+        from app.services.apify import remax_gallery_from_url
+        return await remax_gallery_from_url(url)
+    return []
 
 
 async def _fetch_full_gallery(prop: dict[str, Any]) -> list[str]:
@@ -329,7 +389,17 @@ async def _fetch_full_gallery(prop: dict[str, Any]) -> list[str]:
         from app.services.apify import harvest_page_images
         galleries = await harvest_page_images([url_origen])
         return galleries.get(url_origen, [])
+    # `fuente` no identifica al portal (típicamente 'manual', que es como Ficha
+    # Propio guarda TODO lo que importa). La URL sí: se despacha por host.
+    if fuente not in ('instagram',) and url_origen.startswith('http'):
+        return await portal_gallery_from_url(url_origen)
     return []
+
+
+# El mosaico de escritorio del VIP de inmuebles de MercadoLibre trae SIEMPRE 5
+# fotos, diga lo que diga el aviso. Por eso "ficha de ML con 5 o menos" es la
+# huella exacta de una galería traída con el UA equivocado.
+_ML_MOSAICO = 5
 
 
 def _gallery_looks_incomplete(prop: dict[str, Any]) -> bool:
@@ -339,8 +409,19 @@ def _gallery_looks_incomplete(prop: dict[str, Any]) -> bool:
     holds 15-34. A ficha stuck on <=1 image got its gallery fetch swallowed by a
     transient portal failure (WAF challenge, timeout) at scrape time — worth one
     re-attempt. A healthy gallery reports False, so repeat ficha opens cost nothing.
+
+    Caso aparte, MercadoLibre: las fichas guardadas antes de que la galería se
+    pidiera con UA mobile tienen exactamente las 5 del mosaico de escritorio y
+    ya vienen marcadas como enriquecidas, así que sin esta regla quedarían
+    clavadas en 5 de 28 para siempre. El reintento se auto-limita: si el aviso
+    de verdad tiene 5 fotos, el fetch devuelve las mismas y `_enrich_gallery`
+    corta antes de escribir en la base. Cuesta un GET gratis, no un run pago.
     """
-    return len(prop.get('imagenes') or []) <= 1
+    imagenes = prop.get('imagenes') or []
+    if len(imagenes) <= 1:
+        return True
+    host = urlparse(prop.get('url_origen') or '').netloc.lower()
+    return 'mercadolibre' in host and len(imagenes) <= _ML_MOSAICO
 
 
 async def _enrich_gallery(prop: dict[str, Any], sb: Any) -> None:

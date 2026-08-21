@@ -77,10 +77,10 @@ async def test_healthy_gallery_is_never_refetched(monkeypatch) -> None:
 async def test_ladder_stops_at_httpx_when_it_yields_images(monkeypatch) -> None:
     calls = {'render': 0, 'actor': 0}
 
-    async def fetch_html(url):
+    async def fetch_html(url, headers=None):
         return False, 'a,b,c'  # (gone, html)
 
-    async def render(url):
+    async def render(url, user_agent=None):
         calls['render'] += 1
         return 'x'
 
@@ -100,10 +100,10 @@ async def test_ladder_stops_at_httpx_when_it_yields_images(monkeypatch) -> None:
 async def test_ladder_escalates_to_render_when_httpx_blocked(monkeypatch) -> None:
     calls = {'actor': 0}
 
-    async def fetch_html(url):
+    async def fetch_html(url, headers=None):
         return False, None  # blocked (403/429), not gone → escalate
 
-    async def render(url):
+    async def render(url, user_agent=None):
         return 'r1,r2'
 
     async def actor(url):
@@ -119,10 +119,10 @@ async def test_ladder_escalates_to_render_when_httpx_blocked(monkeypatch) -> Non
 
 
 async def test_ladder_falls_through_to_apify_only_as_last_resort(monkeypatch) -> None:
-    async def fetch_html(url):
+    async def fetch_html(url, headers=None):
         return False, None
 
-    async def render(url):
+    async def render(url, user_agent=None):
         return None  # even headless Chromium got challenged
 
     async def actor(url):
@@ -138,10 +138,10 @@ async def test_ladder_falls_through_to_apify_only_as_last_resort(monkeypatch) ->
 async def test_ladder_does_not_escalate_on_gone_listing(monkeypatch) -> None:
     calls = {'render': 0, 'actor': 0}
 
-    async def fetch_html(url):
+    async def fetch_html(url, headers=None):
         return True, None  # 404/410 — the listing was taken down
 
-    async def render(url):
+    async def render(url, user_agent=None):
         calls['render'] += 1
         return 'r'
 
@@ -159,10 +159,10 @@ async def test_ladder_does_not_escalate_on_gone_listing(monkeypatch) -> None:
 
 
 async def test_ladder_returns_empty_when_every_rung_fails(monkeypatch) -> None:
-    async def fetch_html(url):
+    async def fetch_html(url, headers=None):
         return False, None
 
-    async def none(url):
+    async def none(url, user_agent=None):
         return None
 
     monkeypatch.setattr(ficha, '_fetch_listing_html', fetch_html)

@@ -2098,13 +2098,16 @@ _BROWSER_UA = (
 )
 
 
-async def render_page_html(url: str) -> str | None:
+async def render_page_html(url: str, user_agent: str | None = None) -> str | None:
     """Load one page in headless Chromium and return its rendered HTML.
 
     Gets past the plain-UA blocks and the JS-hydration walls that make httpx
     come back empty. NOT a guaranteed WAF bypass: Argenprop's AWS WAF Bot
     Control challenges default headless Chromium too (see the module header),
     which is exactly why the caller checks the returned HTML before trusting it.
+
+    `user_agent` lo fija el llamador cuando el portal sirve markup distinto
+    según el dispositivo (MercadoLibre manda 5 fotos al desktop y 28 al mobile).
     """
     try:
         from playwright.async_api import async_playwright
@@ -2116,7 +2119,7 @@ async def render_page_html(url: str) -> str | None:
             browser = await pw.chromium.launch(args=['--disable-blink-features=AutomationControlled'])
             try:
                 context = await browser.new_context(
-                    user_agent=_BROWSER_UA,
+                    user_agent=user_agent or _BROWSER_UA,
                     locale='es-AR',
                     viewport={'width': 1440, 'height': 900},
                 )

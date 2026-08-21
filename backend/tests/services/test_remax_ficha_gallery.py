@@ -162,14 +162,17 @@ async def test_the_import_prefers_the_portal_api_gallery(
 
     monkeypatch.setattr(importer, '_fetch_page', fake_fetch)
     monkeypatch.setattr(importer, '_extract_llm', fake_llm)
-    monkeypatch.setattr(importer, 'remax_gallery_from_url', fake_gallery)
+    monkeypatch.setattr(importer, 'portal_gallery_from_url', fake_gallery)
     monkeypatch.setattr(importer, 'harvest_page_images', fake_harvest)
     monkeypatch.setattr(importer, 'record_llm_usage', fake_usage)
 
     sb = _SB()
     await importer.import_property_from_url(sb, _URL)
     saved = sb.rows[0]['imagenes']
-    assert len(saved) == 20, 'el modelo topea la galería en 20'
+    # El tope era 20 y recortaba avisos reales (RE/MAX llega a 37, MercadoLibre
+    # a 28). Existe para que una galería absurda no infle la fila, no para podar
+    # avisos normales, así que ahora son 40 y estas 37 entran enteras.
+    assert len(saved) == 37, 'una galería real no se recorta'
     assert saved[0] == 'api-foto-0.jpg'
     assert harvested['calls'] == 0, 'no hace falta el harvest headless'
 
@@ -189,7 +192,7 @@ async def test_a_portal_without_api_still_falls_back_to_harvest(
 
     monkeypatch.setattr(importer, '_fetch_page', fake_fetch)
     monkeypatch.setattr(importer, '_extract_llm', fake_llm)
-    monkeypatch.setattr(importer, 'remax_gallery_from_url', no_api)
+    monkeypatch.setattr(importer, 'portal_gallery_from_url', no_api)
     monkeypatch.setattr(importer, 'harvest_page_images', fake_harvest)
     monkeypatch.setattr(importer, 'record_llm_usage', fake_usage)
 

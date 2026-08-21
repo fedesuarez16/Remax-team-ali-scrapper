@@ -24,9 +24,9 @@ from app.services.apify import (
     _extract_images_from_html,
     fetch_page_html_via_actor,
     harvest_page_images,
-    remax_gallery_from_url,
     render_page_html,
 )
+from app.services.ficha import portal_gallery_from_url
 from app.services.llm_costs import SCOPE_FICHA_PROPIO, record_llm_usage
 from app.services.zona import normalize_address
 
@@ -82,6 +82,11 @@ _FICHA_SYSTEM_PROMPT = (
 # Under this many httpx-parsed images the gallery is likely JS-rendered and a
 # headless pass is worth it (same threshold as apify._GALLERY_MIN_IMGS).
 _MIN_GALLERY = 4
+
+# Tope de fotos que se guardan por ficha. Era 20 y recortaba avisos reales: los
+# de MercadoLibre llegan a 28 y los de RE/MAX a 37. El tope existe para que un
+# portal con una galería absurda no infle la fila, no para podar avisos normales.
+_MAX_IMAGENES = 40
 
 
 # ── Fetch ladder: httpx → Playwright local → actor de Apify ───────────────────
@@ -245,11 +250,14 @@ async def import_property_from_url(sb: Any, url: str) -> dict[str, Any]:
     if not data:
         raise RuntimeError('No se encontró una propiedad en esa página')
 
-    # Portales con API oficial primero: sirven la galería COMPLETA y exacta, sin
-    # browser ni adivinanzas. RE/MAX es una SPA de Angular y su HTML trae una
-    # sola foto (la del og:image), así que sin este paso la ficha nace con 1 de
-    # 37. Mismo criterio que `ficha._mercadolibre_gallery`.
-    portal_gallery = await remax_gallery_from_url(url)
+    # El parser propio del portal primero: sabe dónde vive la galería COMPLETA,
+    # el harvest genérico sólo junta los `<img>` que haya en el HTML. RE/MAX es
+    # una SPA de Angular y su HTML trae una sola foto (la del og:image), así que
+    # sin esto la ficha nace con 1 de 37; MercadoLibre server-rendea 5 de 28 al
+    # UA de escritorio y su parser pide el markup mobile, que las trae todas.
+    # Se despacha por HOST y no por `fuente` porque acá `fuente` todavía no
+    # existe — y cuando exista va a ser 'manual', que no dice de qué portal es.
+    portal_gallery = await portal_gallery_from_url(url)
     if len(portal_gallery) > len(images):
         images = portal_gallery
 
@@ -283,7 +291,7 @@ async def import_property_from_url(sb: Any, url: str) -> dict[str, Any]:
         m2_total=data.get('m2'),
         antiguedad=data.get('antiguedad'),
         amenities=data.get('amenities') or [],
-        imagenes=images[:20],
+        imagenes=images[:_MAX_IMAGENES],
         fuente='manual',
         url_origen=url,
         confianza_extraccion=min(1.0, filled / 6),
