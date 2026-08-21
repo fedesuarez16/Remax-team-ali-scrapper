@@ -1,12 +1,50 @@
 from __future__ import annotations
 
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Request
 
 from app.services.zona import normalize_zona
 
 router = APIRouter()
+
+# A paste is a hand-curated list, not an import job. The cap keeps one request
+# (and its dedupe read) bounded instead of letting a stray paste stall the API.
+MAX_BULK_URLS = 500
+
+# URLs pasted in bulk arrive one-per-line, but a copy from a spreadsheet or a
+# chat message can also be comma- or space-separated.
+_URL_SEPARATORS = re.compile(r'[\s,;]+')
+
+
+def _canonical_url(url: str) -> str:
+    """Dedupe key: the same page pasted with and without a trailing slash is
+    one source, not two. Only the trailing slash is normalized — query strings
+    and casing can be load-bearing on portal URLs, so they stay untouched.
+    """
+    return url.rstrip('/')
+
+
+def _derive_nombre(url: str) -> str:
+    """Best-effort label for a URL pasted without one.
+
+    Host plus last path segment: pasting 70 RE/MAX office links would otherwise
+    produce 70 rows all named 'remax.com.ar'. Falls back to the raw URL if it
+    has no parseable host. The user can rename it afterwards via PATCH.
+    """
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().removeprefix('www.')
+    if not host:
+        return url[:120]
+
+    segments = [s for s in parsed.path.split('/') if s]
+    if not segments:
+        return host
+
+    last = segments[-1].split('.')[0] if '.' in segments[-1] else segments[-1]
+    return f'{host}/{last}'[:120] if last else host
 
 
 @router.get('')
@@ -97,6 +135,73 @@ async def create_manual_source(request: Request, body: dict) -> dict[str, Any]:
         return {'source': source}
     except Exception as e:
         return {'source': None, 'error': str(e)}
+
+
+@router.post('/bulk')
+async def bulk_create_manual_sources(request: Request, body: dict) -> dict[str, Any]:
+    """Register many URLs at once, one source per URL, no nombre and no zona.
+
+    `urls` takes either raw pasted text (newline/comma/space separated) or a
+    list. Each row gets a nombre derived from its URL — the list UI and the
+    aria-labels need something to show — and lands with no zona, so it is only
+    consulted by unscoped searches until someone files it via PATCH.
+
+    Partial success is the norm: invalid and already-registered URLs are
+    reported back instead of aborting the batch.
+    """
+    sb = request.app.state.supabase
+    if sb is None:
+        return {'agregadas': 0, 'duplicadas': [], 'invalidas': [], 'error': 'Supabase no configurado'}
+
+    raw = body.get('urls')
+    if isinstance(raw, list):
+        candidates = [str(u).strip() for u in raw]
+    else:
+        candidates = _URL_SEPARATORS.split(str(raw or ''))
+    candidates = [c for c in (c.strip() for c in candidates) if c]
+
+    if not candidates:
+        return {'agregadas': 0, 'duplicadas': [], 'invalidas': [], 'error': 'No pegaste ninguna URL'}
+    if len(candidates) > MAX_BULK_URLS:
+        return {
+            'agregadas': 0, 'duplicadas': [], 'invalidas': [],
+            'error': f'Máximo {MAX_BULK_URLS} URLs por vez (pegaste {len(candidates)})',
+        }
+
+    invalidas = [c for c in candidates if not c.startswith(('http://', 'https://'))]
+    validas = [c for c in candidates if c.startswith(('http://', 'https://'))]
+
+    try:
+        res = await sb.table('manual_sources').select('url').execute()
+        ya_cargadas = {_canonical_url(r['url']) for r in (res.data or []) if r.get('url')}
+    except Exception as e:
+        return {'agregadas': 0, 'duplicadas': [], 'invalidas': invalidas, 'error': str(e)}
+
+    duplicadas: list[str] = []
+    nuevas: list[dict[str, Any]] = []
+    vistas: set[str] = set()
+    for url in validas:
+        key = _canonical_url(url)
+        if key in ya_cargadas or key in vistas:
+            duplicadas.append(url)
+            continue
+        vistas.add(key)
+        nuevas.append({
+            'nombre': _derive_nombre(url),
+            'url': url,
+            'zona': None,
+            'zona_norm': None,
+        })
+
+    if not nuevas:
+        return {'agregadas': 0, 'duplicadas': duplicadas, 'invalidas': invalidas}
+
+    try:
+        await sb.table('manual_sources').insert(nuevas).execute()
+    except Exception as e:
+        return {'agregadas': 0, 'duplicadas': duplicadas, 'invalidas': invalidas, 'error': str(e)}
+
+    return {'agregadas': len(nuevas), 'duplicadas': duplicadas, 'invalidas': invalidas}
 
 
 @router.patch('/{source_id}')

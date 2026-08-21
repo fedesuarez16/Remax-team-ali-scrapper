@@ -1,7 +1,24 @@
 'use client'
 import { useState } from 'react'
-import { Building2, Check, Globe, Layers, Loader2, MapPin, Pencil, Plus, Trash2, X } from 'lucide-react'
-import { useManualSources, useSourceZonas, type ManualSource } from '@/hooks/useManualSources'
+import {
+  Building2,
+  Check,
+  Globe,
+  Layers,
+  ListPlus,
+  Loader2,
+  MapPin,
+  Pencil,
+  Plus,
+  Trash2,
+  X,
+} from 'lucide-react'
+import {
+  useManualSources,
+  useSourceZonas,
+  type BulkResult,
+  type ManualSource,
+} from '@/hooks/useManualSources'
 import { usePortals } from '@/hooks/usePortals'
 
 const ZONA_SUGERIDAS = [
@@ -10,7 +27,8 @@ const ZONA_SUGERIDAS = [
 ]
 
 export default function SourcesPage() {
-  const { sources, addSource, deleteSource, toggleSource, updateSource, loading } = useManualSources()
+  const { sources, addSource, addSourcesBulk, deleteSource, toggleSource, updateSource, loading } =
+    useManualSources()
   const { portals, togglePortal, loading: loadingPortals } = usePortals()
   const { zonas } = useSourceZonas()
   const [nombre, setNombre] = useState('')
@@ -25,6 +43,10 @@ export default function SourcesPage() {
   const [editZona, setEditZona] = useState('')
   const [editError, setEditError] = useState<string | null>(null)
   const [savingEdit, setSavingEdit] = useState(false)
+  const [modo, setModo] = useState<'una' | 'varias'>('una')
+  const [bulkText, setBulkText] = useState('')
+  const [bulkSaving, setBulkSaving] = useState(false)
+  const [bulkResult, setBulkResult] = useState<BulkResult | null>(null)
 
   const portalesActivos = portals.filter((p) => p.activo).length
   const portalesInactivos = portals.length - portalesActivos
@@ -45,6 +67,21 @@ export default function SourcesPage() {
     // Keep `zona` so loading several inmobiliarias into the same zona in a
     // row doesn't mean retyping it every time.
   }
+
+  const handleBulkSubmit = async () => {
+    setBulkSaving(true)
+    setBulkResult(null)
+    const result = await addSourcesBulk(bulkText)
+    setBulkSaving(false)
+    setBulkResult(result)
+    // Only clear on a clean run: if something bounced, the user needs the
+    // original paste on screen to see which lines the report is talking about.
+    if (result.agregadas > 0 && result.invalidas.length === 0 && result.duplicadas.length === 0) {
+      setBulkText('')
+    }
+  }
+
+  const urlsPegadas = bulkText.split(/[\s,;]+/).filter(Boolean).length
 
   const startEdit = (s: ManualSource) => {
     setEditingId(s.id)
@@ -95,6 +132,15 @@ export default function SourcesPage() {
         </div>
       </header>
 
+      {/* Shared by the alta form and every inline zona editor in the list, so
+          it lives outside both — a datalist inside a conditional branch stops
+          autocompleting the moment that branch unmounts. */}
+      <datalist id="zonas-cargadas">
+        {[...new Set([...zonas.map((z) => z.zona), ...ZONA_SUGERIDAS])].map((z) => (
+          <option key={z} value={z} />
+        ))}
+      </datalist>
+
       <div className="mx-auto w-full max-w-2xl flex-1 space-y-6 p-6">
         {/* ── Resumen de fuentes ────────────────────────────────────────── */}
         <div className="grid gap-3 sm:grid-cols-2">
@@ -141,6 +187,47 @@ export default function SourcesPage() {
 
         {/* ── Alta de inmobiliaria / portal manual ──────────────────────── */}
         <div className="space-y-2 rounded-2xl border border-border bg-card p-4 shadow-sm">
+          <div className="flex gap-1 rounded-xl bg-muted p-1">
+            <ModoTab active={modo === 'una'} onClick={() => setModo('una')}>
+              Una fuente
+            </ModoTab>
+            <ModoTab active={modo === 'varias'} onClick={() => setModo('varias')}>
+              Pegar varias URLs
+            </ModoTab>
+          </div>
+
+          {modo === 'varias' ? (
+            <>
+              <textarea
+                value={bulkText}
+                onChange={(e) => setBulkText(e.target.value)}
+                rows={8}
+                placeholder={'Pegá una URL por línea:\nhttps://www.remax.com.ar/agencia/belgrano\nhttps://www.remax.com.ar/agencia/palermo\n...'}
+                aria-label="URLs para agregar en lote"
+                className="w-full resize-y rounded-xl border border-border bg-background px-3 py-2 font-mono text-xs text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/20"
+              />
+              <p className="text-xs text-muted-foreground">
+                Se cargan sin nombre ni zona — el nombre se deriva de cada URL y lo podés editar
+                después. Las repetidas se saltean solas.
+              </p>
+              {bulkResult && <BulkReport result={bulkResult} />}
+              <button
+                onClick={handleBulkSubmit}
+                disabled={bulkSaving || urlsPegadas === 0}
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-foreground px-3 py-2 text-sm font-medium text-background transition hover:bg-foreground/85 disabled:opacity-40"
+              >
+                {bulkSaving ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <ListPlus className="size-4" />
+                )}
+                {urlsPegadas === 0
+                  ? 'Agregar fuentes'
+                  : `Agregar ${urlsPegadas} fuente${urlsPegadas === 1 ? '' : 's'}`}
+              </button>
+            </>
+          ) : (
+            <>
           <input
             type="text"
             value={nombre}
@@ -165,11 +252,6 @@ export default function SourcesPage() {
             placeholder="Zona (ej: City Bell) — opcional"
             className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/20"
           />
-          <datalist id="zonas-cargadas">
-            {[...new Set([...zonas.map((z) => z.zona), ...ZONA_SUGERIDAS])].map((z) => (
-              <option key={z} value={z} />
-            ))}
-          </datalist>
           {error && <p className="text-xs text-destructive">{error}</p>}
           <button
             onClick={handleSubmit}
@@ -179,6 +261,8 @@ export default function SourcesPage() {
             {saving ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
             Agregar fuente
           </button>
+            </>
+          )}
         </div>
 
         <div>
@@ -321,6 +405,74 @@ export default function SourcesPage() {
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+/** Segmented control for the "una fuente" / "pegar varias" alta modes. */
+function ModoTab({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+        active
+          ? 'bg-background text-foreground shadow-sm'
+          : 'text-muted-foreground hover:text-foreground'
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+/** What a bulk paste actually did. A batch is partially successful by design,
+ * so the skipped URLs are listed verbatim — telling the user "40 de 70" with
+ * no way to see WHICH 30 bounced is not a report, it's a riddle. */
+function BulkReport({ result }: { result: BulkResult }) {
+  if (result.error) {
+    return <p className="text-xs text-destructive">{result.error}</p>
+  }
+
+  return (
+    <div className="space-y-1.5 rounded-xl bg-muted/60 px-3 py-2 text-xs">
+      <p className="font-medium text-foreground">
+        {result.agregadas} fuente{result.agregadas === 1 ? '' : 's'} agregada
+        {result.agregadas === 1 ? '' : 's'}
+      </p>
+      {result.duplicadas.length > 0 && (
+        <details>
+          <summary className="cursor-pointer text-muted-foreground">
+            {result.duplicadas.length} ya estaban cargadas
+          </summary>
+          <ul className="mt-1 space-y-0.5 break-all font-mono text-[11px] text-muted-foreground">
+            {result.duplicadas.map((u) => (
+              <li key={u}>{u}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {result.invalidas.length > 0 && (
+        <details open>
+          <summary className="cursor-pointer text-destructive">
+            {result.invalidas.length} no son URLs válidas
+          </summary>
+          <ul className="mt-1 space-y-0.5 break-all font-mono text-[11px] text-destructive/80">
+            {result.invalidas.map((u) => (
+              <li key={u}>{u}</li>
+            ))}
+          </ul>
+        </details>
+      )}
     </div>
   )
 }

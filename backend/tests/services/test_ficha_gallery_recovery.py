@@ -213,3 +213,74 @@ def test_a_portal_without_its_own_parser_is_not_retried() -> None:
         'imagenes': [f'a{i}.jpg' for i in range(5)],
     }
     assert _gallery_looks_incomplete(prop) is False
+
+
+# ── Egress: el escalón barato también necesita salir por proxy ───────────────
+#
+# REGRESIÓN MEDIDA CONTRA PRODUCCIÓN: la misma ficha de ZonaProp que en local
+# se completa a 20 fotos en 0.34s, en Railway devolvía 5 y no se curaba nunca.
+# Railway es un DATACENTER y los portales le sirven un muro (mismo diagnóstico
+# ya documentado en `apify._scrape_mercadolibre`: 1.98 MB desde una conexión
+# hogareña, 39 KB de verificación desde datacenter, con la MISMA URL y los
+# MISMOS headers).
+#
+# El síntoma anterior — la ficha colgada >90s — era el mismo problema: rung 1
+# volvía vacío por el muro y la escalera subía a Chromium y al actor de Apify.
+#
+# `SCRAPER_PROXY_URL` ya existe y ya lo usa el scraper de MercadoLibre. Faltaba
+# usarlo acá.
+
+def test_the_cheap_rung_egresses_through_the_residential_proxy(monkeypatch) -> None:
+    import asyncio
+
+    import httpx as _httpx
+
+    from app.core import config as _config
+
+    visto: dict = {}
+
+    class _Resp:
+        status_code = 200
+        text = '<html></html>'
+
+    class _Client:
+        def __init__(self, *a, **kw) -> None:
+            visto['proxy'] = kw.get('proxy')
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return None
+        async def get(self, url, *a, **kw): return _Resp()
+
+    monkeypatch.setattr(_httpx, 'AsyncClient', _Client)
+    monkeypatch.setattr(_config.settings, 'SCRAPER_PROXY_URL', 'http://user:pw@proxy.apify.com:8000')
+
+    asyncio.get_event_loop_policy()
+    asyncio.run(ficha._fetch_listing_html('https://www.zonaprop.com.ar/x.html'))
+    assert visto['proxy'] == 'http://user:pw@proxy.apify.com:8000'
+
+
+def test_without_a_configured_proxy_it_goes_out_direct(monkeypatch) -> None:
+    """En local no hay proxy y no debe hacer falta: `proxy=None` es salida directa."""
+    import asyncio
+
+    import httpx as _httpx
+
+    from app.core import config as _config
+
+    visto: dict = {}
+
+    class _Resp:
+        status_code = 200
+        text = '<html></html>'
+
+    class _Client:
+        def __init__(self, *a, **kw) -> None:
+            visto['proxy'] = kw.get('proxy')
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return None
+        async def get(self, url, *a, **kw): return _Resp()
+
+    monkeypatch.setattr(_httpx, 'AsyncClient', _Client)
+    monkeypatch.setattr(_config.settings, 'SCRAPER_PROXY_URL', '')
+
+    asyncio.run(ficha._fetch_listing_html('https://www.zonaprop.com.ar/x.html'))
+    assert visto['proxy'] is None

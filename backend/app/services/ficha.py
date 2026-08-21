@@ -270,9 +270,18 @@ async def _fetch_listing_html(
     """
     if not url_origen:
         return False, None
+    # Egress por `SCRAPER_PROXY_URL` cuando está seteado: los portales sólo
+    # abren el HTML del aviso a IPs RESIDENCIALES. Mismo diagnóstico ya medido
+    # para el scraper de MercadoLibre (1.98 MB desde una conexión hogareña vs
+    # 39 KB de verificación desde datacenter, misma URL y mismos headers).
+    # Railway es datacenter, así que sin proxy producción come el muro — y como
+    # el muro llega con 200, se lee como "el aviso no tiene fotos" en vez de
+    # como "nos bloquearon". Sin proxy configurado, `proxy=None` sale directo.
+    from app.core.config import settings
     try:
         async with httpx.AsyncClient(
-            timeout=20, headers=headers or _BROWSER_HEADERS, follow_redirects=True
+            timeout=20, headers=headers or _BROWSER_HEADERS, follow_redirects=True,
+            proxy=settings.SCRAPER_PROXY_URL or None,
         ) as client:
             resp = await client.get(url_origen)
             if resp.status_code in (404, 410):

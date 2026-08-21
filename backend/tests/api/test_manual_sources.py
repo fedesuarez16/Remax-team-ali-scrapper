@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from app.api.v1.manual_sources import MAX_BULK_URLS
 from app.services.zona import normalize_zona
 
 
@@ -32,13 +33,13 @@ class _FakeQuery:
         self._filters: list[tuple[str, str, object]] = []
         self._order_field: str | None = None
         self._order_desc = False
-        self._insert_payload: dict | None = None
+        self._insert_payload: dict | list[dict] | None = None
         self._update_payload: dict | None = None
 
     def select(self, *_a, **_kw) -> '_FakeQuery':
         return self
 
-    def insert(self, payload: dict) -> '_FakeQuery':
+    def insert(self, payload: dict | list[dict]) -> '_FakeQuery':
         self._insert_payload = payload
         return self
 
@@ -66,13 +67,23 @@ class _FakeQuery:
 
     async def execute(self) -> _Res:
         if self._mode == 'insert':
-            row = dict(self._insert_payload or {})
-            row.setdefault('id', f'id-{uuid.uuid4().hex[:8]}')
-            for k, v in self._insert_defaults.items():
-                row.setdefault(k, v)
-            row.setdefault('created_at', datetime.now(timezone.utc).isoformat())
-            self._store.append(row)
-            return _Res([row])
+            # Supabase accepts a single dict or a list of rows; bulk insert
+            # uses the list form, so the fake has to honour both.
+            payloads = (
+                self._insert_payload
+                if isinstance(self._insert_payload, list)
+                else [self._insert_payload or {}]
+            )
+            inserted = []
+            for payload in payloads:
+                row = dict(payload)
+                row.setdefault('id', f'id-{uuid.uuid4().hex[:8]}')
+                for k, v in self._insert_defaults.items():
+                    row.setdefault(k, v)
+                row.setdefault('created_at', datetime.now(timezone.utc).isoformat())
+                self._store.append(row)
+                inserted.append(row)
+            return _Res(inserted)
 
         if self._mode == 'update':
             matched = [r for r in self._store if self._match(r)]
@@ -100,7 +111,7 @@ class _FakeTable:
     def select(self, *a, **kw) -> _FakeQuery:
         return _FakeQuery(self._store, 'select', self._insert_defaults).select(*a, **kw)
 
-    def insert(self, payload: dict) -> _FakeQuery:
+    def insert(self, payload: dict | list[dict]) -> _FakeQuery:
         return _FakeQuery(self._store, 'insert', self._insert_defaults).insert(payload)
 
     def update(self, payload: dict) -> _FakeQuery:
@@ -260,6 +271,154 @@ async def test_post_when_supabase_not_configured() -> None:
 
     assert resp.status_code == 200
     assert resp.json() == {'source': None, 'error': 'Supabase no configurado'}
+
+
+# -- POST /bulk (pegar N URLs sueltas) --------------------------------------
+
+
+async def test_bulk_adds_every_url_one_row_each() -> None:
+    fake_sb = _FakeSupabase([])
+    async with _client(fake_sb) as client:
+        resp = await client.post('/manual-sources/bulk', json={'urls': '\n'.join([
+            'https://www.remax.com.ar/agencia/belgrano',
+            'https://www.remax.com.ar/agencia/palermo',
+            'https://inmosur.com.ar',
+        ])})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['agregadas'] == 3
+    assert len(fake_sb._store) == 3
+    assert {r['url'] for r in fake_sb._store} == {
+        'https://www.remax.com.ar/agencia/belgrano',
+        'https://www.remax.com.ar/agencia/palermo',
+        'https://inmosur.com.ar',
+    }
+
+
+async def test_bulk_derives_nombre_from_host_and_last_path_segment() -> None:
+    """Pasting 70 RE/MAX office links must not produce 70 rows all called
+    'remax.com.ar' — the last path segment is what tells them apart."""
+    fake_sb = _FakeSupabase([])
+    async with _client(fake_sb) as client:
+        await client.post('/manual-sources/bulk', json={'urls': '\n'.join([
+            'https://www.remax.com.ar/agencia/belgrano',
+            'https://www.remax.com.ar/agencia/palermo',
+            'https://inmosur.com.ar/',
+        ])})
+
+    nombres = {r['url']: r['nombre'] for r in fake_sb._store}
+    assert nombres['https://www.remax.com.ar/agencia/belgrano'] == 'remax.com.ar/belgrano'
+    assert nombres['https://www.remax.com.ar/agencia/palermo'] == 'remax.com.ar/palermo'
+    assert nombres['https://inmosur.com.ar/'] == 'inmosur.com.ar'
+
+
+async def test_bulk_rows_have_no_zona() -> None:
+    fake_sb = _FakeSupabase([])
+    async with _client(fake_sb) as client:
+        await client.post('/manual-sources/bulk', json={'urls': 'https://inmosur.com.ar'})
+
+    assert fake_sb._store[0]['zona'] is None
+    assert fake_sb._store[0]['zona_norm'] is None
+
+
+async def test_bulk_accepts_a_list_of_urls_too() -> None:
+    fake_sb = _FakeSupabase([])
+    async with _client(fake_sb) as client:
+        resp = await client.post('/manual-sources/bulk', json={
+            'urls': ['https://a.com', 'https://b.com'],
+        })
+
+    assert resp.json()['agregadas'] == 2
+
+
+async def test_bulk_splits_on_commas_spaces_and_blank_lines() -> None:
+    fake_sb = _FakeSupabase([])
+    async with _client(fake_sb) as client:
+        resp = await client.post('/manual-sources/bulk', json={
+            'urls': 'https://a.com, https://b.com\n\n  https://c.com  \n',
+        })
+
+    assert resp.json()['agregadas'] == 3
+    assert len(fake_sb._store) == 3
+
+
+async def test_bulk_skips_urls_already_registered() -> None:
+    existing = _row('Inmo Sur', 'https://inmosur.com.ar', minutes_ago=5)
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.post('/manual-sources/bulk', json={'urls': '\n'.join([
+            'https://inmosur.com.ar', 'https://nueva.com.ar',
+        ])})
+
+    data = resp.json()
+    assert data['agregadas'] == 1
+    assert data['duplicadas'] == ['https://inmosur.com.ar']
+    assert len(fake_sb._store) == 2
+
+
+async def test_bulk_dedupes_within_the_pasted_batch() -> None:
+    fake_sb = _FakeSupabase([])
+    async with _client(fake_sb) as client:
+        resp = await client.post('/manual-sources/bulk', json={'urls': '\n'.join([
+            'https://a.com', 'https://a.com', 'https://a.com/',
+        ])})
+
+    assert resp.json()['agregadas'] == 1
+    assert len(fake_sb._store) == 1
+
+
+async def test_bulk_reports_invalid_urls_without_aborting_the_batch() -> None:
+    fake_sb = _FakeSupabase([])
+    async with _client(fake_sb) as client:
+        resp = await client.post('/manual-sources/bulk', json={'urls': '\n'.join([
+            'https://buena.com', 'no-es-una-url', 'ftp://tampoco.com',
+        ])})
+
+    data = resp.json()
+    assert data['agregadas'] == 1
+    assert data['invalidas'] == ['no-es-una-url', 'ftp://tampoco.com']
+    assert len(fake_sb._store) == 1
+
+
+async def test_bulk_with_no_usable_urls_is_rejected() -> None:
+    fake_sb = _FakeSupabase([])
+    async with _client(fake_sb) as client:
+        resp = await client.post('/manual-sources/bulk', json={'urls': '   \n  '})
+
+    data = resp.json()
+    assert data['agregadas'] == 0
+    assert 'error' in data
+    assert fake_sb._store == []
+
+
+async def test_bulk_over_the_cap_is_rejected() -> None:
+    fake_sb = _FakeSupabase([])
+    urls = [f'https://sitio-{i}.com' for i in range(MAX_BULK_URLS + 1)]
+    async with _client(fake_sb) as client:
+        resp = await client.post('/manual-sources/bulk', json={'urls': urls})
+
+    data = resp.json()
+    assert data['agregadas'] == 0
+    assert 'error' in data
+    assert fake_sb._store == []
+
+
+async def test_bulk_failure_returns_error_without_raising() -> None:
+    async with _client(_RaisingSupabase()) as client:
+        resp = await client.post('/manual-sources/bulk', json={'urls': 'https://a.com'})
+
+    data = resp.json()
+    assert data['agregadas'] == 0
+    assert 'error' in data
+
+
+async def test_bulk_when_supabase_not_configured() -> None:
+    async with _client(None) as client:
+        resp = await client.post('/manual-sources/bulk', json={'urls': 'https://a.com'})
+
+    assert resp.status_code == 200
+    assert resp.json()['error'] == 'Supabase no configurado'
 
 
 # -- PATCH (rename / toggle) ------------------------------------------------

@@ -115,6 +115,43 @@ export async function toggleSource(id: string, activo: boolean): Promise<string 
   }
 }
 
+/** Outcome of a bulk paste: partial success is the norm, so the caller has to
+ * be able to tell the user what got skipped and why. */
+export type BulkResult = {
+  agregadas: number
+  duplicadas: string[]
+  invalidas: string[]
+  error?: string
+}
+
+/** Registers many URLs at once, one source per URL, with no nombre and no
+ * zona — the backend derives a label from each URL. `raw` is the pasted text
+ * as-is (newline/comma/space separated); the backend does the splitting so
+ * both ends agree on what counts as a separator. */
+export async function addSourcesBulk(raw: string): Promise<BulkResult> {
+  if (!raw.trim()) {
+    return { agregadas: 0, duplicadas: [], invalidas: [], error: 'No pegaste ninguna URL' }
+  }
+
+  try {
+    const res = await fetch(`${SOURCES_URL}/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls: raw }),
+    })
+    const data = (await res.json()) as BulkResult
+    if (data.agregadas > 0) notify()
+    return data
+  } catch {
+    return {
+      agregadas: 0,
+      duplicadas: [],
+      invalidas: [],
+      error: 'No se pudo conectar con el servidor',
+    }
+  }
+}
+
 /** Fields the Fuentes tab lets you edit. Omitted keys are left untouched by
  * the backend (its PATCH is presence-checked), so this is a real partial
  * update — editing the nombre never resets `activo` or the zona bucket. */
@@ -198,7 +235,7 @@ export function useManualSources() {
     }
   }, [])
 
-  return { sources, addSource, deleteSource, toggleSource, updateSource, loading }
+  return { sources, addSource, addSourcesBulk, deleteSource, toggleSource, updateSource, loading }
 }
 
 // ── Zonas ────────────────────────────────────────────────────────────────────
