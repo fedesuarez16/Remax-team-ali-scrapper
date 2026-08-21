@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Check, Loader2, Search, Sparkles, X } from 'lucide-react'
 import { PropertyCard } from '@/components/chat/PropertyCard'
 import { SelectCheckbox } from '@/components/properties/SelectCheckbox'
-import { SelectionBar } from '@/components/properties/SelectionBar'
+import { EnviarFichasBar } from '@/components/properties/EnviarFichasBar'
 import type { Property } from '@/hooks/useSSEStream'
 import { cn } from '@/lib/utils'
 
@@ -49,6 +49,32 @@ export default function SearchPage() {
     const gone = new Set(removed)
     setResults((prev) => prev.filter((r) => !(r.property.id && gone.has(r.property.id))))
     setSelected(new Set())
+  }
+
+  // Propiedades marcadas, completas: las que la barra convierte en fichas.
+  const seleccionadas = results
+    .filter((r, i) => selected.has(keyFor(r, i)))
+    .map((r) => r.property)
+
+  /** Refleja el envío en los resultados sin repetir la búsqueda. */
+  const onEnviadas = (enviadas: string[], agenteEmail: string) => {
+    const sent = new Set(enviadas)
+    const marcadas = new Set(seleccionadas.map((p) => p.id).filter(Boolean) as string[])
+    const stamp = new Date().toISOString()
+    setResults((prev) =>
+      prev.map((r) =>
+        r.property.id && marcadas.has(r.property.id)
+          ? {
+              ...r,
+              property: {
+                ...r.property,
+                agente_email: agenteEmail,
+                ...(sent.has(r.property.id) ? { enviada_at: stamp } : {}),
+              },
+            }
+          : r
+      )
+    )
   }
 
   // Once a search has been submitted the input docks to the top.
@@ -230,13 +256,14 @@ export default function SearchPage() {
         )}
       </div>
 
-      {/* Action bar — selección → borrar */}
+      {/* Action bar — selección → borrar / enviar fichas (con paso de perfil) */}
       {selected.size > 0 && (
-        <SelectionBar
-          count={selected.size}
+        <EnviarFichasBar
+          seleccionadas={seleccionadas}
           ids={selectedIds}
           onClear={() => setSelected(new Set())}
           onDeleted={onDeleted}
+          onEnviadas={onEnviadas}
         />
       )}
     </div>
