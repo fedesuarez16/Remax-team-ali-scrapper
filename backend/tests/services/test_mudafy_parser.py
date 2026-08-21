@@ -18,6 +18,9 @@ dedup fingerprint needs, plus coordinates, room breakdown and areas:
   publication.property.kind  "apartment" | "house" | …
   publication.property.rooms {total_count, bedrooms, bathrooms, garages}
   publication.slug           → https://mudafy.com.ar/{kind-path}/{slug}
+  publication.photos[]       {order, is_enabled, type, large_link, medium_link,
+                              full_size_link, standard_link, small_link,
+                              tiny_link, original_link}
 
 robots.txt disallows `/api/` and `/*?`, so the scraper only ever walks
 path-based URLs (`/{operacion}/{tipo}/{region}` and `/{N}-p` for later pages).
@@ -41,7 +44,19 @@ self.__next_f.push([1,"18:[\"$\",\"$L3d\",null,{\"publication\":{\"id\":14507211
 \"toilets\":0,\"bedrooms\":2,\"garages\":1},\"construction_year\":2006},
 \"title\":\"Venta departamento Semipiso de 3 Ambientes\",
 \"description\":\"Muy luminoso, contrafrente.\",
-\"pictures\":[{\"url\":\"https://media.mudafy.com/a.jpg\"},{\"url\":\"https://media.mudafy.com/b.jpg\"}]}}]"])
+\"photos\":[
+{\"id\":2,\"type\":\"photo\",\"order\":1,\"is_enabled\":true,
+\"original_link\":\"https://mfy.mudafy.com/b.jpg\",\"large_link\":\"https://mfy.mudafy.com/b_large.webp\",
+\"medium_link\":\"https://mfy.mudafy.com/b_medium.webp\",\"tiny_link\":\"https://mfy.mudafy.com/b_tiny.webp\"},
+{\"id\":1,\"type\":\"photo\",\"order\":0,\"is_enabled\":true,
+\"original_link\":\"https://mfy.mudafy.com/a.jpg\",\"large_link\":\"https://mfy.mudafy.com/a_large.webp\"},
+{\"id\":3,\"type\":\"photo\",\"order\":2,\"is_enabled\":false,
+\"large_link\":\"https://mfy.mudafy.com/hidden_large.webp\"},
+{\"id\":4,\"type\":\"blueprint\",\"order\":3,\"is_enabled\":true,
+\"large_link\":\"https://mfy.mudafy.com/plano_large.webp\"},
+{\"id\":5,\"type\":\"photo\",\"order\":4,\"is_enabled\":true,
+\"medium_link\":\"https://mfy.mudafy.com/e_medium.webp\",\"original_link\":\"https://mfy.mudafy.com/e.jpg\"}
+]}}]"])
 self.__next_f.push([1,"19:[\"$\",\"$L3d\",null,{\"publication\":{\"id\":9911,
 \"price\":{\"currency\":\"ARS\",\"amount\":450000},
 \"slug\":\"calle-7-1234-casa-en-alquiler-000111\",
@@ -49,7 +64,7 @@ self.__next_f.push([1,"19:[\"$\",\"$L3d\",null,{\"publication\":{\"id\":9911,
 \"street\":\"Calle 7\",\"street_number\":1234,\"public_address\":\"Calle 7 1234\"},
 \"dimensions\":{\"total_area\":120},
 \"property\":{\"kind\":\"house\",\"rooms\":{\"total_count\":4,\"bathrooms\":2,\"garages\":0}},
-\"title\":\"Casa en alquiler\",\"pictures\":[]}}]"])
+\"title\":\"Casa en alquiler\",\"photos\":[]}}]"])
 self.__next_f.push([1,"1a:[\"$\",\"$L3d\",null,{\"publication\":{\"id\":7777,
 \"price\":{\"currency\":\"USD\",\"amount\":90000},
 \"slug\":\"otra-9999\",
@@ -57,7 +72,7 @@ self.__next_f.push([1,"1a:[\"$\",\"$L3d\",null,{\"publication\":{\"id\":7777,
 \"street\":\"Av Colon\",\"street_number\":100},
 \"dimensions\":{\"total_area\":70},
 \"property\":{\"kind\":\"apartment\",\"rooms\":{\"total_count\":2}},
-\"title\":\"Depto Mar del Plata\",\"pictures\":[]}}]"])
+\"title\":\"Depto Mar del Plata\",\"photos\":null}}]"])
 '''
 
 _LA_PLATA = ScrapingFilters(zona='La Plata', zonas=['La Plata'], tipo_operacion='venta')
@@ -116,10 +131,36 @@ def test_builds_the_listing_url_from_the_slug():
     assert _parse()[0].url_origen == 'https://mudafy.com.ar/apartment/plaza-matheu-9-departamento-en-venta-396098'
 
 
-def test_collects_pictures():
+def test_collects_the_gallery_from_photos_in_display_order():
+    """The payload names the gallery `photos` (not `pictures`), each entry a bag
+    of per-size CDN links. `order` is the gallery order the site itself renders,
+    and it is NOT guaranteed to match the array order."""
     assert _parse()[0].imagenes == [
-        'https://media.mudafy.com/a.jpg', 'https://media.mudafy.com/b.jpg',
+        'https://mfy.mudafy.com/a_large.webp',
+        'https://mfy.mudafy.com/b_large.webp',
+        'https://mfy.mudafy.com/e_medium.webp',
     ]
+
+
+def test_skips_disabled_photos_and_non_photo_assets():
+    """`is_enabled: false` is a photo the seller pulled down, and blueprints are
+    not gallery material — neither belongs in a card."""
+    urls = _parse()[0].imagenes
+    assert not any('hidden' in u or 'plano' in u for u in urls)
+
+
+def test_falls_back_down_the_size_ladder_when_a_variant_is_missing():
+    """Not every photo carries every size; the entry is only dropped when it has
+    no usable link at all."""
+    assert 'https://mfy.mudafy.com/e_medium.webp' in _parse()[0].imagenes
+
+
+def test_a_publication_with_no_photos_yields_an_empty_gallery():
+    """`photos` arrives both as `[]` and as `null` — neither may raise."""
+    wide = ScrapingFilters(zona='Provincia de Buenos Aires', zonas=[])
+    galleries = {p.titulo: p.imagenes for p in _parse(filters=wide)}
+    assert galleries['Casa en alquiler'] == []
+    assert galleries['Depto Mar del Plata'] == []
 
 
 def test_address_keeps_street_and_number_for_the_dedup_fingerprint():

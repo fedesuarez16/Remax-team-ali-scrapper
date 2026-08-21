@@ -947,6 +947,54 @@ def _mudafy_search_urls(filters: ScrapingFilters, max_pages: int) -> Iterator[st
         yield f'{base}/{n}-p'
 
 
+# Mudafy ships each photo as a bag of pre-rendered CDN variants rather than one
+# URL, so the gallery is built by walking the ladder from the size the cards
+# want down to whatever the entry actually carries. `large` (~200KB webp) is the
+# balance point: sharp on the ficha, cheap enough for a results grid.
+_MUDAFY_PHOTO_SIZES = (
+    'large_link', 'full_size_link', 'standard_link', 'medium_link',
+    'small_link', 'original_link',
+)
+
+
+def _mudafy_photo_urls(pub: dict[str, Any]) -> list[str]:
+    """`publication.photos[]` → gallery URLs, in the order the site renders them.
+
+    The payload calls this `photos` — NOT `pictures` — and `order` is the
+    seller's chosen sequence, which the array itself does not always follow.
+    Withdrawn photos (`is_enabled: false`) and non-photo assets (blueprints and
+    the like) are not gallery material, so they never reach a card.
+    """
+    photos = pub.get('photos') or []
+    if not isinstance(photos, list):
+        return []
+
+    usable: list[tuple[int, str]] = []
+    for i, photo in enumerate(photos):
+        if not isinstance(photo, dict):
+            continue
+        if photo.get('is_enabled') is False:
+            continue
+        # An entry with no `type` is still a photo — only a named non-photo is out.
+        if str(photo.get('type') or 'photo').lower() != 'photo':
+            continue
+        url = next(
+            (str(photo[size]).strip() for size in _MUDAFY_PHOTO_SIZES
+             if str(photo.get(size) or '').strip().startswith('http')),
+            None,
+        )
+        if url is None:
+            continue
+        order = photo.get('order')
+        usable.append((order if isinstance(order, int) else i, url))
+
+    urls: list[str] = []
+    for _, url in sorted(usable, key=lambda pair: pair[0]):
+        if url not in urls:
+            urls.append(url)
+    return urls[:_MAX_GALLERY]
+
+
 def _norm_mudafy(pub: dict[str, Any]) -> RawProperty | None:
     """One `publication` object → RawProperty."""
     addr = pub.get('address') or {}
@@ -974,11 +1022,6 @@ def _norm_mudafy(pub: dict[str, Any]) -> RawProperty | None:
         except (TypeError, ValueError):
             return None
 
-    imagenes = [
-        str(pic.get('url')) for pic in (pub.get('pictures') or [])
-        if isinstance(pic, dict) and pic.get('url')
-    ]
-
     return RawProperty(
         fuente='mudafy',
         titulo=str(pub.get('title') or '') or None,
@@ -995,7 +1038,7 @@ def _norm_mudafy(pub: dict[str, Any]) -> RawProperty | None:
         m2_total=_num(dims.get('total_area')),
         m2_cubiertos=_num(dims.get('roofed_area')),
         antiguedad=_int(prop.get('construction_year')),
-        imagenes=imagenes[:_MAX_GALLERY],
+        imagenes=_mudafy_photo_urls(pub),
         url_origen=url,
         raw={'id': pub.get('id'), 'coordinates': (addr.get('coordinates') or {})},
     )
