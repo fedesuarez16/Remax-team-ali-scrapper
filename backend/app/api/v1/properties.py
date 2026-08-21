@@ -7,7 +7,7 @@ from typing import Any
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from app.core.database import chunk_for_in_filter
 from app.services.ficha import _fetch_full_gallery, _gallery_looks_incomplete
@@ -391,7 +391,9 @@ async def ficha_propio_stats(request: Request) -> dict[str, Any]:
 
 
 @router.get('/{property_id}')
-async def get_property(property_id: str, request: Request) -> dict[str, Any]:
+async def get_property(
+    property_id: str, request: Request, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
     """Fetch a single property by id — backs the shareable per-property ficha page.
 
     De paso RECUPERA la galería cuando la guardada está incompleta. Este es el
@@ -419,6 +421,15 @@ async def get_property(property_id: str, request: Request) -> dict[str, Any]:
     prop = res.data[0]
     if _gallery_looks_incomplete(prop):
         await _recuperar_galeria(prop, sb)
+    # Si el escalón barato no alcanzó, la escalera completa (Chromium → actor de
+    # Apify) queda para DESPUÉS de contestar. Medido en producción: MercadoLibre
+    # se resuelve con el GET gratis, pero ZonaProp y Argenprop le sirven el muro
+    # a Railway igual, y el actor es el único fetcher verificado contra esos WAF.
+    # Tarda minutos, así que la ficha se entrega ya y la próxima visita ve la
+    # galería entera.
+    if _gallery_looks_incomplete(prop) and prop['id'] not in _GALERIA_AGENDADAS:
+        _GALERIA_AGENDADAS.add(prop['id'])
+        background_tasks.add_task(_recuperar_galeria_lenta, prop, sb)
     return {'property': prop}
 
 
@@ -427,6 +438,42 @@ async def get_property(property_id: str, request: Request) -> dict[str, Any]:
 # con parser propio; más que esto es un portal que no está contestando y el
 # visitante no tiene por qué esperarlo.
 _GALERIA_TIMEOUT = 6.0
+
+
+# Ids ya agendados para la escalera completa en ESTE proceso. Cada agendada
+# puede terminar en un run PAGO de Apify, así que una ficha compartida que
+# recibe cien visitas tiene que disparar uno, no cien. Se pierde al reiniciar:
+# a propósito — así un aviso que estaba caído se vuelve a intentar algún día,
+# y el gate `_gallery_looks_incomplete` ya frena todo lo que quedó completo.
+_GALERIA_AGENDADAS: set[str] = set()
+
+
+async def _recuperar_galeria_lenta(prop: dict[str, Any], sb: Any) -> None:
+    """La escalera COMPLETA, fuera del request. Puede tardar minutos y costar.
+
+    Corre como background task de Starlette: el visitante ya recibió la ficha
+    con las fotos que había, así que acá no hay nadie esperando. Es el único
+    lugar del path de lectura con permiso de escalar a Chromium y al actor de
+    Apify — el único fetcher verificado contra el DataDome de ZonaProp y el AWS
+    WAF de Argenprop.
+
+    Persiste el resultado: la gracia es que la PRÓXIMA visita ya vea todo.
+    """
+    try:
+        full = await _fetch_full_gallery(prop, allow_escalation=True)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            'slow gallery recovery failed for %s: %s', prop.get('id'), exc
+        )
+        return
+    if not full or full == (prop.get('imagenes') or []):
+        return
+    try:
+        await sb.table('properties').update({'imagenes': full}).eq('id', prop['id']).execute()
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            'slow gallery persist failed for %s: %s', prop.get('id'), exc
+        )
 
 
 async def _recuperar_galeria(prop: dict[str, Any], sb: Any) -> None:

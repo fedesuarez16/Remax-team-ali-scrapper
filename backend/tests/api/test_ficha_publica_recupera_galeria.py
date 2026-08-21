@@ -182,3 +182,129 @@ async def test_la_ficha_publica_no_paga_browser_ni_actor(monkeypatch) -> None:
         await client.get('/properties/p1')
 
     assert visto['allow_escalation'] is False
+
+
+# ── Cuando el escalón barato no alcanza: Apify, pero FUERA del request ───────
+#
+# Medido contra producción con el fix del proxy ya deployado:
+#   MercadoLibre  5 → 17 fotos   ✅ el escalón barato alcanza
+#   ZonaProp      5 →  5 fotos   ❌ DataDome le sirve el muro igual
+#   Argenprop     5 →  5 fotos   ❌ AWS WAF, mismo caso
+#
+# O sea: la recuperación CORRE, pero para ZonaProp/Argenprop el rung barato
+# vuelve vacío. El único fetcher verificado contra esos WAF es el actor de
+# Apify — y tarda minutos, así que NO puede correr dentro del request (esa
+# lección ya costó una ficha colgada 90s).
+#
+# Solución: responder YA con lo guardado y disparar la escalera completa en
+# background. La próxima visita ve la galería entera.
+#
+# El gasto tiene freno: un id sólo se agenda UNA vez por proceso. Sin eso, cada
+# visita a una ficha compartida dispararía un run pago.
+
+
+async def test_si_el_rung_barato_no_alcanza_agenda_la_escalera_completa(monkeypatch) -> None:
+    properties._GALERIA_AGENDADAS.clear()
+    agendadas: list[dict] = []
+
+    async def barato_vacio(prop, allow_escalation=True):
+        return []
+
+    async def espia_lento(prop, sb):
+        agendadas.append(prop)
+
+    monkeypatch.setattr(properties, '_fetch_full_gallery', barato_vacio)
+    monkeypatch.setattr(properties, '_recuperar_galeria_lenta', espia_lento)
+
+    sb = _sb(_prop())
+    async with _client(sb) as client:
+        resp = await client.get('/properties/p1')
+
+    assert resp.status_code == 200
+    assert len(resp.json()['property']['imagenes']) == 5, 'responde ya, con lo que hay'
+    assert len(agendadas) == 1
+
+
+async def test_no_agenda_dos_veces_el_mismo_aviso(monkeypatch) -> None:
+    """Cada agendada puede terminar en un run PAGO de Apify."""
+    properties._GALERIA_AGENDADAS.clear()
+    agendadas: list[dict] = []
+
+    async def barato_vacio(prop, allow_escalation=True):
+        return []
+
+    async def espia_lento(prop, sb):
+        agendadas.append(prop)
+
+    monkeypatch.setattr(properties, '_fetch_full_gallery', barato_vacio)
+    monkeypatch.setattr(properties, '_recuperar_galeria_lenta', espia_lento)
+
+    sb = _sb(_prop())
+    async with _client(sb) as client:
+        await client.get('/properties/p1')
+        await client.get('/properties/p1')
+        await client.get('/properties/p1')
+
+    assert len(agendadas) == 1
+
+
+async def test_si_el_rung_barato_alcanza_no_agenda_nada(monkeypatch) -> None:
+    """MercadoLibre se resuelve con el GET gratis: pagar Apify sería tirar plata."""
+    properties._GALERIA_AGENDADAS.clear()
+    agendadas: list[dict] = []
+
+    async def barato_ok(prop, allow_escalation=True):
+        return [f'ok{i}.jpg' for i in range(17)]
+
+    async def espia_lento(prop, sb):
+        agendadas.append(prop)
+
+    monkeypatch.setattr(properties, '_fetch_full_gallery', barato_ok)
+    monkeypatch.setattr(properties, '_recuperar_galeria_lenta', espia_lento)
+
+    sb = _sb(_prop())
+    async with _client(sb) as client:
+        resp = await client.get('/properties/p1')
+
+    assert len(resp.json()['property']['imagenes']) == 17
+    assert agendadas == []
+
+
+async def test_una_ficha_sana_ni_intenta_ni_agenda(monkeypatch) -> None:
+    properties._GALERIA_AGENDADAS.clear()
+    tocado: list = []
+
+    async def no_deberia(prop, allow_escalation=True):
+        tocado.append(prop)
+        return []
+
+    async def espia_lento(prop, sb):
+        tocado.append(prop)
+
+    monkeypatch.setattr(properties, '_fetch_full_gallery', no_deberia)
+    monkeypatch.setattr(properties, '_recuperar_galeria_lenta', espia_lento)
+
+    sb = _sb(_prop(imagenes=[f'ok{i}.jpg' for i in range(20)]))
+    async with _client(sb) as client:
+        await client.get('/properties/p1')
+
+    assert tocado == []
+
+
+async def test_la_escalera_lenta_si_usa_apify_y_persiste(monkeypatch) -> None:
+    """El trabajo en background sí tiene permiso de escalar: ese es su sentido."""
+    properties._GALERIA_AGENDADAS.clear()
+    visto: dict = {}
+
+    async def full(prop, allow_escalation=True):
+        visto['allow_escalation'] = allow_escalation
+        return [f'apify{i}.jpg' for i in range(20)]
+
+    monkeypatch.setattr(properties, '_fetch_full_gallery', full)
+
+    sb = _sb(_prop())
+    await properties._recuperar_galeria_lenta(_prop(), sb)
+
+    assert visto['allow_escalation'] is True
+    assert len(sb.rows_updated) == 1
+    assert len(sb.rows_updated[0]['imagenes']) == 20
