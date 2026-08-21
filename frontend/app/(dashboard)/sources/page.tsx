@@ -200,55 +200,77 @@ export default function SourcesPage() {
                     editingId === s.id ? 'items-start' : 'items-center'
                   } ${s.activo ? '' : 'opacity-55'}`}
                 >
-                  <Globe className="size-4 shrink-0 text-muted-foreground" />
+                  <Globe className={`size-4 shrink-0 text-muted-foreground ${
+                    editingId === s.id ? 'mt-1.5' : ''
+                  }`} />
                   <div className="min-w-0 flex-1">
                     {editingId === s.id ? (
-                      <>
-                        <input
-                          type="text"
+                      <div className="space-y-1.5">
+                        <EditField
                           autoFocus
                           value={editNombre}
-                          onChange={(e) => setEditNombre(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !savingEdit) handleRename(s.id)
-                            if (e.key === 'Escape') cancelEdit()
-                          }}
-                          aria-label={`Nuevo nombre para ${s.nombre}`}
-                          className="w-full rounded-lg border border-border bg-background px-2 py-1 text-sm font-medium text-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
+                          onChange={setEditNombre}
+                          onSave={() => handleSaveEdit(s.id)}
+                          onCancel={cancelEdit}
+                          disabled={savingEdit}
+                          placeholder="Nombre"
+                          ariaLabel={`Nombre de ${s.nombre}`}
                         />
-                        {editError && <p className="mt-1 text-xs text-destructive">{editError}</p>}
-                      </>
+                        <EditField
+                          type="url"
+                          value={editUrl}
+                          onChange={setEditUrl}
+                          onSave={() => handleSaveEdit(s.id)}
+                          onCancel={cancelEdit}
+                          disabled={savingEdit}
+                          placeholder="https://..."
+                          ariaLabel={`URL de ${s.nombre}`}
+                        />
+                        <EditField
+                          value={editZona}
+                          onChange={setEditZona}
+                          onSave={() => handleSaveEdit(s.id)}
+                          onCancel={cancelEdit}
+                          disabled={savingEdit}
+                          list="zonas-cargadas"
+                          placeholder="Zona — vacío la deja sin zona"
+                          ariaLabel={`Zona de ${s.nombre}`}
+                        />
+                        {editError && <p className="text-xs text-destructive">{editError}</p>}
+                      </div>
                     ) : (
-                      <p className="flex items-center gap-2 truncate text-sm font-medium text-foreground">
-                        {s.nombre}
-                        {s.zona ? (
-                          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
-                            <MapPin className="size-3" />
-                            {s.zona}
-                          </span>
-                        ) : (
-                          <span className="shrink-0 text-[11px] font-normal text-muted-foreground/60">
-                            sin zona
-                          </span>
-                        )}
-                      </p>
+                      <>
+                        <p className="flex items-center gap-2 truncate text-sm font-medium text-foreground">
+                          {s.nombre}
+                          {s.zona ? (
+                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
+                              <MapPin className="size-3" />
+                              {s.zona}
+                            </span>
+                          ) : (
+                            <span className="shrink-0 text-[11px] font-normal text-muted-foreground/60">
+                              sin zona
+                            </span>
+                          )}
+                        </p>
+                        <a
+                          href={s.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="truncate text-xs text-muted-foreground hover:text-foreground hover:underline"
+                        >
+                          {s.url}
+                        </a>
+                      </>
                     )}
-                    <a
-                      href={s.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="truncate text-xs text-muted-foreground hover:text-foreground hover:underline"
-                    >
-                      {s.url}
-                    </a>
                   </div>
                   {editingId === s.id ? (
                     <>
                       <button
-                        onClick={() => handleRename(s.id)}
-                        disabled={savingEdit || !editNombre.trim()}
+                        onClick={() => handleSaveEdit(s.id)}
+                        disabled={savingEdit || !editNombre.trim() || !editUrl.trim()}
                         className="shrink-0 rounded-md p-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-40"
-                        aria-label={`Guardar nombre de ${s.nombre}`}
+                        aria-label={`Guardar cambios de ${s.nombre}`}
                       >
                         {savingEdit ? (
                           <Loader2 className="size-4 animate-spin" />
@@ -268,9 +290,9 @@ export default function SourcesPage() {
                   ) : (
                     <>
                       <button
-                        onClick={() => startEdit(s.id, s.nombre)}
+                        onClick={() => startEdit(s)}
                         className="shrink-0 rounded-md p-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
-                        aria-label={`Editar nombre de ${s.nombre}`}
+                        aria-label={`Editar ${s.nombre}`}
                       >
                         <Pencil className="size-4" />
                       </button>
@@ -300,6 +322,50 @@ export default function SourcesPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+/** One row of the inline edit form. Enter saves the whole row, Escape aborts —
+ * the three fields travel together in a single PATCH. */
+function EditField({
+  value,
+  onChange,
+  onSave,
+  onCancel,
+  disabled,
+  placeholder,
+  ariaLabel,
+  type = 'text',
+  list,
+  autoFocus,
+}: {
+  value: string
+  onChange: (v: string) => void
+  onSave: () => void
+  onCancel: () => void
+  disabled: boolean
+  placeholder: string
+  ariaLabel: string
+  type?: string
+  list?: string
+  autoFocus?: boolean
+}) {
+  return (
+    <input
+      type={type}
+      list={list}
+      autoFocus={autoFocus}
+      value={value}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' && !disabled) onSave()
+        if (e.key === 'Escape') onCancel()
+      }}
+      placeholder={placeholder}
+      aria-label={ariaLabel}
+      className="w-full rounded-lg border border-border bg-background px-2 py-1 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/20 disabled:opacity-50"
+    />
   )
 }
 
