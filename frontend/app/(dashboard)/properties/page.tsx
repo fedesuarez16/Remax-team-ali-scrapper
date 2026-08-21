@@ -6,7 +6,8 @@ import { PropertyCard } from '@/components/chat/PropertyCard'
 import { SelectCheckbox } from '@/components/properties/SelectCheckbox'
 import { SelectionBar } from '@/components/properties/SelectionBar'
 import type { Property } from '@/hooks/useSSEStream'
-import { enrichFicha, guardarSeleccion, marcarEnviadas } from '@/lib/ficha'
+import { AGENTES, agenteByEmail, asignarAgente, enrichFicha, guardarSeleccion, marcarEnviadas } from '@/lib/ficha'
+import { AgenteSelector } from '@/components/ficha/AgenteSelector'
 import { sortVentaFirst } from '@/lib/operacion'
 import { EMPTY_FILTER, FilterBar, matchesFilter, type Filter } from '@/lib/propertyFilters'
 import { cn } from '@/lib/utils'
@@ -30,6 +31,12 @@ function PropertiesPage() {
   const [filter, setFilter] = useState<Filter>(EMPTY_FILTER)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [preparing, setPreparing] = useState(false)
+  // Paso previo al envío: a nombre de qué agente del equipo salen estas fichas.
+  // Se abre al tocar "Preparar y enviar" — el perfil se elige acá, no después,
+  // porque una vez enviado el link el contacto ya lo vio el cliente.
+  const [eligiendoAgente, setEligiendoAgente] = useState(false)
+  const [agenteEmail, setAgenteEmail] = useState<string>(AGENTES[0].email)
+  const [agenteError, setAgenteError] = useState<string | null>(null)
 
   const toggle = (key: string) =>
     setSelected((prev) => {
@@ -68,20 +75,34 @@ function PropertiesPage() {
     const chosen = shown.filter((p, i) => selected.has(keyFor(p, i)))
     if (chosen.length === 0 || preparing) return
     setPreparing(true)
+    setAgenteError(null)
     try {
       // Parse each description with the LLM (amenities + destacados) before building the ficha.
       const enriched = await Promise.all(chosen.map(enrichFicha))
+      // Sellar el perfil elegido ANTES de mandar nada: la ficha pública lee el
+      // agente de la base, así que si esto falla la ficha saldría con el
+      // contacto de otro. En ese caso se corta acá y no se marca como enviada.
+      const { props: conAgente, fallidas } = await asignarAgente(enriched, agenteEmail)
+      if (fallidas.length > 0) {
+        setAgenteError(
+          `No se pudo asignar el perfil en ${fallidas.length} ${fallidas.length === 1 ? 'propiedad' : 'propiedades'}. No se envió nada.`,
+        )
+        return
+      }
       // Dejar sellado el envío: al volver a esta búsqueda las enviadas se
       // distinguen de las pendientes. Si falla, el envío sigue igual.
       const marcadas = await marcarEnviadas(chosen.map((p) => p.id ?? ''))
-      if (marcadas.length > 0) {
-        const sent = new Set(marcadas)
-        const stamp = new Date().toISOString()
-        setProperties((prev) =>
-          prev.map((p) => (p.id && sent.has(p.id) ? { ...p, enviada_at: stamp } : p))
-        )
-      }
-      guardarSeleccion(enriched)
+      const sent = new Set(marcadas)
+      const stamp = new Date().toISOString()
+      setProperties((prev) =>
+        prev.map((p) => {
+          if (!p.id) return p
+          const actualizada = conAgente.find((c) => c.id === p.id)
+          if (!actualizada) return p
+          return { ...p, agente_email: agenteEmail, ...(sent.has(p.id) ? { enviada_at: stamp } : {}) }
+        })
+      )
+      guardarSeleccion(conAgente)
       router.push('/ficha')
     } finally {
       setPreparing(false)
@@ -251,21 +272,57 @@ function PropertiesPage() {
 
       {/* Action bar — selection → borrar / ficha */}
       {selected.size > 0 && (
-        <SelectionBar
-          count={selected.size}
-          ids={selectedIds}
-          onClear={() => setSelected(new Set())}
-          onDeleted={onDeleted}
-        >
-          <button
-            onClick={prepararYEnviar}
-            disabled={preparing}
-            className="flex items-center gap-2 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background transition hover:bg-foreground/85 disabled:opacity-60"
+        <div>
+          {/* Paso 1 de dos: elegir el perfil. Sólo aparece al pedir el envío,
+              para no cargar la barra cuando el usuario todavía está eligiendo. */}
+          {eligiendoAgente && (
+            <div className="space-y-2 border-t border-border bg-card px-6 py-3">
+              <AgenteSelector
+                selected={agenteEmail}
+                onSelect={setAgenteEmail}
+                disabled={preparing}
+                legend="¿Con qué perfil enviamos estas fichas?"
+              />
+              {agenteError && <p className="text-xs text-destructive">{agenteError}</p>}
+            </div>
+          )}
+
+          <SelectionBar
+            count={selected.size}
+            ids={selectedIds}
+            onClear={() => {
+              setSelected(new Set())
+              setEligiendoAgente(false)
+              setAgenteError(null)
+            }}
+            onDeleted={onDeleted}
           >
-            {preparing ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-            {preparing ? 'Preparando fichas...' : 'Preparar y enviar'}
-          </button>
-        </SelectionBar>
+            {eligiendoAgente && (
+              <button
+                onClick={() => {
+                  setEligiendoAgente(false)
+                  setAgenteError(null)
+                }}
+                disabled={preparing}
+                className="rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition hover:bg-muted disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+            )}
+            <button
+              onClick={() => (eligiendoAgente ? prepararYEnviar() : setEligiendoAgente(true))}
+              disabled={preparing}
+              className="flex items-center gap-2 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background transition hover:bg-foreground/85 disabled:opacity-60"
+            >
+              {preparing ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+              {preparing
+                ? 'Preparando fichas...'
+                : eligiendoAgente
+                  ? `Enviar como ${agenteByEmail(agenteEmail).nombre}`
+                  : 'Preparar y enviar'}
+            </button>
+          </SelectionBar>
+        </div>
       )}
 
       {/* Pagination — only when not scoped to a job and there's more than one page */}

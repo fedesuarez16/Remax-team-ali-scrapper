@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { ArrowLeft, Building2, Check, Copy, ExternalLink, Link2, Pencil, Printer, Send } from 'lucide-react'
 import type { Property } from '@/hooks/useSSEStream'
-import { AGENTE, fichaUrl, guardarSeleccion, leerSeleccion } from '@/lib/ficha'
+import { agenteByEmail, fichaUrl, guardarSeleccion, leerSeleccion } from '@/lib/ficha'
 import { PropertyFicha, fmtPrice } from '@/components/ficha/PropertyFicha'
 import { FichaEditor } from '@/components/ficha/FichaEditor'
 
@@ -97,7 +97,10 @@ export default function FichaPage() {
       const url = fichaUrl(p.id) || p.url_origen || ''
       return `• ${p.titulo ?? p.direccion} — ${fmtPrice(p)}${url ? `\n  ${url}` : ''}`
     })
-    const texto = `Hola! Te comparto ${props.length} ${props.length === 1 ? 'propiedad' : 'propiedades'} seleccionadas:\n\n${lineas.join('\n\n')}\n\n${AGENTE.nombre} · ${AGENTE.inmobiliaria}\n${AGENTE.telefono}`
+    // Firma = el perfil con el que se prepararon estas fichas, no el titular
+    // global: el mensaje y el contacto de la ficha tienen que coincidir.
+    const a = agenteByEmail(props[0]?.agente_email)
+    const texto = `Hola! Te comparto ${props.length} ${props.length === 1 ? 'propiedad' : 'propiedades'} seleccionadas:\n\n${lineas.join('\n\n')}\n\n${a.nombre} · ${a.inmobiliaria}\n${a.telefono}`
     window.open(`https://wa.me/?text=${encodeURIComponent(texto)}`, '_blank', 'noopener')
   }
 

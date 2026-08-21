@@ -43,6 +43,33 @@ export async function updateProperty(id: string, patch: Partial<Property>): Prom
 }
 
 /**
+ * Asignar el agente del equipo a cuyo nombre salen estas fichas, ANTES de
+ * enviarlas. Tiene que quedar persistido y no sólo en la sesión: la ficha
+ * pública (`/p/[id]`) resuelve el contacto leyendo `agente_email` de la base,
+ * así que si el PATCH no entra, el cliente recibe el teléfono equivocado.
+ * Por eso el fallo se propaga (`fallidas`) en vez de tragarse: mandar la ficha
+ * a nombre de otro agente es peor que no mandarla.
+ */
+export async function asignarAgente(
+  props: Property[],
+  email: string,
+): Promise<{ props: Property[]; fallidas: Property[] }> {
+  const fallidas: Property[] = []
+  const actualizadas = await Promise.all(
+    props.map(async (p) => {
+      if (!p.id || p.agente_email === email) return p
+      const updated = await updateProperty(p.id, { agente_email: email })
+      if (!updated) {
+        fallidas.push(p)
+        return p
+      }
+      return updated
+    }),
+  )
+  return { props: actualizadas, fallidas }
+}
+
+/**
  * Marcar propiedades como ENVIADAS al cliente (o desmarcarlas con `enviada:
  * false`). Se llama al preparar y enviar una selección, para que al volver a la
  * misma búsqueda se distingan de las que todavía no se mandaron.

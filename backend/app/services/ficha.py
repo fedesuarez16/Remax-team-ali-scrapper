@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -183,21 +184,9 @@ async def _mercadolibre_gallery(url_origen: str) -> list[str]:
     single feed thumbnail while the listing carried the whole gallery.
 
     The listing page itself still serves 200 to browser-like headers, which is
-    the same route `_zonaprop_gallery` already takes.
+    the same route (and same escalation ladder) `_zonaprop_gallery` takes.
     """
-    if not url_origen:
-        return []
-    try:
-        async with httpx.AsyncClient(
-            timeout=20, headers=_BROWSER_HEADERS, follow_redirects=True
-        ) as client:
-            resp = await client.get(url_origen)
-            if resp.status_code != 200:
-                return []
-            return _parse_mercadolibre_pictures(resp.text)
-    except Exception as exc:
-        logger.warning('ML gallery fetch failed for %s: %s', url_origen, exc)
-        return []
+    return await _gallery_via_ladder(url_origen, _parse_mercadolibre_pictures)
 
 
 def _parse_zonaprop_pictures(html: str) -> list[str]:
@@ -244,25 +233,74 @@ def _parse_zonaprop_pictures(html: str) -> list[str]:
     return out
 
 
-async def _zonaprop_gallery(url_origen: str) -> list[str]:
-    """Full ZonaProp gallery from the detail-page HTML (no browser, no Apify).
+async def _fetch_listing_html(url_origen: str) -> tuple[bool, str | None]:
+    """Browser-headed GET of a listing page — the cheap first rung of the ladder.
 
-    ZonaProp 403s bare clients but serves complete HTML to browser-like headers;
-    the gallery is embedded as JSON. A stale listing may 410 — returns [] then.
+    Returns ``(gone, html)``:
+    - ``gone=True`` when the listing is 404/410 (taken down). The caller must NOT
+      escalate: no rung resurrects a dead listing, and a headless render / paid
+      Apify run per baja would be pure waste.
+    - ``html`` is the page text on 200; None on a block/error (403/429/transport)
+      so the caller escalates. ZonaProp/MercadoLibre 403 bare clients but serve
+      the full gallery HTML to these headers.
     """
     if not url_origen:
-        return []
+        return False, None
     try:
         async with httpx.AsyncClient(
             timeout=20, headers=_BROWSER_HEADERS, follow_redirects=True
         ) as client:
             resp = await client.get(url_origen)
-            if resp.status_code != 200:
-                return []
-            return _parse_zonaprop_pictures(resp.text)
+            if resp.status_code in (404, 410):
+                return True, None
+            return False, resp.text if resp.status_code == 200 else None
     except Exception as exc:
-        logger.warning('ZonaProp gallery fetch failed for %s: %s', url_origen, exc)
+        logger.warning('listing fetch failed for %s: %s', url_origen, exc)
+        return False, None
+
+
+async def _gallery_via_ladder(
+    url_origen: str, parser: Callable[[str], list[str]]
+) -> list[str]:
+    """Fetch a listing's HTML and parse its gallery, escalating only on a block.
+
+    Rung 1 — browser-headed httpx (free): the fast path that answers most opens.
+    Rung 2 — headless Chromium render (free): past a transient UA/JS/WAF wall.
+    Rung 3 — Apify website actor (paid, last resort): only when a genuine WAF
+             block defeats both cheaper rungs. Returns None off (no token/mock),
+             so cost is never incurred unless everything else came back empty.
+
+    A 404/410 (listing gone) short-circuits to [] with NO escalation. Each rung
+    reuses the SAME `parser`, so the escalation is source-agnostic.
+    """
+    if not url_origen:
         return []
+
+    gone, html = await _fetch_listing_html(url_origen)
+    if gone:
+        return []
+    if html and (imgs := parser(html)):
+        return imgs
+
+    from app.services.apify import fetch_page_html_via_actor, render_page_html
+
+    rendered = await render_page_html(url_origen)
+    if rendered and (imgs := parser(rendered)):
+        return imgs
+
+    via_actor = await fetch_page_html_via_actor(url_origen)
+    return parser(via_actor) if via_actor else []
+
+
+async def _zonaprop_gallery(url_origen: str) -> list[str]:
+    """Full ZonaProp gallery from the detail page, escalating past a WAF block.
+
+    ZonaProp serves complete HTML (gallery embedded as JSON) to browser-like
+    headers, but a transient DataDome challenge can blank the cheap fetch — the
+    ladder then falls through to a headless render and, last, an Apify actor.
+    A stale listing simply parses to [].
+    """
+    return await _gallery_via_ladder(url_origen, _parse_zonaprop_pictures)
 
 
 async def _fetch_full_gallery(prop: dict[str, Any]) -> list[str]:
@@ -313,7 +351,15 @@ async def _enrich_gallery(prop: dict[str, Any], sb: Any) -> None:
     """
     existing = prop.get('imagenes') or []
     full = await _fetch_full_gallery(prop)
-    merged = _merge_images(existing, full)
+    if not full:
+        return
+    # A ficha stuck on the low-res feed thumbnail: the recovered gallery is the
+    # authoritative full-res set and already contains that photo at a better
+    # resolution, so REPLACE rather than merge — otherwise the blurry 360x266
+    # thumbnail stays pinned as imagenes[0], i.e. the ficha's cover. A healthy
+    # gallery still merges, so a manually-added photo is never dropped.
+    merged = full if _gallery_looks_incomplete(prop) else _merge_images(existing, full)
+    merged = _merge_images(merged, [])
     if merged == existing:
         return
     prop['imagenes'] = merged
