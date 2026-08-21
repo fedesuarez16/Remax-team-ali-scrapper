@@ -25,18 +25,23 @@ class _Res:
 class _FakeQuery:
     def __init__(self, store: list[dict], mode: str, insert_defaults: dict | None = None) -> None:
         self._store = store
-        self._mode = mode  # 'select' | 'insert' | 'delete'
+        self._mode = mode  # 'select' | 'insert' | 'update' | 'delete'
         self._insert_defaults = insert_defaults or {}
         self._filters: list[tuple[str, str, object]] = []
         self._order_field: str | None = None
         self._order_desc = False
         self._insert_payload: dict | None = None
+        self._update_payload: dict | None = None
 
     def select(self, *_a, **_kw) -> '_FakeQuery':
         return self
 
     def insert(self, payload: dict) -> '_FakeQuery':
         self._insert_payload = payload
+        return self
+
+    def update(self, payload: dict) -> '_FakeQuery':
+        self._update_payload = payload
         return self
 
     def delete(self) -> '_FakeQuery':
@@ -67,6 +72,12 @@ class _FakeQuery:
             self._store.append(row)
             return _Res([row])
 
+        if self._mode == 'update':
+            matched = [r for r in self._store if self._match(r)]
+            for r in matched:
+                r.update(self._update_payload or {})
+            return _Res(matched)
+
         if self._mode == 'delete':
             matched = [r for r in self._store if self._match(r)]
             for r in matched:
@@ -90,6 +101,9 @@ class _FakeTable:
     def insert(self, payload: dict) -> _FakeQuery:
         return _FakeQuery(self._store, 'insert', self._insert_defaults).insert(payload)
 
+    def update(self, payload: dict) -> _FakeQuery:
+        return _FakeQuery(self._store, 'update', self._insert_defaults).update(payload)
+
     def delete(self) -> _FakeQuery:
         return _FakeQuery(self._store, 'delete', self._insert_defaults)
 
@@ -109,6 +123,9 @@ class _RaisingTable:
         raise RuntimeError('boom')
 
     def insert(self, *_a, **_kw):
+        raise RuntimeError('boom')
+
+    def update(self, *_a, **_kw):
         raise RuntimeError('boom')
 
     def delete(self, *_a, **_kw):
@@ -238,6 +255,87 @@ async def test_post_failure_returns_error_without_raising() -> None:
 async def test_post_when_supabase_not_configured() -> None:
     async with _client(None) as client:
         resp = await client.post('/manual-sources', json={'nombre': 'X', 'url': 'https://x.com'})
+
+    assert resp.status_code == 200
+    assert resp.json() == {'source': None, 'error': 'Supabase no configurado'}
+
+
+# -- PATCH (rename / toggle) ------------------------------------------------
+
+
+async def test_patch_renames_source() -> None:
+    existing = _row('RE/MAX Belgrano', 'https://remax.com.ar/belgrano', minutes_ago=1)
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(
+            f'/manual-sources/{existing["id"]}', json={'nombre': 'RE/MAX Belgrano Norte'}
+        )
+
+    assert resp.status_code == 200
+    source = resp.json()['source']
+    assert source['nombre'] == 'RE/MAX Belgrano Norte'
+    assert fake_sb._store[0]['nombre'] == 'RE/MAX Belgrano Norte'
+
+
+async def test_patch_rename_leaves_activo_untouched() -> None:
+    existing = _row('Inmobiliaria Sur', 'https://inmosur.com.ar', minutes_ago=1, activo=False)
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(f'/manual-sources/{existing["id"]}', json={'nombre': 'Inmo Sur'})
+
+    assert resp.status_code == 200
+    assert resp.json()['source']['activo'] is False
+
+
+async def test_patch_toggles_activo() -> None:
+    existing = _row('Inmobiliaria Sur', 'https://inmosur.com.ar', minutes_ago=1)
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(f'/manual-sources/{existing["id"]}', json={'activo': False})
+
+    assert resp.status_code == 200
+    assert resp.json()['source']['activo'] is False
+    assert fake_sb._store[0]['activo'] is False
+
+
+async def test_patch_empty_nombre_is_rejected() -> None:
+    existing = _row('Inmobiliaria Sur', 'https://inmosur.com.ar', minutes_ago=1)
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(f'/manual-sources/{existing["id"]}', json={'nombre': '   '})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['source'] is None
+    assert 'error' in data
+    assert fake_sb._store[0]['nombre'] == 'Inmobiliaria Sur'
+
+
+async def test_patch_with_nothing_to_update_is_rejected() -> None:
+    existing = _row('Inmobiliaria Sur', 'https://inmosur.com.ar', minutes_ago=1)
+    fake_sb = _FakeSupabase([existing])
+    async with _client(fake_sb) as client:
+        resp = await client.patch(f'/manual-sources/{existing["id"]}', json={})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['source'] is None
+    assert 'error' in data
+
+
+async def test_patch_failure_returns_error_without_raising() -> None:
+    async with _client(_RaisingSupabase()) as client:
+        resp = await client.patch('/manual-sources/some-id', json={'nombre': 'X'})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data['source'] is None
+    assert 'error' in data
+
+
+async def test_patch_when_supabase_not_configured() -> None:
+    async with _client(None) as client:
+        resp = await client.patch('/manual-sources/some-id', json={'nombre': 'X'})
 
     assert resp.status_code == 200
     assert resp.json() == {'source': None, 'error': 'Supabase no configurado'}

@@ -101,21 +101,33 @@ async def create_manual_source(request: Request, body: dict) -> dict[str, Any]:
 
 @router.patch('/{source_id}')
 async def update_manual_source(request: Request, source_id: str, body: dict) -> dict[str, Any]:
-    """Toggle a source on/off. `activo=false` excludes it from every future
-    search — the fan-out only reads `.eq('activo', True)` (see
-    `_fetch_active_manual_sources` in app.graphs.extraction.nodes).
+    """Rename a source and/or toggle it on/off. `activo=false` excludes it
+    from every future search — the fan-out only reads `.eq('activo', True)`
+    (see `_fetch_active_manual_sources` in app.graphs.extraction.nodes).
+
+    Presence-checked (`'nombre' in body`) so a rename doesn't clobber `activo`
+    and vice versa — same convention as the saved-zones PATCH.
     """
     sb = request.app.state.supabase
     if sb is None:
         return {'source': None, 'error': 'Supabase no configurado'}
 
-    if 'activo' not in body:
-        return {'source': None, 'error': 'activo es requerido'}
+    payload: dict[str, Any] = {}
+    if 'nombre' in body:
+        nombre = (body.get('nombre') or '').strip()
+        if not nombre:
+            return {'source': None, 'error': 'nombre no puede estar vacío'}
+        payload['nombre'] = nombre
+    if 'activo' in body:
+        payload['activo'] = bool(body['activo'])
+
+    if not payload:
+        return {'source': None, 'error': 'nada para actualizar'}
 
     try:
         res = (
             await sb.table('manual_sources')
-            .update({'activo': bool(body['activo'])})
+            .update(payload)
             .eq('id', source_id)
             .execute()
         )

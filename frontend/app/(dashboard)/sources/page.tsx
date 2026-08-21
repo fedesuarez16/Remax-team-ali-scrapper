@@ -1,6 +1,6 @@
 'use client'
 import { useState } from 'react'
-import { Building2, Globe, Layers, Loader2, MapPin, Plus, Trash2 } from 'lucide-react'
+import { Building2, Check, Globe, Layers, Loader2, MapPin, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useManualSources, useSourceZonas } from '@/hooks/useManualSources'
 import { usePortals } from '@/hooks/usePortals'
 
@@ -10,7 +10,7 @@ const ZONA_SUGERIDAS = [
 ]
 
 export default function SourcesPage() {
-  const { sources, addSource, deleteSource, toggleSource, loading } = useManualSources()
+  const { sources, addSource, deleteSource, toggleSource, renameSource, loading } = useManualSources()
   const { portals, togglePortal, loading: loadingPortals } = usePortals()
   const { zonas } = useSourceZonas()
   const [nombre, setNombre] = useState('')
@@ -19,6 +19,10 @@ export default function SourcesPage() {
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editNombre, setEditNombre] = useState('')
+  const [editError, setEditError] = useState<string | null>(null)
+  const [savingEdit, setSavingEdit] = useState(false)
 
   const portalesActivos = portals.filter((p) => p.activo).length
   const portalesInactivos = portals.length - portalesActivos
@@ -38,6 +42,30 @@ export default function SourcesPage() {
     setUrl('')
     // Keep `zona` so loading several inmobiliarias into the same zona in a
     // row doesn't mean retyping it every time.
+  }
+
+  const startEdit = (id: string, nombreActual: string) => {
+    setEditingId(id)
+    setEditNombre(nombreActual)
+    setEditError(null)
+  }
+
+  const cancelEdit = () => {
+    setEditingId(null)
+    setEditNombre('')
+    setEditError(null)
+  }
+
+  const handleRename = async (id: string) => {
+    setSavingEdit(true)
+    setEditError(null)
+    const err = await renameSource(id, editNombre)
+    setSavingEdit(false)
+    if (err) {
+      setEditError(err)
+      return
+    }
+    cancelEdit()
   }
 
   const handleDelete = async (id: string) => {
@@ -166,19 +194,37 @@ export default function SourcesPage() {
                 >
                   <Globe className="size-4 shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
-                    <p className="flex items-center gap-2 truncate text-sm font-medium text-foreground">
-                      {s.nombre}
-                      {s.zona ? (
-                        <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
-                          <MapPin className="size-3" />
-                          {s.zona}
-                        </span>
-                      ) : (
-                        <span className="shrink-0 text-[11px] font-normal text-muted-foreground/60">
-                          sin zona
-                        </span>
-                      )}
-                    </p>
+                    {editingId === s.id ? (
+                      <>
+                        <input
+                          type="text"
+                          autoFocus
+                          value={editNombre}
+                          onChange={(e) => setEditNombre(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !savingEdit) handleRename(s.id)
+                            if (e.key === 'Escape') cancelEdit()
+                          }}
+                          aria-label={`Nuevo nombre para ${s.nombre}`}
+                          className="w-full rounded-lg border border-border bg-background px-2 py-1 text-sm font-medium text-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
+                        />
+                        {editError && <p className="mt-1 text-xs text-destructive">{editError}</p>}
+                      </>
+                    ) : (
+                      <p className="flex items-center gap-2 truncate text-sm font-medium text-foreground">
+                        {s.nombre}
+                        {s.zona ? (
+                          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
+                            <MapPin className="size-3" />
+                            {s.zona}
+                          </span>
+                        ) : (
+                          <span className="shrink-0 text-[11px] font-normal text-muted-foreground/60">
+                            sin zona
+                          </span>
+                        )}
+                      </p>
+                    )}
                     <a
                       href={s.url}
                       target="_blank"
@@ -188,23 +234,57 @@ export default function SourcesPage() {
                       {s.url}
                     </a>
                   </div>
-                  <Toggle
-                    active={s.activo}
-                    onClick={() => toggleSource(s.id, !s.activo)}
-                    label={`${s.activo ? 'Desactivar' : 'Activar'} ${s.nombre}`}
-                  />
-                  <button
-                    onClick={() => handleDelete(s.id)}
-                    disabled={deletingId === s.id}
-                    className="shrink-0 rounded-md p-1.5 text-muted-foreground transition hover:bg-muted hover:text-destructive disabled:opacity-40"
-                    aria-label={`Eliminar ${s.nombre}`}
-                  >
-                    {deletingId === s.id ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Trash2 className="size-4" />
-                    )}
-                  </button>
+                  {editingId === s.id ? (
+                    <>
+                      <button
+                        onClick={() => handleRename(s.id)}
+                        disabled={savingEdit || !editNombre.trim()}
+                        className="shrink-0 rounded-md p-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-40"
+                        aria-label={`Guardar nombre de ${s.nombre}`}
+                      >
+                        {savingEdit ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Check className="size-4" />
+                        )}
+                      </button>
+                      <button
+                        onClick={cancelEdit}
+                        disabled={savingEdit}
+                        className="shrink-0 rounded-md p-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-40"
+                        aria-label={`Cancelar edición de ${s.nombre}`}
+                      >
+                        <X className="size-4" />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => startEdit(s.id, s.nombre)}
+                        className="shrink-0 rounded-md p-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                        aria-label={`Editar nombre de ${s.nombre}`}
+                      >
+                        <Pencil className="size-4" />
+                      </button>
+                      <Toggle
+                        active={s.activo}
+                        onClick={() => toggleSource(s.id, !s.activo)}
+                        label={`${s.activo ? 'Desactivar' : 'Activar'} ${s.nombre}`}
+                      />
+                      <button
+                        onClick={() => handleDelete(s.id)}
+                        disabled={deletingId === s.id}
+                        className="shrink-0 rounded-md p-1.5 text-muted-foreground transition hover:bg-muted hover:text-destructive disabled:opacity-40"
+                        aria-label={`Eliminar ${s.nombre}`}
+                      >
+                        {deletingId === s.id ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="size-4" />
+                        )}
+                      </button>
+                    </>
+                  )}
                 </li>
               ))}
             </ul>

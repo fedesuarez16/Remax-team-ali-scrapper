@@ -115,6 +115,27 @@ export async function toggleSource(id: string, activo: boolean): Promise<string 
   }
 }
 
+/** Renames a source. The backend PATCH is presence-checked, so sending only
+ * `nombre` leaves `activo` untouched. Returns an error message or null. */
+export async function renameSource(id: string, nombre: string): Promise<string | null> {
+  const trimmed = nombre.trim()
+  if (!trimmed) return 'El nombre no puede estar vacío'
+
+  try {
+    const res = await fetch(`${SOURCES_URL}/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nombre: trimmed }),
+    })
+    const data = await res.json()
+    if (data.error) return data.error as string
+    notify()
+    return null
+  } catch {
+    return 'No se pudo conectar con el servidor'
+  }
+}
+
 export async function deleteSource(id: string): Promise<void> {
   try {
     const res = await fetch(`${SOURCES_URL}/${encodeURIComponent(id)}`, { method: 'DELETE' })
@@ -156,7 +177,7 @@ export function useManualSources() {
     }
   }, [])
 
-  return { sources, addSource, deleteSource, toggleSource, loading }
+  return { sources, addSource, deleteSource, toggleSource, renameSource, loading }
 }
 
 // ── Zonas ────────────────────────────────────────────────────────────────────
