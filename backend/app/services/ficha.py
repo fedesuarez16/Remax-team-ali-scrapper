@@ -396,10 +396,11 @@ async def _fetch_full_gallery(prop: dict[str, Any]) -> list[str]:
     return []
 
 
-# El mosaico de escritorio del VIP de inmuebles de MercadoLibre trae SIEMPRE 5
-# fotos, diga lo que diga el aviso. Por eso "ficha de ML con 5 o menos" es la
-# huella exacta de una galería traída con el UA equivocado.
-_ML_MOSAICO = 5
+# Debajo de esto, una ficha de un portal CON parser propio está casi seguro
+# incompleta. Los dos números salen de relevar avisos reales: el mosaico de
+# escritorio de MercadoLibre trae siempre 5 fotos (el aviso tenía 28) y el
+# harvest genérico de ZonaProp saca 6 donde el parser propio saca 27.
+_GALERIA_SOSPECHOSA = 6
 
 
 def _gallery_looks_incomplete(prop: dict[str, Any]) -> bool:
@@ -410,18 +411,30 @@ def _gallery_looks_incomplete(prop: dict[str, Any]) -> bool:
     transient portal failure (WAF challenge, timeout) at scrape time — worth one
     re-attempt. A healthy gallery reports False, so repeat ficha opens cost nothing.
 
-    Caso aparte, MercadoLibre: las fichas guardadas antes de que la galería se
-    pidiera con UA mobile tienen exactamente las 5 del mosaico de escritorio y
-    ya vienen marcadas como enriquecidas, así que sin esta regla quedarían
-    clavadas en 5 de 28 para siempre. El reintento se auto-limita: si el aviso
-    de verdad tiene 5 fotos, el fetch devuelve las mismas y `_enrich_gallery`
-    corta antes de escribir en la base. Cuesta un GET gratis, no un run pago.
+    Caso aparte, los portales con parser propio (`_PORTAL_HOSTS`): ahí hay una
+    fuente de verdad barata, así que el umbral se sube a `_GALERIA_SOSPECHOSA`.
+    Existe porque las fichas guardadas antes de que el import consultara al
+    parser del portal quedaron con la galería parcial Y marcadas como
+    enriquecidas — el import es idempotente por `url_origen`, así que repegar el
+    link devuelve la fila vieja y sin esta regla quedaban clavadas para siempre.
+
+    El reintento se auto-limita por partida doble: la escalera sólo sube de
+    escalón cuando el parser vuelve VACÍO, así que un aviso que de verdad tiene
+    5 fotos se resuelve en el primer GET (gratis) y no toca el rung pago; y si
+    lo que vuelve es lo mismo que ya había, `_enrich_gallery` corta antes de
+    escribir en la base.
+
+    Un portal SIN parser propio (Argenprop, la web de una inmobiliaria) se
+    queda con la regla vieja: no hay contra qué comparar, y reintentar sería
+    pagar harvest headless sin saber siquiera si falta algo.
     """
     imagenes = prop.get('imagenes') or []
     if len(imagenes) <= 1:
         return True
     host = urlparse(prop.get('url_origen') or '').netloc.lower()
-    return 'mercadolibre' in host and len(imagenes) <= _ML_MOSAICO
+    if not any(portal in host for portal in _PORTAL_HOSTS):
+        return False
+    return len(imagenes) <= _GALERIA_SOSPECHOSA
 
 
 async def _enrich_gallery(prop: dict[str, Any], sb: Any) -> None:

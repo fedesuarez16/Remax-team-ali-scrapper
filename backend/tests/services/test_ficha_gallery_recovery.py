@@ -170,3 +170,46 @@ async def test_ladder_returns_empty_when_every_rung_fails(monkeypatch) -> None:
     monkeypatch.setattr(apify, 'fetch_page_html_via_actor', none)
 
     assert await _gallery_via_ladder('http://x', _parse) == []
+
+
+# ── Fichas viejas clavadas en una galería parcial ────────────────────────────
+#
+# Relevado en vivo sobre una ficha real de ZonaProp (55714384, "Casa Hotel La
+# Cumbre"): el parser propio saca 27 fotos, el harvest genérico 6. Una ficha
+# importada antes de que el import consultara al parser del portal quedó con
+# esas 6 y NO se cura sola: el import es idempotente por `url_origen` (repegar
+# el link devuelve la fila guardada) y el gate de recuperación sólo miraba
+# `<= 1 imagen`.
+#
+# El gate se abre para los portales que TIENEN parser propio, porque sólo ahí
+# hay una fuente de verdad barata contra la cual comparar. La escalera no
+# escala salvo que el parser vuelva vacío, así que un aviso que de verdad tiene
+# 5 fotos cuesta un GET gratis y ninguna escritura.
+
+_ZP_URL = 'https://www.zonaprop.com.ar/propiedades/clasificado/x-55714384.html'
+
+
+def test_zonaprop_stuck_on_the_generic_harvest_is_retried() -> None:
+    prop = {'url_origen': _ZP_URL, 'imagenes': [f'z{i}.jpg' for i in range(6)]}
+    assert _gallery_looks_incomplete(prop) is True
+
+
+def test_a_healthy_zonaprop_gallery_is_left_alone() -> None:
+    prop = {'url_origen': _ZP_URL, 'imagenes': [f'z{i}.jpg' for i in range(27)]}
+    assert _gallery_looks_incomplete(prop) is False
+
+
+def test_remax_stuck_on_the_og_image_is_retried() -> None:
+    """RE/MAX es una SPA: sin su API la ficha nace con la sola foto del og."""
+    prop = {'url_origen': 'https://www.remax.com.ar/listings/casa-1', 'imagenes': ['og.jpg']}
+    assert _gallery_looks_incomplete(prop) is True
+
+
+def test_a_portal_without_its_own_parser_is_not_retried() -> None:
+    """Argenprop o la web de una inmobiliaria no tienen fuente de verdad barata:
+    reintentar sería pagar harvest headless sin saber si falta algo."""
+    prop = {
+        'url_origen': 'https://www.argenprop.com/ph--9044111',
+        'imagenes': [f'a{i}.jpg' for i in range(5)],
+    }
+    assert _gallery_looks_incomplete(prop) is False

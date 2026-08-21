@@ -234,11 +234,17 @@ class TestLasFichasViejasSeCuran:
         prop = {'url_origen': _ML_URL, 'imagenes': [f'{_BASE}/f{i}.jpg' for i in range(28)]}
         assert ficha._gallery_looks_incomplete(prop) is False
 
-    def test_otro_portal_con_5_fotos_esta_sano(self) -> None:
-        """La huella es de MercadoLibre. 5 fotos en ZonaProp es una galería real."""
+    def test_un_portal_sin_parser_propio_con_5_fotos_esta_sano(self) -> None:
+        """El reintento vale donde hay parser propio contra el cual comparar.
+
+        Este test decía que 5 fotos en ZonaProp eran una galería sana. Es falso:
+        relevado en vivo, un aviso de ZonaProp con 6 fotos guardadas tenía 27 en
+        el portal. Ese caso lo cubre `test_ficha_gallery_recovery.py`; acá queda
+        el portal SIN parser propio, que sí se deja como está.
+        """
         prop = {
-            'url_origen': 'https://www.zonaprop.com.ar/propiedades/casa-1.html',
-            'imagenes': [f'z{i}.jpg' for i in range(5)],
+            'url_origen': 'https://www.argenprop.com/ph--9044111',
+            'imagenes': [f'a{i}.jpg' for i in range(5)],
         }
         assert ficha._gallery_looks_incomplete(prop) is False
 
