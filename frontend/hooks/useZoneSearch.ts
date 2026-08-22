@@ -1,6 +1,6 @@
 'use client'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Agency } from '@/components/chat/AgencySelector'
+import type { Agency, ReviewManualSource } from '@/components/chat/AgencySelector'
 import type { MapProperty } from '@/components/map/PropertyMap'
 import { samplePolygon } from '@/lib/geo'
 import { addSearch } from '@/hooks/useSearchHistory'
@@ -95,6 +95,7 @@ export function useZoneSearch() {
   const progress: ProgressMap = progressMsg?.progress ?? {}
   const matchedCount = progressMsg?.matchedCount ?? 0
   const agencies: Agency[] | null = agenciesMsg?.agencies ?? null
+  const manualSources: ReviewManualSource[] = agenciesMsg?.manualSources ?? []
   const agenciesMessage: string | null = agenciesMsg?.message ?? null
   const jobId = lastJobId ?? agenciesMsg?.jobId ?? null
   const estimatedActors = zonas.length * INITIAL_SOURCES.length + zonas.length
@@ -197,12 +198,12 @@ export function useZoneSearch() {
       .then((id) => id && setSavedEntryId(id))
   }, [jobId, runQuery])
 
-  const confirmAgencies = useCallback((ids: string[]) => {
+  const confirmAgencies = useCallback((ids: string[], manualIds: string[]) => {
     if (!jobId) return
     if (agenciesMsg) resumedAgenciesIdRef.current = agenciesMsg.id
     setStalled(false)
     setPhase('running')
-    void resumeScraping(jobId, ids)
+    void resumeScraping(jobId, ids, manualIds)
   }, [jobId, agenciesMsg, resumeScraping])
 
   const cancel = useCallback(() => {
@@ -339,6 +340,7 @@ export function useZoneSearch() {
     progress,
     matchedCount,
     agencies,
+    manualSources,
     agenciesMessage,
     jobId,
     jobProperties,

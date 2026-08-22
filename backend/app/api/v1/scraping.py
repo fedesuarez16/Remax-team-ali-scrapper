@@ -56,6 +56,11 @@ class StartScrapingResponse(BaseModel):
 
 class ResumeScrapingRequest(BaseModel):
     selected_agency_ids: list[str]
+    # Which manually-registered inmobiliarias (backend/app/api/v1/manual_sources.py)
+    # survive the review step. `None` = the client never showed them, so keep
+    # every one that the zona filter matched — `[]` means the user unchecked
+    # all of them, which is a different thing.
+    selected_manual_source_ids: list[str] | None = None
 
 
 def _sse_headers() -> dict[str, str]:
@@ -302,7 +307,12 @@ async def resume_scraping(job_id: str, body: ResumeScrapingRequest, request: Req
     cost_ledger = await _seed_cost_ledger(sb, job_id)
     _spawn_graph_task(
         _run_graph_into_queue(
-            graph, Command(resume=body.selected_agency_ids), config, queue, sb, job_id, cost_ledger,
+            graph,
+            Command(resume={
+                'agency_ids': body.selected_agency_ids,
+                'manual_source_ids': body.selected_manual_source_ids,
+            }),
+            config, queue, sb, job_id, cost_ledger,
         )
     )
 

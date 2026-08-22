@@ -624,13 +624,44 @@ async def _fetch_active_manual_sources(sb: Any, zona: str | None = None) -> list
     if sb is None:
         return []
     try:
-        query = sb.table('manual_sources').select('nombre,url').eq('activo', True)
+        query = sb.table('manual_sources').select('id,nombre,url,zona').eq('activo', True)
         if zona and zona.strip():
             query = query.eq('zona_norm', _normalize_zona(zona))
         res = await query.execute()
         return res.data or []
     except Exception:
         return []
+
+
+def _read_agency_selection(resumed: Any) -> tuple[list[str], list[str] | None]:
+    """Normalize what POST /{job_id}/resume sent back into the interrupt.
+
+    Current shape is a dict with both picks. A bare list is the pre-registry
+    shape (a job interrupted by an older build, resumed after deploy): it only
+    ever carried agency ids, and back then every curated source was folded in
+    unconditionally — so its manual selection is None ("keep them all"), which
+    is NOT the same as an explicit empty list ("the user unchecked them")."""
+    if isinstance(resumed, dict):
+        raw_manual = resumed.get('manual_source_ids')
+        return (
+            list(resumed.get('agency_ids') or []),
+            list(raw_manual) if raw_manual is not None else None,
+        )
+    return list(resumed or []), None
+
+
+def _review_message(agencies_count: int, manual_count: int) -> str:
+    """The card's copy has to name BOTH origins — the operator needs to see that
+    their hand-loaded inmobiliarias are in this run, which is exactly what the
+    agencies-only wording used to hide."""
+    curadas = f'{manual_count} cargadas por vos en Fuentes'
+    if agencies_count and manual_count:
+        encontradas = f'Encontré {agencies_count} inmobiliarias locales, más {curadas}.'
+    elif manual_count:
+        encontradas = f'Voy a consultar las {curadas}.'
+    else:
+        encontradas = f'Encontré {agencies_count} inmobiliarias locales.'
+    return f'{encontradas} Seleccioná las que querés incluir para buscar propiedades en sus sitios web.'
 
 
 async def review_agencies(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
@@ -653,17 +684,21 @@ async def review_agencies(state: ScrapingState, config: RunnableConfig) -> dict[
         }, config=config)
         return {'selected_agency_ids': [], 'manual_sources': []}
 
-    if agencies:
-        await adispatch_custom_event('agencies_review', {
-            'event': 'agencies_review',
-            'agencies': [a.model_dump() for a in agencies],
-            'message': f'Encontré {len(agencies)} inmobiliarias locales. Seleccioná las que querés incluir para buscar propiedades en sus sitios web.',
-        }, config=config)
+    # Curated-only runs pause here too: the whole point of the review step is
+    # that nothing gets scraped without the operator seeing it first.
+    await adispatch_custom_event('agencies_review', {
+        'event': 'agencies_review',
+        'agencies': [a.model_dump() for a in agencies],
+        'manual_sources': manual_sources,
+        'message': _review_message(len(agencies), len(manual_sources)),
+    }, config=config)
 
-        # INTERRUPT — graph pauses here, resumes when user sends selected_agency_ids
-        selected: list[str] = interrupt({'type': 'agency_selection'})
-    else:
-        selected = []
+    # INTERRUPT — graph pauses here, resumes with the user's two picks
+    selected, selected_manual_ids = _read_agency_selection(interrupt({'type': 'agency_selection'}))
+
+    if selected_manual_ids is not None:
+        keep = set(selected_manual_ids)
+        manual_sources = [s for s in manual_sources if s.get('id') in keep]
 
     return {'selected_agency_ids': selected, 'manual_sources': manual_sources}
 
@@ -680,21 +715,26 @@ def route_after_review(state: ScrapingState) -> str | list[Any]:
     sends: list[Any] = []
     websites_sent = 0
 
-    for a in selected_agencies:
-        if a.sitio_web and websites_sent < settings.MAX_WEBSITE_URLS:
-            sends.append(Send('run_website_scraper', {'nombre': a.nombre, 'url': a.sitio_web, 'job_id': job_id}))
-            websites_sent += 1
-        if a.instagram_handle and not settings.SCRAPE_GOOGLEMAPS_ONLY:
-            sends.append(Send('run_instagram_scraper', {'nombre': a.nombre, 'handle': a.instagram_handle, 'job_id': job_id}))
-
-    # Manually-registered sources reach the SAME website-scraping pipeline,
-    # regardless of whether any agency was selected above — they share the
-    # MAX_WEBSITE_URLS cap with agency websites.
+    # Manually-registered sources reach the SAME website-scraping pipeline as
+    # agency websites and share the MAX_WEBSITE_URLS cap — but they go FIRST.
+    # Someone filed these by hand for this zona; a discovered Google Maps result
+    # did not. With the selector defaulting to every agency checked, taking them
+    # last meant a zona with MAX_WEBSITE_URLS+ agencies never scraped a single
+    # curated source, silently.
     for src in manual_sources:
         if websites_sent >= settings.MAX_WEBSITE_URLS:
             break
         sends.append(Send('run_website_scraper', {'nombre': src['nombre'], 'url': src['url'], 'job_id': job_id}))
         websites_sent += 1
+
+    for a in selected_agencies:
+        if a.sitio_web and websites_sent < settings.MAX_WEBSITE_URLS:
+            sends.append(Send('run_website_scraper', {'nombre': a.nombre, 'url': a.sitio_web, 'job_id': job_id}))
+            websites_sent += 1
+        # Instagram is a separate actor with its own budget — the website cap
+        # never gated it, so a full cap must not silence it either.
+        if a.instagram_handle and not settings.SCRAPE_GOOGLEMAPS_ONLY:
+            sends.append(Send('run_instagram_scraper', {'nombre': a.nombre, 'handle': a.instagram_handle, 'job_id': job_id}))
 
     return sends if sends else 'no_websites'
 

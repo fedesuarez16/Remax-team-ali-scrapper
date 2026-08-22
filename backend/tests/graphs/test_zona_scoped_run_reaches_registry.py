@@ -5,6 +5,10 @@ compiled graph to prove the run actually reaches `review_agencies` (where the
 curated registry is read) and fans out to `run_website_scraper` for that
 zona's inmobiliarias only — instead of dying on an empty fan-out.
 
+The run pauses at `review_agencies` (the operator confirms which inmobiliarias
+to consult, curated ones included), so `_run` drives the real interrupt/resume
+round-trip with a checkpointer, confirming every source the registry offered.
+
 Only the two external boundaries are faked: `parse_query` (Anthropic call) and
 Supabase. Every routing/edge decision under test is the real graph.
 """
@@ -55,18 +59,20 @@ class _FakeSupabase:
         raise AssertionError(f'unexpected table {name}')
 
 
-def _src(nombre: str, url: str, zona: str) -> dict:
+def _src(source_id: str, nombre: str, url: str, zona: str) -> dict:
     return {
-        'nombre': nombre, 'url': url, 'activo': True,
+        'id': source_id, 'nombre': nombre, 'url': url, 'activo': True,
         'zona': zona, 'zona_norm': normalize_zona(zona),
     }
 
 
 REGISTRY = [
-    _src('Inmobiliaria A', 'https://a.com', 'City Bell'),
-    _src('Inmobiliaria B', 'https://b.com', 'City Bell'),
-    _src('Inmobiliaria D', 'https://d.com', 'Gonnet'),
+    _src('m-a', 'Inmobiliaria A', 'https://a.com', 'City Bell'),
+    _src('m-b', 'Inmobiliaria B', 'https://b.com', 'City Bell'),
+    _src('m-d', 'Inmobiliaria D', 'https://d.com', 'Gonnet'),
 ]
+
+ALL_SOURCE_IDS = [s['id'] for s in REGISTRY]
 
 
 @pytest.fixture
@@ -98,14 +104,25 @@ def scraped_urls(monkeypatch) -> list[str]:
 
 
 async def _run(selection: dict, sb) -> None:
+    """Run to the review interrupt, then resume confirming everything — the
+    zona filter, not the operator's pick, is what these tests are about."""
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
     # build_graph resolves node callables at build time, so it must be built
     # AFTER the monkeypatches above.
-    graph = build_graph()
+    graph = build_graph(checkpointer=MemorySaver())
+    config = {'configurable': {'supabase': sb, 'thread_id': 'job-1'}}
     await graph.ainvoke(
         {'query': 'Casa 3 dormitorios en City Bell', 'job_id': 'job-1',
          'source_selection': selection},
-        {'configurable': {'supabase': sb}},
+        config,
     )
+    if (await graph.aget_state(config)).next:
+        await graph.ainvoke(
+            Command(resume={'agency_ids': [], 'manual_source_ids': ALL_SOURCE_IDS}),
+            config,
+        )
 
 
 async def test_zona_scoped_run_scrapes_only_that_zonas_inmobiliarias(scraped_urls) -> None:

@@ -1,6 +1,6 @@
 'use client'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Agency } from '@/components/chat/AgencySelector'
+import type { Agency, ReviewManualSource } from '@/components/chat/AgencySelector'
 import type { SourceSelection } from '@/lib/sources'
 import type { ApifyCostBreakdown } from '@/lib/apifyCost'
 
@@ -37,7 +37,14 @@ export type Message =
       // desconocido (backend anterior a este campo) y no se muestra.
       apifyCostUsd: number | null; apifyCostBreakdown: ApifyCostBreakdown | null
     }
-  | { id: string; type: 'agencies'; agencies: Agency[]; message: string; jobId: string }
+  | {
+      id: string; type: 'agencies'; agencies: Agency[]
+      /** Inmobiliarias cargadas a mano en Fuentes que entran en esta búsqueda.
+       * Se muestran junto a las descubiertas para que el operador vea (y pueda
+       * destildar) TODO lo que se va a scrapear, no solo lo de Google Maps. */
+      manualSources: ReviewManualSource[]
+      message: string; jobId: string
+    }
 
 export const INITIAL_SOURCES = ['zonaprop', 'mercadolibre', 'googlemaps']
 
@@ -117,6 +124,9 @@ export function useSSEStream() {
         id: crypto.randomUUID(),
         type: 'agencies',
         agencies: d.agencies,
+        // Un backend anterior a este campo no lo manda: `[]` deja la tarjeta
+        // igual que antes en vez de romper el render.
+        manualSources: d.manual_sources ?? [],
         message: d.message,
         jobId,
       }])
@@ -207,7 +217,13 @@ export function useSSEStream() {
     openSSE(`${API}/api/v1/scraping/${jobId}/stream?query=${encodeURIComponent(query)}`)
   }, [openSSE])
 
-  const resumeScraping = useCallback(async (jobId: string, selectedAgencyIds: string[]) => {
+  const resumeScraping = useCallback(async (
+    jobId: string,
+    selectedAgencyIds: string[],
+    // Omitido = el cliente nunca mostró las inmobiliarias cargadas a mano, así
+    // que el backend las incluye todas. `[]` es "las destildó a todas".
+    selectedManualSourceIds?: string[]
+  ) => {
     setIsStreaming(true)
 
     // POST /resume returns a StreamingResponse — consume it with fetch
@@ -215,7 +231,10 @@ export function useSSEStream() {
     try {
       resp = await fetch(`${API}/api/v1/scraping/${jobId}/resume`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selected_agency_ids: selectedAgencyIds }),
+        body: JSON.stringify({
+          selected_agency_ids: selectedAgencyIds,
+          ...(selectedManualSourceIds ? { selected_manual_source_ids: selectedManualSourceIds } : {}),
+        }),
       })
     } catch { setIsStreaming(false); return }
 

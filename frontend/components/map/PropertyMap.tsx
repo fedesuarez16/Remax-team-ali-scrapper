@@ -571,8 +571,9 @@ export default function PropertyMap({
         {zone.phase === 'agencies_review' && zone.agencies && (
           <AgencySelector
             agencies={zone.agencies}
+            manualSources={zone.manualSources}
             message={zone.agenciesMessage ?? 'Seleccioná las agencias a incluir'}
-            onConfirm={(ids) => zone.confirmAgencies(ids)}
+            onConfirm={(ids, manualIds) => zone.confirmAgencies(ids, manualIds)}
             disabled={zone.isStreaming}
           />
         )}

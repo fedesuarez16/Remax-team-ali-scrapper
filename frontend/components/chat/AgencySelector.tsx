@@ -13,16 +13,38 @@ export type Agency = {
   zona: string
 }
 
+/** An inmobiliaria loaded by hand in the Fuentes tab, as the backend's
+ * `agencies_review` event reports it. Separate from `Agency`: it has no Google
+ * Maps metadata, only the URL we were told to scrape. */
+export type ReviewManualSource = {
+  id: string
+  nombre: string
+  url: string
+  zona?: string | null
+}
+
 type Props = {
   agencies: Agency[]
+  /** Curated sources for this search's zona. Optional so an older backend
+   * (which only sent `agencies`) keeps rendering. */
+  manualSources?: ReviewManualSource[]
   message: string
-  onConfirm: (selectedIds: string[]) => void
+  onConfirm: (selectedIds: string[], selectedManualSourceIds: string[]) => void
   disabled?: boolean
 }
 
-export function AgencySelector({ agencies, message, onConfirm, disabled }: Props) {
+export function AgencySelector({
+  agencies,
+  manualSources = [],
+  message,
+  onConfirm,
+  disabled,
+}: Props) {
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set(agencies.map((a) => a.id))
+  )
+  const [selectedManual, setSelectedManual] = useState<Set<string>>(
+    () => new Set(manualSources.map((s) => s.id))
   )
   const [isLoading, setIsLoading] = useState(false)
 
@@ -38,18 +60,37 @@ export function AgencySelector({ agencies, message, onConfirm, disabled }: Props
       return next
     })
 
+  const toggleManual = (id: string) =>
+    setSelectedManual((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+
   const handleConfirm = () => {
     setIsLoading(true)
-    onConfirm([...selected])
+    onConfirm([...selected], [...selectedManual])
   }
 
   const withInstagram = agencies.filter((a) => a.instagram_handle)
   const withoutInstagram = agencies.filter((a) => !a.instagram_handle)
-  const selectedCount = selected.size
+  const selectedCount = selected.size + selectedManual.size
 
   return (
     <div className="w-full max-w-md space-y-3 rounded-2xl rounded-tl-sm border border-border bg-card p-4">
       <p className="text-sm text-foreground">{message}</p>
+
+      {manualSources.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium text-muted-foreground">
+            Cargadas por vos en Fuentes
+          </p>
+          {manualSources.map((s) => (
+            <ManualSourceRow key={s.id} source={s} checked={selectedManual.has(s.id)}
+              onChange={() => toggleManual(s.id)} disabled={disabled} />
+          ))}
+        </div>
+      )}
 
       {withInstagram.length > 0 && (
         <div className="space-y-1.5">
@@ -89,6 +130,35 @@ export function AgencySelector({ agencies, message, onConfirm, disabled }: Props
         </button>
       </div>
     </div>
+  )
+}
+
+function ManualSourceRow({ source: s, checked, onChange, disabled }: {
+  source: ReviewManualSource; checked: boolean; onChange: () => void; disabled?: boolean
+}) {
+  return (
+    <label className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 transition
+      ${checked ? 'border-foreground/40 bg-muted' : 'border-border hover:border-foreground/20 hover:bg-muted/50'}
+      ${disabled ? 'cursor-not-allowed opacity-50' : ''}`}
+    >
+      <input type="checkbox" checked={checked} onChange={onChange}
+        disabled={disabled} className="mt-0.5 accent-foreground" />
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm font-medium text-foreground">{s.nombre}</span>
+          {s.zona && (
+            <span className="flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground">
+              <MapPin className="size-3" />
+              {s.zona}
+            </span>
+          )}
+        </div>
+        <span className="flex items-center gap-1 truncate text-xs text-muted-foreground">
+          <Globe className="size-3 shrink-0" />
+          {s.url.replace(/^https?:\/\//, '')}
+        </span>
+      </div>
+    </label>
   )
 }
 

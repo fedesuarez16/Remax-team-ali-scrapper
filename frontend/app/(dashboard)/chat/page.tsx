@@ -176,8 +176,9 @@ function ChatPage() {
                   </div>
                   <AgencySelector
                     agencies={m.agencies}
+                    manualSources={m.manualSources}
                     message={m.message}
-                    onConfirm={(ids) => resumeScraping(m.jobId, ids)}
+                    onConfirm={(ids, manualIds) => resumeScraping(m.jobId, ids, manualIds)}
                     disabled={isStreaming}
                   />
                 </div>
