@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections import Counter
 from typing import Any
 
 from anthropic import AsyncAnthropic
@@ -30,6 +32,8 @@ from app.services.zona import (
 
 MODEL = 'claude-haiku-4-5-20251001'
 _client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+_log = logging.getLogger(__name__)
 
 
 # ── Phase 1: Parse & portal scraping ──────────────────────────────────────────
@@ -301,12 +305,25 @@ def _dedup_key(p: NormalizedProperty) -> tuple[Any, ...]:
 def deduplicate_properties(state: ScrapingState) -> dict[str, Any]:
     seen: set[tuple[Any, ...]] = set()
     unique: list[NormalizedProperty] = []
+    dropped: Counter[str] = Counter()
     for p in state.get('normalized_properties', []):
         key = _dedup_key(p)
         if key in seen:
+            dropped[p.fuente or 'desconocida'] += 1
             continue
         seen.add(key)
         unique.append(p)
+
+    # Silent shrinkage here reads downstream as "the portal had few listings".
+    # Attribute it per `fuente` so the real culprit is identifiable; stay quiet
+    # when nothing collapsed, so the line only appears when it means something.
+    if dropped:
+        total = sum(dropped.values())
+        by_fuente = ', '.join(f'{k}={v}' for k, v in sorted(dropped.items()))
+        _log.info(
+            'dedup funnel in=%d out=%d dropped=%d by_fuente=[%s]',
+            len(unique) + total, len(unique), total, by_fuente,
+        )
     return {'normalized_properties': unique}
 
 
@@ -714,21 +731,26 @@ def route_after_review(state: ScrapingState) -> str | list[Any]:
 
     sends: list[Any] = []
     websites_sent = 0
+    # `0` = NO CAP (same convention as the portal paging knobs): every website
+    # the user confirmed gets scraped. The old default of 10 was a self-imposed
+    # ceiling that dropped the rest with no error and no event.
+    cap = settings.MAX_WEBSITE_URLS
 
     # Manually-registered sources reach the SAME website-scraping pipeline as
-    # agency websites and share the MAX_WEBSITE_URLS cap — but they go FIRST.
-    # Someone filed these by hand for this zona; a discovered Google Maps result
-    # did not. With the selector defaulting to every agency checked, taking them
-    # last meant a zona with MAX_WEBSITE_URLS+ agencies never scraped a single
+    # agency websites and share the cap — but they go FIRST. Someone filed these
+    # by hand for this zona; a discovered Google Maps result did not. It still
+    # matters uncapped (order of results) and matters a lot if a deployment
+    # re-caps via env: with the selector defaulting to every agency checked,
+    # taking them last meant a zona with cap+ agencies never scraped a single
     # curated source, silently.
     for src in manual_sources:
-        if websites_sent >= settings.MAX_WEBSITE_URLS:
+        if cap and websites_sent >= cap:
             break
         sends.append(Send('run_website_scraper', {'nombre': src['nombre'], 'url': src['url'], 'job_id': job_id}))
         websites_sent += 1
 
     for a in selected_agencies:
-        if a.sitio_web and websites_sent < settings.MAX_WEBSITE_URLS:
+        if a.sitio_web and (not cap or websites_sent < cap):
             sends.append(Send('run_website_scraper', {'nombre': a.nombre, 'url': a.sitio_web, 'job_id': job_id}))
             websites_sent += 1
         # Instagram is a separate actor with its own budget — the website cap

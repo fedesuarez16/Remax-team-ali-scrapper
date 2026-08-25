@@ -22,7 +22,7 @@ import pytest
 
 from app.models.property import RawProperty, ScrapingFilters
 from app.services import apify
-from app.services.apify import ApifyService
+from app.services.apify import ApifyService, ZonaPropFunnel
 
 
 def _prop(zona: str) -> RawProperty:
@@ -139,7 +139,8 @@ class TestAppliesToEveryPortal:
         the map path. A chat query never reached it."""
         async def _fake(self_, actor_id, filters):
             calls.append(filters.zona or '')
-            return [_prop(filters.zona)] if filters.zona == 'La Plata' else []
+            props = [_prop(filters.zona)] if filters.zona == 'La Plata' else []
+            return props, ZonaPropFunnel(search_url='https://www.zonaprop.com.ar/x.html')
 
         monkeypatch.setattr(ApifyService, '_scrape_zonaprop_paginated', _fake)
         filters = ScrapingFilters(zona='Casco Urbano, La Plata')

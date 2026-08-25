@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.database import create_supabase_client, create_checkpointer
+from app.core.logging import configure_logging
 from app.api.v1.router import api_router
 from app.services.cleaner import scheduler_loop as cleanup_scheduler_loop
 
@@ -33,6 +34,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if sb is not None and hasattr(sb, 'aclose'):
         await sb.aclose()
 
+
+configure_logging()
 
 app = FastAPI(title="multi-agent-realstate API", lifespan=lifespan)
 

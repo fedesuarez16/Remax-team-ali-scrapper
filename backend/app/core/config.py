@@ -15,7 +15,8 @@ class Settings(BaseSettings):
     APIFY_DISABLED: bool = False         # skip all Apify actors (zonaprop, googlemaps, instagram) — only direct scrapers (mercadolibre, inmobusqueda, mudafy)
     SCRAPE_ZONAPROP_ONLY: bool = False   # test mode: only fan out ZonaProp, skip ML + agencies
     SCRAPE_GOOGLEMAPS_ONLY: bool = False  # test mode: agencies-only — skip portal + Instagram scrapers
-    MAX_WEBSITE_URLS: int = 10           # cap agency websites scraped per search
+    MAX_WEBSITE_URLS: int = 0            # 0 = NO CAP: scrape every selected agency/curated website
+    LOG_LEVEL: str = 'INFO'              # `app.*` logger level — INFO surfaces the scrape funnels
     # ── Portal paging depth ───────────────────────────────────────────────────
     # `0` means NO CAP on every source below: page until the portal itself runs
     # out (totalPages / an empty page / a short page / a page with nothing new).
@@ -30,8 +31,11 @@ class Settings(BaseSettings):
     MERCADOLIBRE_MAX_PAGES: int = 0      # pages per MercadoLibre search (50 items each)
     INMOBUSQUEDA_MAX_PAGES: int = 0      # pages per InmoBusqueda search (15 items each)
     MUDAFY_MAX_PAGES: int = 0            # pages per Mudafy search (25 items each)
-    GOOGLEMAPS_MAX_PLACES: int = 20      # cap billed places per zona in agency discovery (raise after testing)
-    INSTAGRAM_RESULTS_LIMIT: int = 10    # cap posts per agency profile (raise after testing)
+    # `0` = NO CAP on both actors below: the input key is OMITTED so the actor
+    # runs to its own exhaustion. These are PAID per result — a positive value
+    # re-caps the spend per zona/profile.
+    GOOGLEMAPS_MAX_PLACES: int = 0       # places per zona in agency discovery; PAID per place
+    INSTAGRAM_RESULTS_LIMIT: int = 0     # posts per agency profile; PAID per post
     AGENCY_CACHE_TTL_DAYS: int = 30      # reuse cached agencies per zona within N days (skip paid Google Maps actor)
     # MercadoLibre bloquea por IP de DATACENTER y lo hace con un 200: misma URL
     # y mismos headers devuelven 1.98 MB de listado desde una IP residencial y

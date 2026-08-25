@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import logging
 import re
 import random
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import count
 from typing import Any, Awaitable, Callable, Iterable, Iterator, Mapping
@@ -16,6 +18,8 @@ from app.models.property import Agency, RawProperty, ScrapingFilters
 from app.services.zona import zona_candidates
 
 ProgressCb = Callable[[str, str, int], Awaitable[None]]
+
+logger = logging.getLogger(__name__)
 
 PORTAL_SOURCES = ('zonaprop', 'mercadolibre', 'argenprop', 'remax', 'inmobusqueda', 'mudafy')   # phase-1 portal scrapers
 SOURCES = (*PORTAL_SOURCES, 'googlemaps', 'instagram')
@@ -189,6 +193,37 @@ def _guard_phrases(filters: ScrapingFilters) -> set[str]:
     return {phrase for seed in seeds for phrase in zona_candidates(seed)}
 
 
+def _zonaprop_price_segment(filters: ScrapingFilters) -> str:
+    """ZonaProp's price slug for a search, or `''` when it cannot be built.
+
+    Two forms, both confirmed against real portal searches (`dolar` is
+    SINGULAR, and the range carries no `menos`/`mas` keyword at all):
+
+        ceiling  /locales-comerciales-venta-la-plata-la-plata-menos-30000-dolar.html
+        range    /locales-comerciales-venta-la-plata-la-plata-20000-30000-dolar.html
+
+    A FLOOR ALONE still emits nothing: the `mas-{N}-dolar` form is unverified,
+    and an unknown ZonaProp slug does not 404 politely — it redirects to a
+    nationwide listing that `_item_matches_zona` then rejects wholesale, so a
+    wrong guess costs a silent zero-result search. The same reasoning drives
+    the two fallbacks below: whenever the range is not well-formed, degrade to
+    the confirmed ceiling form, which is WIDER than asked and therefore cannot
+    filter out something the user wanted (`_split_by_criteria` orders the
+    remainder downstream anyway).
+
+    Bounds are floats on the model and ZonaProp's slug is an integer —
+    `30000.0` in the path is a 404, hence the explicit `int()`.
+    """
+    pmin, pmax = filters.precio_min, filters.precio_max
+    if pmax is None:
+        return ''
+    # `0-30000-dolar` is not a range the portal emits for "up to 30k", and a
+    # floor above the ceiling is an upstream parse error, not a search.
+    if pmin is not None and 0 < pmin < pmax:
+        return f'-{int(pmin)}-{int(pmax)}-dolar'
+    return f'-menos-{int(pmax)}-dolar'
+
+
 def _item_matches_zona(item: dict[str, Any], zonas: Iterable[str]) -> bool:
     """Guard against ZonaProp redirecting an unknown zona slug to a nationwide
     listing: keep items that mention ANY phrase in `zonas` (as a phrase) in
@@ -214,6 +249,64 @@ def _item_matches_zona(item: dict[str, Any], zonas: Iterable[str]) -> bool:
         str(item.get(k) or '') for k in ('neighborhood', 'city', 'address', 'title', 'description')
     ))
     return any(all(part in haystack for part in parts) for parts in phrase_parts)
+
+
+@dataclass
+class ZonaPropPage:
+    """What one ZonaProp listing page yielded, and where each item died."""
+    page: int
+    raw: int = 0
+    duplicates: int = 0      # already seen — an out-of-range page redirects to page 1
+    zona_rejected: int = 0   # failed `_item_matches_zona` (nationwide-redirect guard)
+    no_price: int = 0        # `_norm_zonaprop` dropped it: "consultar precio"
+    capped: int = 0          # matched, but `ZONAPROP_MAX_RESULTS` was already full
+    kept: int = 0
+
+    @property
+    def new_unique(self) -> int:
+        return self.raw - self.duplicates
+
+
+@dataclass
+class ZonaPropFunnel:
+    """Per-search accounting for the gap between "what the portal shows" and
+    "what we return". Four gates and an early `break` sit between them, and
+    without per-stage counts there is no way to tell which one is costing the
+    results — so the loop reports all of them plus WHY it stopped paginating.
+    """
+    search_url: str
+    pages: list[ZonaPropPage] = field(default_factory=list)
+    stop_reason: str = 'unknown'
+
+    def _total(self, attr: str) -> int:
+        return sum(getattr(p, attr) for p in self.pages)
+
+    @property
+    def raw(self) -> int: return self._total('raw')
+
+    @property
+    def duplicates(self) -> int: return self._total('duplicates')
+
+    @property
+    def zona_rejected(self) -> int: return self._total('zona_rejected')
+
+    @property
+    def no_price(self) -> int: return self._total('no_price')
+
+    @property
+    def capped(self) -> int: return self._total('capped')
+
+    @property
+    def kept(self) -> int: return self._total('kept')
+
+    def summary(self) -> str:
+        return (
+            f'zonaprop funnel url={self.search_url} pages={len(self.pages)} '
+            f'raw={self.raw} duplicates={self.duplicates} '
+            f'zona_rejected={self.zona_rejected} no_price={self.no_price} '
+            f'capped={self.capped} kept={self.kept} stop={self.stop_reason} '
+            f'per_page=[{", ".join(f"p{p.page}:{p.raw}->{p.kept}" for p in self.pages)}]'
+        )
 
 
 _ZP_PROP_TYPE: dict[str, str] = {
@@ -2357,7 +2450,14 @@ class ApifyService(BaseApifyService):
             op_slug = 'alquiler' if op == 'alquiler' else 'venta'
             tipos = filters.tipos_propiedad
             prop_slug = self._ZP_URL_SLUG.get(tipos[0], 'inmuebles') if len(tipos) == 1 else 'inmuebles'
-            search_url = f'https://www.zonaprop.com.ar/{prop_slug}-{op_slug}-{zona_slug}.html'
+            # Price belongs in the URL, not downstream: every listing page is a
+            # PAID actor run, so a ceiling the portal applies server-side is
+            # pages we never pay to scrape. `-pagina-N` is appended after this
+            # segment by `_scrape_zonaprop_paginated`, matching the real URL.
+            price_slug = _zonaprop_price_segment(filters)
+            search_url = (
+                f'https://www.zonaprop.com.ar/{prop_slug}-{op_slug}-{zona_slug}{price_slug}.html'
+            )
             from app.core.config import settings
             input_data: dict[str, Any] = {'searchUrl': search_url}
             if settings.ZONAPROP_MAX_RESULTS > 0:
@@ -2373,21 +2473,26 @@ class ApifyService(BaseApifyService):
             return {'searchUrl': url, 'maxItems': 10}
 
         if source == 'googlemaps':
-            return {
+            # The place cap used to be a hard-coded 20 here, so raising
+            # GOOGLEMAPS_MAX_PLACES left this path capped anyway — the knob lied.
+            from app.core.config import settings
+            gm_input: dict[str, Any] = {
                 'searchStringsArray': [f'inmobiliarias en {zona}'],
-                'maxCrawledPlacesPerSearch': 20,
                 'language': 'es',
                 'countryCode': 'ar',
             }
+            if settings.GOOGLEMAPS_MAX_PLACES > 0:
+                gm_input['maxCrawledPlacesPerSearch'] = settings.GOOGLEMAPS_MAX_PLACES
+            return gm_input
 
         if source == 'instagram':
             # Uses handles stored in filters or falls back to empty
             handles = getattr(filters, 'instagram_handles', None) or []
             from app.core.config import settings
-            return {
-                'usernames': handles,
-                'resultsLimit': settings.INSTAGRAM_RESULTS_LIMIT,
-            }
+            ig_input: dict[str, Any] = {'usernames': handles}
+            if settings.INSTAGRAM_RESULTS_LIMIT > 0:
+                ig_input['resultsLimit'] = settings.INSTAGRAM_RESULTS_LIMIT
+            return ig_input
 
         return {}
 
@@ -2490,7 +2595,7 @@ class ApifyService(BaseApifyService):
         await on_progress(source, 'running', 0)
 
         if source == 'zonaprop':
-            results = await self._scrape_zonaprop_paginated(actor_id, filters)
+            results, _funnel = await self._scrape_zonaprop_paginated(actor_id, filters)
 
             # Composite localidad slug ("villa-elisa-la-plata") unknown to
             # ZonaProp → nationwide redirect → the guard rejects everything
@@ -2499,7 +2604,7 @@ class ApifyService(BaseApifyService):
             if not results and filters.localidades and ',' in filters.localidades[0]:
                 plain = filters.localidades[0].split(',')[0].strip()
                 plain_filters = filters.model_copy(update={'localidades': [plain], 'zona': plain})
-                results = await self._scrape_zonaprop_paginated(actor_id, plain_filters)
+                results, _funnel = await self._scrape_zonaprop_paginated(actor_id, plain_filters)
         else:
             raw_items = await self._run_actor(source, actor_id, self._input_for(source, filters))
             results = []
@@ -2521,7 +2626,7 @@ class ApifyService(BaseApifyService):
 
     async def _scrape_zonaprop_paginated(
         self, actor_id: str, filters: ScrapingFilters,
-    ) -> list[RawProperty]:
+    ) -> tuple[list[RawProperty], ZonaPropFunnel]:
         from app.core.config import settings
         cap = settings.ZONAPROP_MAX_RESULTS
         base_input = self._input_for('zonaprop', filters)
@@ -2533,6 +2638,7 @@ class ApifyService(BaseApifyService):
         # needed on top, and the old 20-page one was truncating busy zonas.
         max_pages = -(-cap // self._ZP_PAGE_SIZE) if cap > 0 else 0
 
+        funnel = ZonaPropFunnel(search_url=base_url)
         results: list[RawProperty] = []
         seen: set[str] = set()
         page = 1
@@ -2544,32 +2650,54 @@ class ApifyService(BaseApifyService):
                 input_data['maxResults'] = cap - len(results)
 
             raw_items = await self._run_actor('zonaprop', actor_id, input_data)
+            row = ZonaPropPage(page=page, raw=len(raw_items))
+            funnel.pages.append(row)
 
-            new_unique = 0
-            page_kept = 0
             for item in raw_items:
                 key = str(item.get('listingId') or item.get('url') or '')
                 if key and key in seen:
+                    row.duplicates += 1
                     continue
                 if key:
                     seen.add(key)
-                new_unique += 1
-                if _item_matches_zona(item, phrases):
-                    prop = _norm_zonaprop(item, filters.zona or '')
-                    if prop is not None and (cap <= 0 or len(results) < cap):
-                        results.append(prop)
-                        page_kept += 1
+                if not _item_matches_zona(item, phrases):
+                    row.zona_rejected += 1
+                    continue
+                prop = _norm_zonaprop(item, filters.zona or '')
+                if prop is None:
+                    row.no_price += 1
+                    continue
+                if cap > 0 and len(results) >= cap:
+                    row.capped += 1
+                    continue
+                results.append(prop)
+                row.kept += 1
 
             # Stop on: empty page, all-duplicates (out-of-range page redirects
             # back to page 1), all-rejected (drifted into a nationwide
-            # redirect), or a short page (the listing's last one).
-            if not raw_items or new_unique == 0 or page_kept == 0:
+            # redirect), or a short page (the listing's last one). Each break
+            # is named so the log says which one truncated the search.
+            if not raw_items:
+                funnel.stop_reason = 'empty_page'
+                break
+            if row.new_unique == 0:
+                funnel.stop_reason = 'all_duplicates'
+                break
+            if row.kept == 0:
+                funnel.stop_reason = 'all_rejected'
                 break
             if len(raw_items) < self._ZP_PAGE_SIZE:
+                funnel.stop_reason = 'short_page'
                 break
             # A healthy actor run may span multiple pages; skip what it covered.
             page += max(1, -(-len(raw_items) // self._ZP_PAGE_SIZE))
-        return results
+        else:
+            # Fell out of the `while` condition rather than a `break`: only a
+            # cap (or the page ceiling it implies) can do that.
+            funnel.stop_reason = 'cap_reached' if cap > 0 else 'max_pages'
+
+        logger.info('%s', funnel.summary())
+        return results, funnel
 
     async def _scrape_argenprop(
         self, filters: ScrapingFilters, on_progress: ProgressCb,
@@ -2618,13 +2746,17 @@ class ApifyService(BaseApifyService):
     async def scrape_agencies(self, zona: str, on_progress: ProgressCb) -> list[Agency]:
         await on_progress('googlemaps', 'running', 0)
         from app.core.config import settings
-        input_data = {
+        input_data: dict[str, Any] = {
             'searchStringsArray': [f'inmobiliarias en {zona}'],
-            'maxCrawledPlacesPerSearch': settings.GOOGLEMAPS_MAX_PLACES,
             'language': 'es',
             'countryCode': 'ar',
             'includeWebResults': False,
         }
+        # `0` = uncapped, and uncapped means OMITTING the key: the actor reads a
+        # literal `0` as "crawl zero places", which would silence discovery
+        # instead of freeing it.
+        if settings.GOOGLEMAPS_MAX_PLACES > 0:
+            input_data['maxCrawledPlacesPerSearch'] = settings.GOOGLEMAPS_MAX_PLACES
         raw_items = await self._run_actor('googlemaps', _ACTORS['googlemaps'], input_data)
         agencies = [a for item in raw_items
                     if (a := _norm_googlemaps_agency(item, zona)) is not None]
@@ -2637,12 +2769,15 @@ class ApifyService(BaseApifyService):
     async def scrape_instagram_profile(self, handle: str, on_progress: ProgressCb) -> list[RawProperty]:
         await on_progress(f'instagram:{handle}', 'running', 0)
         from app.core.config import settings
-        input_data = {
+        input_data: dict[str, Any] = {
             'username': [handle],
-            'resultsLimit': settings.INSTAGRAM_RESULTS_LIMIT,
             'onlyPostsNewerThan': '3 months',
             'dataDetailLevel': 'basicData',
         }
+        # `0` = uncapped; omitted for the same reason as the Google Maps cap.
+        # `onlyPostsNewerThan` stays as the real bound on this actor's spend.
+        if settings.INSTAGRAM_RESULTS_LIMIT > 0:
+            input_data['resultsLimit'] = settings.INSTAGRAM_RESULTS_LIMIT
         raw_items = await self._run_actor('instagram', _ACTORS['instagram'], input_data)
         results = [p for item in raw_items if (p := _norm_instagram(item)) is not None]
         await on_progress(f'instagram:{handle}', 'done', len(results))
