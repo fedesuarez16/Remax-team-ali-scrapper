@@ -172,25 +172,32 @@ def _slugify(value: str) -> str:
 
 
 def _guard_phrases(filters: ScrapingFilters) -> set[str]:
-    """Phrase-set for the ZonaProp redirect guard. Map path (localidades
-    present): barrios ∪ localidades ∪ zona — wide on purpose, the polygon is
-    the precision gate downstream. Chat path (no localidades): ONLY this
-    branch's zona, preserving the pre-change per-branch scoping for
-    multi-zona chat queries.
+    """Phrase-set for the ZonaProp redirect guard: the zonas actually REQUESTED,
+    never their fallbacks. Map path (localidades present): barrios ∪
+    localidades ∪ zona — wide on purpose across the seeds, since the polygon is
+    the precision gate downstream. Chat path: ONLY this branch's zona.
 
-    Every seed is then expanded through `zona_candidates`, so a search that
-    had to degrade to the localidad still keeps its results: a real casco
-    address reads "calle 47 e/ 12 y 13, La Plata" and never names the barrio,
-    which a barrio-only guard rejected outright. Degradation stops before
-    province-wide terms, and a composite phrase still requires EVERY comma
-    part — so the San Luis homonym of "Casco Urbano" stays out.
+    Seeds are deliberately NOT expanded through `zona_candidates`. That
+    expansion put the degraded phrase ("La Plata") into the guard of a
+    "City Bell, La Plata" search, and `_item_matches_zona` passes on ANY
+    phrase — so a nationwide redirect sailed through on its La Plata listings,
+    the caller saw a non-empty result, and the composite-slug retry gated on
+    `not results` never fired. The guard exists to DETECT that redirect; a
+    phrase set wider than the request cannot do it.
+
+    Nothing is lost by keeping it tight: `scrape_source` already walks the
+    candidate chain one candidate at a time and rebuilds this set from the
+    candidate it actually requested, so the degraded pass guards itself.
+    A composite phrase still requires EVERY comma part — ZonaProp supplies
+    them in separate fields (barrio in `neighborhood`, partido in `city`), and
+    that is what keeps the San Luis homonym of "Casco Urbano" out.
     """
     if filters.localidades:
         seeds = set(filters.zonas) | set(filters.localidades) | {filters.zona or ''}
     else:
         seeds = {filters.zona or ''}
     seeds.discard('')
-    return {phrase for seed in seeds for phrase in zona_candidates(seed)}
+    return seeds
 
 
 def _zonaprop_price_segment(filters: ScrapingFilters) -> str:
@@ -251,6 +258,13 @@ def _item_matches_zona(item: dict[str, Any], zonas: Iterable[str]) -> bool:
     return any(all(part in haystack for part in parts) for parts in phrase_parts)
 
 
+# Share of a page the zona guard must reject before we treat the run as a
+# nationwide redirect rather than a real (if narrow) result set. A correct slug
+# keeps nearly everything — the guard is a redirect detector, not a filter — so
+# anything at or above half is a clean separation between the two cases.
+_REDIRECT_REJECT_RATIO = 0.5
+
+
 @dataclass
 class ZonaPropPage:
     """What one ZonaProp listing page yielded, and where each item died."""
@@ -298,6 +312,33 @@ class ZonaPropFunnel:
 
     @property
     def kept(self) -> int: return self._total('kept')
+
+    @property
+    def redirect_suspected(self) -> bool:
+        """True when the guard threw out most of the page — the signature of
+        ZonaProp answering an unknown slug with a NATIONWIDE listing instead of
+        a 404.
+
+        `not results` cannot see this. A nationwide dump that happens to carry
+        a couple of listings from the right barrio comes back non-empty, so a
+        retry gated on emptiness stays asleep and the search settles for two
+        results when the portal has forty — the reported City Bell case.
+
+        Judged on the FIRST page alone. A wrong slug is wrong from the first
+        request, whereas a later page that drifts is ordinary end-of-listing
+        behaviour (an out-of-range `-pagina-N` redirects to page 1 or to a
+        nationwide listing). Averaging over every page conflates the two and
+        buys a second full paid scrape for a search whose slug was fine.
+
+        Keyed on `zona_rejected` specifically, not on `kept`: a page lost to
+        missing prices says nothing about whether the slug was right.
+        """
+        if not self.pages:
+            return False
+        first = self.pages[0]
+        if first.raw == 0:
+            return False
+        return first.zona_rejected / first.raw >= _REDIRECT_REJECT_RATIO
 
     def summary(self) -> str:
         return (
@@ -2597,14 +2638,35 @@ class ApifyService(BaseApifyService):
         if source == 'zonaprop':
             results, _funnel = await self._scrape_zonaprop_paginated(actor_id, filters)
 
-            # Composite localidad slug ("villa-elisa-la-plata") unknown to
-            # ZonaProp → nationwide redirect → the guard rejects everything
-            # (or the page 404s and the actor returns nothing). Retry ONCE
-            # with the plain localidad slug rather than returning 0 results.
-            if not results and filters.localidades and ',' in filters.localidades[0]:
-                plain = filters.localidades[0].split(',')[0].strip()
-                plain_filters = filters.model_copy(update={'localidades': [plain], 'zona': plain})
-                results, _funnel = await self._scrape_zonaprop_paginated(actor_id, plain_filters)
+            # Composite slug ("city-bell-la-plata") unknown to ZonaProp →
+            # nationwide redirect → the guard rejects everything (or the page
+            # 404s and the actor returns nothing). Retry ONCE with the plain
+            # localidad slug, which is what the portal's own URL uses
+            # (.../departamentos-venta-city-bell-...), rather than giving up.
+            #
+            # Gated on the SLUG being composite, not on which path built it:
+            # this used to require `filters.localidades`, so a typed query —
+            # which leaves it empty — never reached the retry even though it
+            # hits the identical redirect. Note the retry strips to the FIRST
+            # part (the barrio), never degrading to the partido; widening the
+            # search is the candidate chain's job, not this one's.
+            composite = filters.localidades[0] if filters.localidades else (filters.zona or '')
+            if ',' in composite and (not results or _funnel.redirect_suspected):
+                plain = composite.split(',')[0].strip()
+                # `localidades` outranks `zona` in `_input_for`, so a stale
+                # composite left there would rebuild the same dead slug.
+                update: dict[str, Any] = {'zona': plain}
+                if filters.localidades:
+                    update['localidades'] = [plain]
+                plain_filters = filters.model_copy(update=update)
+                retry, _retry_funnel = await self._scrape_zonaprop_paginated(
+                    actor_id, plain_filters,
+                )
+                # The retry is an attempt to do better, never a commitment to
+                # its result: if the plain slug turns out to be the worse one,
+                # keep what the first pass already found.
+                if len(retry) > len(results):
+                    results = retry
         else:
             raw_items = await self._run_actor(source, actor_id, self._input_for(source, filters))
             results = []
@@ -2642,61 +2704,73 @@ class ApifyService(BaseApifyService):
         results: list[RawProperty] = []
         seen: set[str] = set()
         page = 1
-        while (max_pages <= 0 or page <= max_pages) and (cap <= 0 or len(results) < cap):
-            input_data = dict(base_input)
-            if page > 1:
-                input_data['searchUrl'] = base_url.replace('.html', f'-pagina-{page}.html')
-            if cap > 0:
-                input_data['maxResults'] = cap - len(results)
+        # `try/finally`: `_run_actor` raises on a FAILED/ABORTED run, a non-2xx
+        # from the Apify API or a bad token, and `run_portal_scraper` turns
+        # that into a bare "0 props" in the UI — indistinguishable from a
+        # search that legitimately found nothing. The funnel is exactly what
+        # tells those apart, so it is logged whatever happens.
+        try:
+            while (max_pages <= 0 or page <= max_pages) and (cap <= 0 or len(results) < cap):
+                input_data = dict(base_input)
+                if page > 1:
+                    input_data['searchUrl'] = base_url.replace('.html', f'-pagina-{page}.html')
+                if cap > 0:
+                    input_data['maxResults'] = cap - len(results)
 
-            raw_items = await self._run_actor('zonaprop', actor_id, input_data)
-            row = ZonaPropPage(page=page, raw=len(raw_items))
-            funnel.pages.append(row)
+                raw_items = await self._run_actor('zonaprop', actor_id, input_data)
+                row = ZonaPropPage(page=page, raw=len(raw_items))
+                funnel.pages.append(row)
 
-            for item in raw_items:
-                key = str(item.get('listingId') or item.get('url') or '')
-                if key and key in seen:
-                    row.duplicates += 1
-                    continue
-                if key:
-                    seen.add(key)
-                if not _item_matches_zona(item, phrases):
-                    row.zona_rejected += 1
-                    continue
-                prop = _norm_zonaprop(item, filters.zona or '')
-                if prop is None:
-                    row.no_price += 1
-                    continue
-                if cap > 0 and len(results) >= cap:
-                    row.capped += 1
-                    continue
-                results.append(prop)
-                row.kept += 1
+                for item in raw_items:
+                    key = str(item.get('listingId') or item.get('url') or '')
+                    if key and key in seen:
+                        row.duplicates += 1
+                        continue
+                    if key:
+                        seen.add(key)
+                    if not _item_matches_zona(item, phrases):
+                        row.zona_rejected += 1
+                        continue
+                    prop = _norm_zonaprop(item, filters.zona or '')
+                    if prop is None:
+                        row.no_price += 1
+                        continue
+                    if cap > 0 and len(results) >= cap:
+                        row.capped += 1
+                        continue
+                    results.append(prop)
+                    row.kept += 1
 
-            # Stop on: empty page, all-duplicates (out-of-range page redirects
-            # back to page 1), all-rejected (drifted into a nationwide
-            # redirect), or a short page (the listing's last one). Each break
-            # is named so the log says which one truncated the search.
-            if not raw_items:
-                funnel.stop_reason = 'empty_page'
-                break
-            if row.new_unique == 0:
-                funnel.stop_reason = 'all_duplicates'
-                break
-            if row.kept == 0:
-                funnel.stop_reason = 'all_rejected'
-                break
-            if len(raw_items) < self._ZP_PAGE_SIZE:
-                funnel.stop_reason = 'short_page'
-                break
-            # A healthy actor run may span multiple pages; skip what it covered.
-            page += max(1, -(-len(raw_items) // self._ZP_PAGE_SIZE))
-        else:
-            # Fell out of the `while` condition rather than a `break`: only a
-            # cap (or the page ceiling it implies) can do that.
-            funnel.stop_reason = 'cap_reached' if cap > 0 else 'max_pages'
-
-        logger.info('%s', funnel.summary())
+                # Stop on: empty page, all-duplicates (out-of-range page redirects
+                # back to page 1), all-rejected (drifted into a nationwide
+                # redirect), or a short page (the listing's last one). Each break
+                # is named so the log says which one truncated the search.
+                if not raw_items:
+                    funnel.stop_reason = 'empty_page'
+                    break
+                if row.new_unique == 0:
+                    funnel.stop_reason = 'all_duplicates'
+                    break
+                if row.kept == 0:
+                    funnel.stop_reason = 'all_rejected'
+                    break
+                if len(raw_items) < self._ZP_PAGE_SIZE:
+                    funnel.stop_reason = 'short_page'
+                    break
+                # A healthy actor run may span multiple pages; skip what it covered.
+                page += max(1, -(-len(raw_items) // self._ZP_PAGE_SIZE))
+            else:
+                # Fell out of the `while` condition rather than a `break`: only a
+                # cap (or the page ceiling it implies) can do that.
+                funnel.stop_reason = 'cap_reached' if cap > 0 else 'max_pages'
+        except Exception as exc:
+            # Name the failure in the report, then let it propagate: the graph
+            # node above records it in `state['errors']`, and swallowing it
+            # here would turn a broken run into a clean "found nothing".
+            funnel.stop_reason = f'actor_error: {type(exc).__name__}: {exc}'
+            raise
+        finally:
+            logger.info('%s', funnel.summary())
         return results, funnel
 
     async def _scrape_argenprop(

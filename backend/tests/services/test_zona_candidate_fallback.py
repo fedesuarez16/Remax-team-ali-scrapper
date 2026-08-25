@@ -136,7 +136,13 @@ class TestAppliesToEveryPortal:
         self, service, calls, monkeypatch,
     ):
         """ZonaProp's own retry only ever fired when `localidades` was set —
-        the map path. A chat query never reached it."""
+        the map path. A chat query never reached it.
+
+        Three attempts now, and the middle one is the point: ZonaProp's real
+        URL uses the BARE localidad (`.../departamentos-venta-city-bell-...`),
+        so the composite slug is tried, then the plain barrio, and only then
+        does the candidate chain widen to the partido.
+        """
         async def _fake(self_, actor_id, filters):
             calls.append(filters.zona or '')
             props = [_prop(filters.zona)] if filters.zona == 'La Plata' else []
@@ -147,7 +153,7 @@ class TestAppliesToEveryPortal:
 
         results = await service.scrape_source('zonaprop', filters, _noop_progress)
 
-        assert calls == ['Casco Urbano, La Plata', 'La Plata']
+        assert calls == ['Casco Urbano, La Plata', 'Casco Urbano', 'La Plata']
         assert len(results) == 1
 
 

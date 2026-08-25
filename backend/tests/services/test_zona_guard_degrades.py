@@ -1,17 +1,30 @@
-"""The zona guard accepts every link of the zona's candidate chain.
+"""The zona guard accepts ONLY the zona that was requested — degradation is
+the candidate chain's job, not the guard's.
 
-A barrio-level guard was the amplifier behind the "casco de La Plata" zero:
-even on the portals that DID return the right La Plata listings, nothing in a
-listing body says "Casco Urbano" — a real address reads "calle 47 e/ 12 y 13,
-La Plata". Requiring the literal barrio phrase rejected all of them.
+This file used to assert the opposite: `_guard_phrases` expanded every seed
+through `zona_candidates`, so a "Casco Urbano, La Plata" search also carried
+the bare phrase "La Plata". The intent was to keep listings whose address
+never names the barrio ("calle 47 e/ 12 y 13, La Plata").
 
-Widening the guard to the chain (`Casco Urbano, La Plata` → also `La Plata`)
-is what lets a degraded search actually keep its results. Precision is not
-lost outright: the composite phrase still requires EVERY comma-part, so a
-homonym barrio in another province stays rejected.
+That backfired. `_item_matches_zona` passes on ANY phrase, so the degraded
+phrase also admitted every unrelated listing from the containing partido — a
+ZonaProp nationwide redirect came back looking like a successful search, and
+the composite-slug retry gated on `not results` never fired. Reported
+symptom: a City Bell search returning two City Bell listings and forty from
+La Plata.
+
+The listings the wide guard was protecting are NOT lost, and
+`TestTheChainStillRescuesTheLocalidadOnlyListing` below proves it end to end:
+a tight guard makes the barrio pass return zero, which is precisely the signal
+`scrape_source` needs to walk to the next candidate — and that pass rebuilds
+the guard from the localidad it actually requested.
 """
-from app.models.property import ScrapingFilters
-from app.services.apify import _guard_phrases, _item_matches_zona
+from typing import Any
+
+from app.models.property import RawProperty, ScrapingFilters
+from app.services.apify import (
+    ApifyService, ZonaPropFunnel, _guard_phrases, _item_matches_zona,
+)
 
 
 def _item(**kw) -> dict:
@@ -19,33 +32,32 @@ def _item(**kw) -> dict:
             'description': '', **kw}
 
 
-class TestGuardPhrasesIncludeTheChain:
-    def test_chat_path_adds_the_containing_localidad(self):
+class TestGuardPhrasesAreExactlyWhatWasRequested:
+    def test_chat_path_does_not_add_the_containing_localidad(self):
         f = ScrapingFilters(zona='Casco Urbano, La Plata')
-        assert _guard_phrases(f) == {'Casco Urbano, La Plata', 'La Plata'}
+        assert _guard_phrases(f) == {'Casco Urbano, La Plata'}
 
     def test_bare_zona_is_unchanged(self):
         """Pre-existing single-phrase behaviour must not move."""
         assert _guard_phrases(ScrapingFilters(zona='Palermo')) == {'Palermo'}
 
-    def test_does_not_degrade_into_a_whole_province(self):
-        f = ScrapingFilters(zona='Los Hornos, Buenos Aires')
-        assert _guard_phrases(f) == {'Los Hornos, Buenos Aires'}
-
-    def test_map_path_degrades_every_seed(self):
+    def test_map_path_unions_seeds_without_expanding_them(self):
+        """Across seeds the map path stays wide on purpose — the polygon is the
+        precision gate there. What stops is each seed's fallback chain."""
         f = ScrapingFilters(zona='Villa Elisa, La Plata',
                             zonas=['Villa Elisa, La Plata'],
                             localidades=['Villa Elisa, La Plata'])
-        assert _guard_phrases(f) == {'Villa Elisa, La Plata', 'La Plata'}
+        assert _guard_phrases(f) == {'Villa Elisa, La Plata'}
 
 
-class TestListingsSurviveTheDegradedGuard:
-    def test_localidad_only_address_is_kept(self):
-        """The exact shape that was being dropped: a real casco address that
-        never names the barrio."""
-        f = ScrapingFilters(zona='Casco Urbano, La Plata')
-        item = _item(address='calle 47 e/ 12 y 13', city='La Plata')
-        assert _item_matches_zona(item, _guard_phrases(f)) is True
+class TestPrecisionTheWideGuardWasLosing:
+    def test_an_unrelated_listing_from_the_partido_is_rejected(self):
+        """THE regression that motivated the change: a plain La Plata listing
+        had been passing a City Bell search."""
+        f = ScrapingFilters(zona='City Bell, La Plata')
+        item = _item(neighborhood='La Plata', city='La Plata',
+                     address='Calle 7 e/ 49 y 50')
+        assert _item_matches_zona(item, _guard_phrases(f)) is False
 
     def test_barrio_naming_listing_is_still_kept(self):
         f = ScrapingFilters(zona='Casco Urbano, La Plata')
@@ -64,3 +76,50 @@ class TestListingsSurviveTheDegradedGuard:
         item = _item(neighborhood='Casco Urbano / Historico',
                      city='San Fco del Monte de Oro', description='San Luis')
         assert _item_matches_zona(item, _guard_phrases(f)) is False
+
+
+class TestTheCostOfTightening:
+    def test_a_localidad_only_address_no_longer_passes_the_barrio_pass(self):
+        """Stated plainly, because it is a real loss on this one pass: a casco
+        address that never names the barrio is now rejected while the search
+        is still scoped to the barrio. The next test shows it coming back."""
+        f = ScrapingFilters(zona='Casco Urbano, La Plata')
+        item = _item(address='calle 47 e/ 12 y 13', city='La Plata')
+        assert _item_matches_zona(item, _guard_phrases(f)) is False
+
+
+class TestTheChainStillRescuesTheLocalidadOnlyListing:
+    async def test_it_survives_on_the_degraded_pass(self):
+        """End to end through `scrape_source`: the barrio passes return zero
+        (correctly — the portal redirected), the chain widens to "La Plata",
+        and THAT pass guards on "La Plata", so the casco listing is kept."""
+        casco = _item(address='calle 47 e/ 12 y 13', city='La Plata')
+        service = ApifyService(api_token='dummy-token')
+        attempted: list[str] = []
+
+        async def fake(actor_id: str, filters: ScrapingFilters) -> Any:
+            zona = filters.zona or ''
+            attempted.append(zona)
+            # The portal returns the same casco listing every time; only the
+            # guard decides whether this pass may keep it.
+            kept = [
+                RawProperty(
+                    fuente='zonaprop', titulo='Depto en La Plata',
+                    direccion='calle 47 e/ 12 y 13', precio=120000.0,
+                    moneda='USD', tipo_operacion='venta',
+                    tipo_propiedad='departamento',
+                )
+            ] if _item_matches_zona(casco, _guard_phrases(filters)) else []
+            return kept, ZonaPropFunnel(search_url=f'https://z/{zona}')
+
+        service._scrape_zonaprop_paginated = fake  # type: ignore[method-assign]
+
+        async def _noop(source: str, status: str, count: int) -> None:
+            return None
+
+        results = await service.scrape_source(
+            'zonaprop', ScrapingFilters(zona='Casco Urbano, La Plata'), _noop,
+        )
+
+        assert attempted == ['Casco Urbano, La Plata', 'Casco Urbano', 'La Plata']
+        assert len(results) == 1
