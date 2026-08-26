@@ -13,11 +13,11 @@ the composite-slug retry gated on `not results` never fired. Reported
 symptom: a City Bell search returning two City Bell listings and forty from
 La Plata.
 
-The listings the wide guard was protecting are NOT lost, and
-`TestTheChainStillRescuesTheLocalidadOnlyListing` below proves it end to end:
-a tight guard makes the barrio pass return zero, which is precisely the signal
-`scrape_source` needs to walk to the next candidate — and that pass rebuilds
-the guard from the localidad it actually requested.
+A tight guard also makes the barrio pass return zero, which is precisely the
+signal `scrape_source` needs to walk to the next candidate — so the SLUG still
+widens. What no longer widens with it is the guard: `zona_pedida` pins it to
+the original request for every pass. `TestTheLocalidadOnlyListingIsNowDropped\
+Everywhere` below records what that costs.
 """
 from typing import Any
 
@@ -88,11 +88,21 @@ class TestTheCostOfTightening:
         assert _item_matches_zona(item, _guard_phrases(f)) is False
 
 
-class TestTheChainStillRescuesTheLocalidadOnlyListing:
-    async def test_it_survives_on_the_degraded_pass(self):
-        """End to end through `scrape_source`: the barrio passes return zero
-        (correctly — the portal redirected), the chain widens to "La Plata",
-        and THAT pass guards on "La Plata", so the casco listing is kept."""
+class TestTheLocalidadOnlyListingIsNowDroppedEverywhere:
+    async def test_the_degraded_pass_no_longer_rescues_it(self):
+        """The FULL cost of the tightening, end to end.
+
+        The chain still widens the SLUG all the way to "La Plata" — that part
+        is unchanged — but `zona_pedida` keeps the guard on "Casco Urbano,
+        La Plata" for every pass. So a listing that names only the localidad
+        is now rejected on the degraded pass too, and the search returns zero.
+
+        This is the deliberate trade: "si le digo city bell, quiero las de
+        city bell". A barrio the portals DO name (City Bell, Villa Elisa,
+        Gonnet) gains precision. A barrio they never name in listing text
+        ('Casco Urbano' is an informal name for the La Plata centre) returns
+        nothing instead of the whole partido — an honest zero rather than a
+        wrong answer, but a zero all the same."""
         casco = _item(address='calle 47 e/ 12 y 13', city='La Plata')
         service = ApifyService(api_token='dummy-token')
         attempted: list[str] = []
@@ -122,4 +132,4 @@ class TestTheChainStillRescuesTheLocalidadOnlyListing:
         )
 
         assert attempted == ['Casco Urbano, La Plata', 'Casco Urbano', 'La Plata']
-        assert len(results) == 1
+        assert len(results) == 0

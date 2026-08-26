@@ -7,10 +7,18 @@ portal constraint: the public API serves 3329 pages (66k listings) and accepts
 ceiling existed on every other source (Mudafy 4×25, InmoBusqueda 5×15,
 MercadoLibre a hard-coded `_ML_MAX_PAGES=5`, ZonaProp a 20-page ceiling).
 
-These tests pin the new contract: the shipped defaults impose NO ceiling, and
-paging stops only on real exhaustion (empty page, `totalPages`, a short page,
-or a page with nothing new). The only surviving hard cap is Argenprop's, which
-is a robots.txt boundary (`Allow`s `pagina-1`..`pagina-10`), not a knob.
+These tests pin the contract: the shipped defaults impose no SELF-IMPOSED
+ceiling, and paging stops only on real exhaustion (empty page, `totalPages`, a
+short page, or a page with nothing new).
+
+Two portals are deliberate exceptions, and neither is a leftover default:
+
+* Argenprop's cap is a robots.txt boundary (`Allow`s `pagina-1`..`pagina-10`),
+  not a knob.
+* ZonaProp is capped at 200 items (~7 pages) because it is the one source
+  billed PER PAGE — a separate Apify actor run with a browser cold start each
+  time. Uncapped, a single City Bell search was still paginating 21 minutes
+  in with the UI showing only a spinner. Cost and wall-clock, not exhaustion.
 """
 from typing import Any
 
@@ -50,7 +58,13 @@ def test_shipped_defaults_impose_no_page_ceiling() -> None:
     assert defaults['INMOBUSQUEDA_MAX_PAGES'] == 0
     assert defaults['MUDAFY_MAX_PAGES'] == 0
     assert defaults['ARGENPROP_MAX_PAGES'] == 0
-    assert defaults['ZONAPROP_MAX_RESULTS'] == 0
+
+
+def test_zonaprop_ships_capped_because_it_bills_per_page() -> None:
+    """The one source where paging to exhaustion spends real money per page
+    and per minute — see this module's docstring."""
+    defaults = {n: f.default for n, f in Settings.model_fields.items()}
+    assert defaults['ZONAPROP_MAX_RESULTS'] == 200
 
 
 def test_remax_page_size_uses_the_api_maximum() -> None:

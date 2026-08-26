@@ -111,6 +111,13 @@ _ARGENPROP_URL_SLUG: dict[str, str] = {
 _APIFY_BASE = 'https://api.apify.com/v2'
 _POLL_INTERVAL = 3.0   # seconds between status checks
 _TIMEOUT = 300         # max seconds to wait for a run
+# Read budget for one Apify API call. The old flat 30s was killing live
+# pagination: a `ReadTimeout` on page 2 discarded a page-1 haul that had
+# already been scraped and billed. Connect stays short so a dead host fails
+# fast — it is only READING (a dataset of up to `ZONAPROP_MAX_RESULTS` items)
+# that deserves the long leash.
+_HTTP_TIMEOUT = 120.0
+_HTTP_CONNECT_TIMEOUT = 10.0
 
 # ── Per-search spend ledger ────────────────────────────────────────────────────
 #
@@ -185,9 +192,12 @@ def _guard_phrases(filters: ScrapingFilters) -> set[str]:
     `not results` never fired. The guard exists to DETECT that redirect; a
     phrase set wider than the request cannot do it.
 
-    Nothing is lost by keeping it tight: `scrape_source` already walks the
-    candidate chain one candidate at a time and rebuilds this set from the
-    candidate it actually requested, so the degraded pass guards itself.
+    On the chat path the seed is `zona_pedida` — the ORIGINAL request — not the
+    candidate `scrape_source` is currently trying. Widening the slug to a page
+    the portal actually serves is a retrieval strategy; widening the guard with
+    it turned "departamentos en City Bell" into "everything in La Plata". The
+    degraded pass now keeps only the barrio's listings off the wider page, or
+    honestly returns nothing.
     A composite phrase still requires EVERY comma part — ZonaProp supplies
     them in separate fields (barrio in `neighborhood`, partido in `city`), and
     that is what keeps the San Luis homonym of "Casco Urbano" out.
@@ -195,7 +205,7 @@ def _guard_phrases(filters: ScrapingFilters) -> set[str]:
     if filters.localidades:
         seeds = set(filters.zonas) | set(filters.localidades) | {filters.zona or ''}
     else:
-        seeds = {filters.zona or ''}
+        seeds = {filters.zona_pedida or filters.zona or ''}
     seeds.discard('')
     return seeds
 
@@ -2446,7 +2456,9 @@ class BaseApifyService(ABC):
 class ApifyService(BaseApifyService):
     def __init__(self, api_token: str) -> None:
         self._token = api_token
-        self._client = httpx.AsyncClient(timeout=30)
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(_HTTP_TIMEOUT, connect=_HTTP_CONNECT_TIMEOUT),
+        )
 
     # Map internal property types → ZonaProp actor values
     _PROP_TYPE_MAP = {
@@ -2599,6 +2611,12 @@ class ApifyService(BaseApifyService):
         the one entry point every portal shares.
         """
         results: list[RawProperty] = []
+        # Stamped ONCE, before the walk: every candidate below rewrites `zona`,
+        # and the guard must keep answering the question that was asked.
+        # An explicit value from the caller wins — it already scoped the guard.
+        filters = filters.model_copy(
+            update={'zona_pedida': filters.zona_pedida or filters.zona},
+        )
         for candidate in zona_candidates(filters.zona or '') or [filters.zona or '']:
             # `localidades` outranks `zona` in every portal's resolver, so a
             # stale barrio left there would re-resolve the same dead slug.
@@ -2764,13 +2782,25 @@ class ApifyService(BaseApifyService):
                 # cap (or the page ceiling it implies) can do that.
                 funnel.stop_reason = 'cap_reached' if cap > 0 else 'max_pages'
         except Exception as exc:
-            # Name the failure in the report, then let it propagate: the graph
-            # node above records it in `state['errors']`, and swallowing it
-            # here would turn a broken run into a clean "found nothing".
             funnel.stop_reason = f'actor_error: {type(exc).__name__}: {exc}'
-            raise
-        finally:
-            logger.info('%s', funnel.summary())
+            # Every page is a PAID actor run. If earlier pages already came
+            # back, KEEP them: discarding thirty listings because page 31
+            # timed out is the worst possible trade — the caller
+            # (`run_portal_scraper`) turns any exception into
+            # `collected_properties: []`, so re-raising here throws away work
+            # the user has already been billed for. Observed live: page 1
+            # returned 30 City Bell listings, page 2 hit a ReadTimeout, and
+            # all 30 were lost.
+            #
+            # With nothing salvaged there is nothing to protect, and the
+            # exception must reach the graph so `state['errors']` records it
+            # rather than reporting a clean "found nothing".
+            if not results:
+                logger.warning('%s', funnel.summary())
+                raise
+            logger.warning('%s', funnel.summary())
+            return results, funnel
+        logger.info('%s', funnel.summary())
         return results, funnel
 
     async def _scrape_argenprop(

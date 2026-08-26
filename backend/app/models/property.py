@@ -78,6 +78,11 @@ class NormalizedProperty(BaseModel):
 class ScrapingFilters(BaseModel):
     """Parsed from natural language by Claude tool_use."""
     zona: str | None = None          # single zona used per fan-out branch
+    # What the user actually asked for, stamped once by `scrape_source` and
+    # never rewritten. `zona` moves as the candidate chain widens the SEARCH
+    # URL (a retrieval strategy); the zona guard filters on this instead, so
+    # widening the query can never widen the answer.
+    zona_pedida: str | None = None
     zonas: list[str] = []            # all zonas parsed from the query
     localidades: list[str] = []      # localidades (partido/ciudad) for polygon searches; empty on chat path
     tipo_operacion: TipoOperacion | None = None

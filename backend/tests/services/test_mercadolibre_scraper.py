@@ -209,7 +209,12 @@ class TestProgressReporting:
 class TestZonaCandidateChainStillApplies:
     async def test_falls_back_to_the_localidad(self, service, fetched, monkeypatch):
         """A barrio page with nothing usable must degrade, same as every other
-        portal — this is what `scrape_source` adds on top."""
+        portal — this is what `scrape_source` adds on top.
+
+        The SLUG degrades; the guard does not. `zona_pedida` pins it to
+        "Casco Urbano, La Plata", so a card whose location reads only
+        "C. 7, La Plata" is rejected even on the localidad page. The walk is
+        still worth making: a card that DID name the barrio would be kept."""
         monkeypatch.setattr(settings, 'MERCADOLIBRE_MAX_PAGES', 1)
         fetched['pages'] = {
             'https://inmuebles.mercadolibre.com.ar/departamentos/venta/la-plata':
@@ -222,4 +227,4 @@ class TestZonaCandidateChainStillApplies:
         urls = fetched['urls']
         assert any('casco-urbano-la-plata' in u for u in urls)
         assert any(u.endswith('/la-plata') for u in urls)
-        assert len(res) == 1
+        assert len(res) == 0

@@ -62,11 +62,12 @@ async def test_actor_failure_still_logs_the_funnel(
     assert 'status FAILED' in blob
 
 
-async def test_the_error_does_not_become_a_silent_zero(
+async def test_a_total_failure_still_propagates(
     service: ApifyService, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The exception must still propagate — `run_portal_scraper` needs it to
-    record the error. Logging must not swallow the failure."""
+    """Nothing was salvaged, so the exception must reach `run_portal_scraper`
+    and be recorded in `state['errors']` — a broken run must never read as a
+    clean "found nothing"."""
     async def boom(src: str, actor: str, input_data: dict) -> list:
         raise RuntimeError('boom')
 
@@ -74,6 +75,56 @@ async def test_the_error_does_not_become_a_silent_zero(
 
     with pytest.raises(RuntimeError, match='boom'):
         await service._scrape_zonaprop_paginated('actor', _filters())
+
+
+async def test_pages_already_paid_for_survive_a_later_failure(
+    service: ApifyService, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE data-loss bug, from a real run: page 1 returned 30 City Bell
+    listings, page 2 hit a ReadTimeout, the exception propagated, and
+    `run_portal_scraper` turned all 30 into `collected_properties: []`.
+
+    Every page is a PAID actor run. Throwing away what already came back
+    because a LATER page failed is the worst possible trade — a partial
+    result is not a broken one."""
+    calls: list[int] = []
+
+    async def flaky(src: str, actor: str, input_data: dict) -> list:
+        calls.append(1)
+        if len(calls) == 1:
+            return [_item(i) for i in range(1000, 1030)]
+        raise RuntimeError('ReadTimeout')
+
+    monkeypatch.setattr(service, '_run_actor', flaky)
+
+    results, funnel = await service._scrape_zonaprop_paginated('actor', _filters())
+
+    assert len(results) == 30
+    assert funnel.stop_reason.startswith('actor_error')
+
+
+async def test_the_partial_result_is_still_reported_as_a_failure(
+    service: ApifyService, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Salvaging the data must not hide that the scrape was cut short — the
+    page count is short and the log says why."""
+    calls: list[int] = []
+
+    async def flaky(src: str, actor: str, input_data: dict) -> list:
+        calls.append(1)
+        if len(calls) == 1:
+            return [_item(i) for i in range(1000, 1030)]
+        raise RuntimeError('ReadTimeout')
+
+    monkeypatch.setattr(service, '_run_actor', flaky)
+
+    with caplog.at_level('WARNING', logger='app.services.apify'):
+        await service._scrape_zonaprop_paginated('actor', _filters())
+
+    blob = ' '.join(r.getMessage() for r in caplog.records)
+    assert 'stop=actor_error' in blob
+    assert 'ReadTimeout' in blob
 
 
 async def test_a_mid_pagination_failure_keeps_the_pages_already_counted(
@@ -93,8 +144,7 @@ async def test_a_mid_pagination_failure_keeps_the_pages_already_counted(
     monkeypatch.setattr(service, '_run_actor', flaky)
 
     with caplog.at_level('INFO', logger='app.services.apify'):
-        with pytest.raises(RuntimeError):
-            await service._scrape_zonaprop_paginated('actor', _filters())
+        await service._scrape_zonaprop_paginated('actor', _filters())
 
     blob = ' '.join(r.getMessage() for r in caplog.records)
     assert 'kept=30' in blob

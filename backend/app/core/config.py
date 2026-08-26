@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     # These used to ship with low defaults, which is why a search topped out at
     # exactly 100 RE/MAX items (5 pages × 20) — a self-imposed ceiling, never a
     # portal constraint. Set a positive value to re-cap a source (cost/latency).
-    ZONAPROP_MAX_RESULTS: int = 0        # items per ZonaProp search; PAID — one Apify actor run PER PAGE
+    ZONAPROP_MAX_RESULTS: int = 200      # items per ZonaProp search (~7 pages); PAID — one Apify actor run PER PAGE, each a browser cold start. Uncapped, one search was still paginating 21 min in.
     ARGENPROP_MAX_PAGES: int = 0         # 0 = the robots.txt ceiling (Allow: pagina-1..pagina-10)
     REMAX_MAX_PAGES: int = 0             # pages per RE/MAX search (API serves 3300+; verified live)
     REMAX_PAGE_SIZE: int = 200           # items per RE/MAX API page — 200 is the max the API honours
