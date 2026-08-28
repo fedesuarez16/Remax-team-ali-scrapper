@@ -475,6 +475,12 @@ def _zonaprop_search_url(filters: ScrapingFilters) -> str:
 # 403 body is a few KB against ~1.3 MB for a real listing page.
 _ZP_BLOCK_ATTEMPTS = 4
 _ZP_BLOCK_BACKOFF = 0.7   # seconds between draws — a burst looks like a bot
+# Consecutive pages that may fail before the crawl gives up. ZonaProp's WAF
+# blocks a PAGE, not a listing: production logs show page 6 blocked three times
+# then served, with pages 2-5 fine on the first try. Treating one block as the
+# end of the listing cost 66 of 67 pages in one search and 159 of 165 in
+# another. A run of failures IS a wall, and that still stops the crawl.
+_ZP_MAX_PAGE_FAILURES = 3
 
 _PROXY_SESSION_SEQ = count(1)
 
@@ -536,6 +542,7 @@ async def _scrape_zonaprop_direct(
     page = 1
     total_pages = 1
     retried_plain = False
+    fallos_seguidos = 0
 
     # One session for the whole search, rotated only when it stops working.
     # Rotating per request was self-inflicted: live, nearly every FIRST attempt
@@ -596,7 +603,19 @@ async def _scrape_zonaprop_direct(
         url = base if page == 1 else base.replace('.html', f'-pagina-{page}.html')
         body = await _fetch(url)
         if body is None:
-            break
+            # Skip, do not surrender: the next page usually goes through, and
+            # a whole listing is not worth losing to one blocked request.
+            fallos_seguidos += 1
+            if fallos_seguidos >= _ZP_MAX_PAGE_FAILURES:
+                logger.warning(
+                    'zonaprop: %d paginas seguidas bloqueadas — corto la busqueda '
+                    'con %d propiedades de %d paginas',
+                    fallos_seguidos, len(results), total_pages,
+                )
+                break
+            page += 1
+            continue
+        fallos_seguidos = 0
 
         state = _zonaprop_state(body)
 
