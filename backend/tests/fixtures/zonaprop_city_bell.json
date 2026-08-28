@@ -166,7 +166,7 @@
        "latitude": -34.89792957,
        "longitude": -58.0960773411
       },
-      "urlStaticMap": "https://maps.google.com/maps/api/staticmap?center=-34.897929570000002286178641952574253082275390625,-58.096077341099999102880246937274932861328125&zoom=16&key=AIzaSyDuxqN04nAj6aHygffqUpehsbMFbxEZX90&size=780x456&sensor=true&scale=2&signature=ygregf7-KJHXov1miY9wICigIEI=&channel=rplis-zp",
+      "urlStaticMap": null,
       "visibility": null
      }
     },
@@ -353,7 +353,7 @@
        "latitude": -34.89536483751938,
        "longitude": -58.053581714630134
       },
-      "urlStaticMap": "https://maps.google.com/maps/api/staticmap?center=-34.8953648375193807851246674545109272003173828125,-58.05358171463013405855235760100185871124267578125&zoom=16&key=AIzaSyDuxqN04nAj6aHygffqUpehsbMFbxEZX90&size=780x456&sensor=true&scale=2&signature=C9uMwauU0i-mtyJ8v6JnkHxuBeI=&channel=rplis-zp",
+      "urlStaticMap": null,
       "visibility": null
      }
     },
@@ -543,7 +543,7 @@
        "latitude": -34.9058219,
        "longitude": -58.0712266
       },
-      "urlStaticMap": "https://maps.google.com/maps/api/staticmap?center=-34.90582189999999940255293040536344051361083984375,-58.0712266000000028043359634466469287872314453125&zoom=16&key=AIzaSyDuxqN04nAj6aHygffqUpehsbMFbxEZX90&size=780x456&sensor=true&scale=2&signature=jnsSIqfMhR0K7X01YGXHBbxmqTM=&channel=rplis-zp",
+      "urlStaticMap": null,
       "visibility": null
      }
     },
