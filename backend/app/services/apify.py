@@ -467,6 +467,15 @@ def _zonaprop_search_url(filters: ScrapingFilters) -> str:
     return f'{_ZP_BASE}/{prop_slug}-{op_slug}-{zona_slug}{_zonaprop_price_segment(filters)}.html'
 
 
+# How many exit IPs to try before calling a block a wall. Two was the ceiling
+# production kept hitting: from Railway, ZonaProp answered 403 on both attempts
+# and the search ended at zero, while the SAME credential and `country-AR`
+# residential proxy answers 200 twice in a row from a laptop. What differs is
+# which IP the pool hands out, so the answer is more draws from it. Cheap: a
+# 403 body is a few KB against ~1.3 MB for a real listing page.
+_ZP_BLOCK_ATTEMPTS = 4
+_ZP_BLOCK_BACKOFF = 0.7   # seconds between draws — a burst looks like a bot
+
 _PROXY_SESSION_SEQ = count(1)
 
 
@@ -544,9 +553,10 @@ async def _scrape_zonaprop_direct(
         IPs, and whatever pages already came back are kept.
         """
         nonlocal session
-        for attempt in (1, 2):
-            if attempt == 2:
+        for attempt in range(1, _ZP_BLOCK_ATTEMPTS + 1):
+            if attempt > 1:
                 session = _next_proxy_session()
+                await asyncio.sleep(_ZP_BLOCK_BACKOFF)
             proxy = _proxy_with_session(settings.SCRAPER_PROXY_URL, session)
             async with httpx.AsyncClient(
                 timeout=_HTTP_TIMEOUT, follow_redirects=True, proxy=proxy,
@@ -562,7 +572,7 @@ async def _scrape_zonaprop_direct(
                     # answers 590 UPSTREAM504) = a hiccup between us and the
                     # portal. Both are worth one more try; a 404 is an ANSWER —
                     # the slug does not exist — and paying twice for it is waste.
-                    if attempt == 1 and (code in (403, 429) or code >= 500):
+                    if attempt < _ZP_BLOCK_ATTEMPTS and (code in (403, 429) or code >= 500):
                         logger.info(
                             'zonaprop: %s fallo transitorio (%d) — reintento con '
                             'otra sesion de proxy', url, code,
@@ -572,7 +582,7 @@ async def _scrape_zonaprop_direct(
                     return None
                 except Exception as exc:
                     # A timeout or a dropped connection: transient by nature.
-                    if attempt == 1:
+                    if attempt < _ZP_BLOCK_ATTEMPTS:
                         logger.info(
                             'zonaprop: %s corto la conexion (%s) — reintento con '
                             'otra sesion de proxy', url, type(exc).__name__,

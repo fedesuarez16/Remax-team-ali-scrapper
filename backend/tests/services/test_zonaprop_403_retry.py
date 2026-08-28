@@ -74,6 +74,7 @@ def _proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         settings, 'SCRAPER_PROXY_URL',
         'http://groups-RESIDENTIAL:secret@proxy.apify.com:8000')
+    monkeypatch.setattr('app.services.apify._ZP_BLOCK_BACKOFF', 0.0)
 
 
 async def test_a_403_is_retried_from_a_new_session(
@@ -89,14 +90,18 @@ async def test_a_403_is_retried_from_a_new_session(
     assert 'session-' in (proxies[1] or '')
 
 
-async def test_it_gives_up_after_the_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two burnt IPs in a row is a wall, not bad luck — do not spin."""
-    proxies = _serve(monkeypatch, [403, 403, 200])
+async def test_it_gives_up_after_the_last_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounded, not infinite. The ceiling is `_ZP_BLOCK_ATTEMPTS` draws from
+    the IP pool — production needed more than two, but not unlimited."""
+    from app.services.apify import _ZP_BLOCK_ATTEMPTS
+    proxies = _serve(monkeypatch, [403] * (_ZP_BLOCK_ATTEMPTS + 2))
 
     results = await _scrape_zonaprop_direct(_filters(), _noop)
 
     assert results == []
-    assert len(proxies) == 2
+    assert len(proxies) == _ZP_BLOCK_ATTEMPTS
 
 
 async def test_a_clean_first_try_is_not_repeated(
