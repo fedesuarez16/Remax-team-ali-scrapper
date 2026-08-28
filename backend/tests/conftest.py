@@ -72,3 +72,17 @@ def ml_zona_ya_resuelta() -> None:
     """
     from app.services import apify
     apify._ML_ZONA_PATH_CACHE['la-plata'] = 'la-plata'
+
+
+@pytest.fixture(autouse=True)
+def sin_esperas_reales(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero the scrapers' deliberate pauses.
+
+    Sleeping through the retry backoff bought nothing and slowed the suite.
+    Only this constant is touched: patching `asyncio.sleep` itself is too
+    blunt and broke tests whose subject IS concurrency (a slow portal, a
+    second cleanup run racing the first).
+    """
+    from app.services import apify
+
+    monkeypatch.setattr(apify, '_ZP_BLOCK_BACKOFF', 0.0)

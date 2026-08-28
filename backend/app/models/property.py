@@ -91,6 +91,12 @@ class ScrapingFilters(BaseModel):
     precio_max: float | None = None
     ambientes_min: int | None = None
     ambientes_max: int | None = None
+    # Dormitorios are NOT ambientes and the portals filter on them separately:
+    # ZonaProp serves `-2-habitaciones-` (523 listings) beside `-2-ambientes-`
+    # (1012) on the same page. Folding "2 dormitorios" into `ambientes_min`
+    # threw the distinction away and asked a question three times wider.
+    dormitorios_min: int | None = None
+    dormitorios_max: int | None = None
     m2_min: float | None = None
     m2_max: float | None = None
 

@@ -29,7 +29,12 @@ class Settings(BaseSettings):
     # y eso le trunca la paginación ("Reached last page (1)"), pero sirve como
     # marcha atrás si el scraping directo se rompe.
     ZONAPROP_USE_APIFY: bool = False
-    ZONAPROP_MAX_RESULTS: int = 200      # items per ZonaProp search (~7 pages); PAID — one Apify actor run PER PAGE, each a browser cold start. Uncapped, one search was still paginating 21 min in.
+    # Avisos por búsqueda de ZonaProp (30 por página → ~27 páginas). El costo ya
+    # no son runs pagos de Apify sino ancho de banda del proxy residencial y,
+    # sobre todo, TIEMPO: ~1.3 MB y ~4 s por página, medido en producción. Sin
+    # tope, una búsqueda de La Plata son 67 páginas ≈ 87 MB y 4½ minutos sólo
+    # de este portal, en paralelo con los otros seis. 0 = sin tope.
+    ZONAPROP_MAX_RESULTS: int = 800
     ARGENPROP_MAX_PAGES: int = 0         # 0 = the robots.txt ceiling (Allow: pagina-1..pagina-10)
     REMAX_MAX_PAGES: int = 0             # pages per RE/MAX search (API serves 3300+; verified live)
     REMAX_PAGE_SIZE: int = 200           # items per RE/MAX API page — 200 is the max the API honours

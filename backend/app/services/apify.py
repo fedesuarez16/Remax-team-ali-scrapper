@@ -464,7 +464,11 @@ def _zonaprop_search_url(filters: ScrapingFilters) -> str:
     prop_slug = _ZP_URL_SLUG.get(tipos[0], 'inmuebles') if len(tipos) == 1 else 'inmuebles'
     # Price belongs in the URL: the portal filters server-side, so pages that
     # cannot contain a match are never fetched at all.
-    return f'{_ZP_BASE}/{prop_slug}-{op_slug}-{zona_slug}{_zonaprop_price_segment(filters)}.html'
+    # Rooms BEFORE price — the order the portal's own URLs use.
+    return (
+        f'{_ZP_BASE}/{prop_slug}-{op_slug}-{zona_slug}'
+        f'{_zonaprop_rooms_segment(filters)}{_zonaprop_price_segment(filters)}.html'
+    )
 
 
 # How many exit IPs to try before calling a block a wall. Two was the ceiling
@@ -681,6 +685,48 @@ async def _scrape_zonaprop_direct(
 
     await on_progress('zonaprop', 'done', len(results))
     return results
+
+
+def _zonaprop_rooms_segment(filters: ScrapingFilters) -> str:
+    """ZonaProp's rooms slug for a search, or `''`.
+
+    Two forms, verified live on a 1999-listing page:
+
+        -2-ambientes-          rooms min=2 max=2   → 1012   exact
+        -mas-de-2-ambientes-   rooms min=2, no max → 1703   open floor
+        -mas-de-3-ambientes-   rooms min=3, no max →  691
+
+    There is NO range, and `-1-3-ambientes-` is a trap rather than an error:
+    the sibling `-1-3-habitaciones-` returns 122 with `appliedFilters` showing
+    `min=3, max=3` — the portal silently drops the "1-" and reads the last
+    number. So a range degrades to its FLOOR, which is wider than asked and
+    therefore cannot filter out anything the user wanted.
+
+    `ambientes` and `habitaciones` are DIFFERENT filters on the same page —
+    `-2-habitaciones-` (bedrooms) 523, `-2-ambientes-` (rooms) 1012 — so each
+    field maps to its own token and `dormitorios_*` wins when both are
+    present: it is the more specific question and only one slug fits the URL.
+
+    A ceiling alone has no form and is dropped; guessing one would filter by
+    something else, which is worse than not filtering.
+    """
+    # Dormitorios first: they are the more specific question, and only one
+    # slug fits the URL. Verified live on the same 1999-listing page —
+    # `-2-habitaciones-` (bedrooms) 523, `-2-ambientes-` (rooms) 1012 — so
+    # answering a "2 dormitorios" search with the ambientes floor is three
+    # times wider than what was asked.
+    for lo, hi, token in (
+        (filters.dormitorios_min, filters.dormitorios_max, 'habitaciones'),
+        (filters.ambientes_min, filters.ambientes_max, 'ambientes'),
+    ):
+        if not lo or lo <= 0:
+            continue
+        if hi is not None and hi < lo:
+            continue
+        if hi is not None and int(hi) == int(lo):
+            return f'-{int(lo)}-{token}'
+        return f'-mas-de-{int(lo)}-{token}'
+    return ''
 
 
 def _zonaprop_price_segment(filters: ScrapingFilters) -> str:

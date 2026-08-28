@@ -15,7 +15,7 @@ Two portals are deliberate exceptions, and neither is a leftover default:
 
 * Argenprop's cap is a robots.txt boundary (`Allow`s `pagina-1`..`pagina-10`),
   not a knob.
-* ZonaProp is capped at 200 items (~7 pages) because it is the one source
+* ZonaProp is capped at 800 items (~27 pages) because it is the one source
   billed PER PAGE — a separate Apify actor run with a browser cold start each
   time. Uncapped, a single City Bell search was still paginating 21 minutes
   in with the UI showing only a spinner. Cost and wall-clock, not exhaustion.
@@ -69,7 +69,7 @@ def test_zonaprop_ships_capped_because_it_bills_per_page() -> None:
     """The one source where paging to exhaustion spends real money per page
     and per minute — see this module's docstring."""
     defaults = {n: f.default for n, f in Settings.model_fields.items()}
-    assert defaults['ZONAPROP_MAX_RESULTS'] == 200
+    assert defaults['ZONAPROP_MAX_RESULTS'] == 800
 
 
 def test_remax_page_size_uses_the_api_maximum() -> None:

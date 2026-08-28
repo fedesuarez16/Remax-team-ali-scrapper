@@ -30,6 +30,23 @@ EXTRACT_FILTERS_TOOL = {
             },
             'precio_min': {'type': ['number', 'null'], 'description': 'USD'},
             'precio_max': {'type': ['number', 'null'], 'description': 'USD'},
+            'dormitorios_min': {
+                'type': ['integer', 'null'],
+                'description': (
+                    'Mínimo de DORMITORIOS (habitaciones). "N dormitorios" → '
+                    'dormitorios_min=N. No lo confundas con ambientes: los '
+                    'portales filtran por dormitorios y por ambientes por '
+                    'separado, y son números distintos.'
+                ),
+            },
+            'dormitorios_max': {
+                'type': ['integer', 'null'],
+                'description': (
+                    'Máximo de dormitorios. Sólo si el usuario pone un tope '
+                    'explícito ("hasta 3 dormitorios"). Para un valor exacto '
+                    '("2 dormitorios") poné dormitorios_min=dormitorios_max=2.'
+                ),
+            },
             'ambientes_min': {
                 'type': ['integer', 'null'],
                 'description': (
@@ -100,8 +117,14 @@ INSTAGRAM_SYSTEM_PROMPT = (
 SYSTEM_PROMPT = (
     'Sos un parser de búsquedas inmobiliarias para el mercado argentino. '
     'Interpretás lenguaje informal (ej: "2 amb", "depto", "para alquilar"). '
-    'Dormitorios y ambientes son cosas distintas: "3 dormitorios" → ambientes_min=3, ambientes_max=null. '
-    'Fijá ambientes_max únicamente si el usuario pone un tope explícito ("hasta", "máximo", "como mucho"). '
+    'Dormitorios y ambientes son cosas distintas y van en CAMPOS distintos. '
+    '"2 dormitorios" → dormitorios_min=2 y dormitorios_max=2 (valor exacto), dejando '
+    'ambientes_min/max en null. "1, 2 o 3 dormitorios" → dormitorios_min=1, dormitorios_max=3. '
+    '"3 ambientes" → ambientes_min=3. Nunca traduzcas dormitorios a ambientes: los portales '
+    'los filtran por separado y una búsqueda de 2 dormitorios trae el triple de avisos si se '
+    'la manda como ambientes. '
+    'Fijá los *_max únicamente si el usuario pone un tope explícito ("hasta", "máximo", "como mucho"), '
+    'salvo el caso del valor exacto de dormitorios. '
     'Si el precio viene en pesos (ARS), dejá precio en null salvo que sea claro. '
     'Llamá SIEMPRE a la herramienta extract_search_filters. '
     'Extraé TODAS las zonas mencionadas como una lista en "zonas" (una entrada por barrio o ciudad). '

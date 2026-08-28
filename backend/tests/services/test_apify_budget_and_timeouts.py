@@ -2,10 +2,10 @@
 
 Both defaults were unbounded in ways that hurt in production:
 
-* `ZONAPROP_MAX_RESULTS = 0` meant "paginate until the portal runs dry", and
-  every page is a separate PAID actor run with a browser cold start. A single
-  City Bell search was still walking pages 21 minutes in, with the UI showing
-  nothing but a spinner.
+* `ZONAPROP_MAX_RESULTS = 0` meant "paginate until the portal runs dry". The
+  cost is no longer paid actor runs but proxy bandwidth and, above all, TIME:
+  a La Plata search is 67 pages ≈ 87 MB and 4½ minutes of this portal alone,
+  in parallel with six others.
 * The HTTP client used a flat 30s for every Apify API call. A `ReadTimeout`
   mid-pagination killed a run that had already scraped (and been billed for)
   30 listings.
@@ -24,15 +24,15 @@ pytestmark = pytest.mark.usefixtures('apify_zonaprop')
 
 def test_zonaprop_is_capped_by_default() -> None:
     """A cap the operator never set is the one that has to be sane."""
-    assert settings.ZONAPROP_MAX_RESULTS == 200
+    assert settings.ZONAPROP_MAX_RESULTS == 800
 
 
 def test_the_cap_is_a_whole_number_of_pages_worth_of_headroom() -> None:
-    """`_scrape_zonaprop_paginated` turns the cap into a page ceiling with
-    `ceil(cap / 30)`; 200 buys 7 pages, deep enough for a barrio and shallow
-    enough to finish while someone waits."""
+    """The cap becomes a page ceiling via `ceil(cap / 30)`. 800 buys 27 pages
+    — about 35 MB of residential proxy and ~110 s at the ~1.3 MB / ~4 s per
+    page measured in production, against 87 MB and 4½ minutes uncapped."""
     pages = -(-settings.ZONAPROP_MAX_RESULTS // ApifyService._ZP_PAGE_SIZE)
-    assert pages == 7
+    assert pages == 27
 
 
 def test_http_timeout_outlasts_a_slow_dataset_fetch() -> None:
