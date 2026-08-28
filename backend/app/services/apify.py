@@ -2393,6 +2393,18 @@ async def _ml_resolve_region(filters: ScrapingFilters) -> None:
             'mercadolibre: zona %r → %s (%d avisos, la mayor de %d regiones)',
             zona, best[1], best[0], len(_ML_REGIONS),
         )
+        return
+
+    # Falling back to the flat slug is the right call — inventing a region
+    # would be worse — but it is NOT harmless: that slug lands on the smaller
+    # wrong region and its pages do not paginate. Seen live, the only clue was
+    # a high `fuera_de_zona` in the funnel, which reads like a guard problem.
+    logger.warning(
+        'mercadolibre: no pude resolver la region de %r (ninguna de %d respondio; '
+        'muro anti-bot o zona desconocida) — sigo con el slug plano, que cae en '
+        'la region chica y no pagina',
+        zona, len(_ML_REGIONS),
+    )
 
 
 async def _scrape_mercadolibre(

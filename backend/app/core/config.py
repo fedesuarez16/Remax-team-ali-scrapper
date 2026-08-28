@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     REMAX_MAX_PAGES: int = 0             # pages per RE/MAX search (API serves 3300+; verified live)
     REMAX_PAGE_SIZE: int = 200           # items per RE/MAX API page — 200 is the max the API honours
     REMAX_UNLOCATED_MAX_PAGES: int = 15  # ceiling ONLY for the nationwide fallback (zona unresolved)
-    MERCADOLIBRE_MAX_PAGES: int = 0      # pages per MercadoLibre search (50 items each)
+    MERCADOLIBRE_MAX_PAGES: int = 0      # páginas por búsqueda de MercadoLibre (48 tarjetas c/u, ~2 MB por página vía proxy residencial). 0 = sin tope.
     INMOBUSQUEDA_MAX_PAGES: int = 0      # pages per InmoBusqueda search (15 items each)
     MUDAFY_MAX_PAGES: int = 0            # pages per Mudafy search (25 items each)
     # `0` = NO CAP on both actors below: the input key is OMITTED so the actor
