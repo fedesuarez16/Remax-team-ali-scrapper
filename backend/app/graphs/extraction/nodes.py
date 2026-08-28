@@ -97,7 +97,16 @@ def _read_selection(state: ScrapingState) -> dict[str, Any]:
 def _env_allowed_sources() -> tuple[str, ...]:
     """Portals this deployment is allowed to hit at all, before the user's pick."""
     if settings.APIFY_DISABLED:
-        return ('mercadolibre', 'inmobusqueda', 'mudafy')  # direct httpx, no Apify actor
+        # Everything that talks to a portal over plain httpx. ZonaProp belongs
+        # here now that it reads `__PRELOADED_STATE__` itself — and especially
+        # here: this flag exists for when Apify is down or out of credits,
+        # which is the very situation that motivated moving it off the actor.
+        # Back through the actor (`ZONAPROP_USE_APIFY`), it is an Apify source
+        # again and stays out.
+        direct = ['mercadolibre', 'inmobusqueda', 'mudafy']
+        if not settings.ZONAPROP_USE_APIFY:
+            direct.insert(0, 'zonaprop')
+        return tuple(direct)
     if settings.SCRAPE_GOOGLEMAPS_ONLY:
         return ()
     if settings.SCRAPE_ZONAPROP_ONLY:
@@ -303,15 +312,41 @@ def _dedup_key(p: NormalizedProperty) -> tuple[Any, ...]:
 
 
 def deduplicate_properties(state: ScrapingState) -> dict[str, Any]:
-    seen: set[tuple[Any, ...]] = set()
+    """Collapse the one property that several portals each publish — and ONLY
+    that.
+
+    `_dedup_key` anchors on a canonical street address, which stops being a
+    building the moment an address names a block instead: La Plata is a
+    numbered grid, "Calle 47 e/ 12 y 13" is forty houses, and inside a 50k
+    price band their round asking prices collide. Measured on a real search,
+    that cost 33 of 54 ZonaProp listings — every one of them killed by another
+    ZonaProp listing.
+
+    A portal already deduplicates its own catalogue, so two distinct
+    `url_origen` on ONE `fuente` are two distinct properties no matter how
+    alike their keys look. Only a copy from a DIFFERENT `fuente` is the
+    republication the key was built to catch. With no URL there is no evidence
+    they differ, so the key alone decides, as before.
+    """
+    key_sources: dict[tuple[Any, ...], set[str]] = {}
+    seen_listings: set[tuple[str, str]] = set()
     unique: list[NormalizedProperty] = []
     dropped: Counter[str] = Counter()
     for p in state.get('normalized_properties', []):
         key = _dedup_key(p)
-        if key in seen:
-            dropped[p.fuente or 'desconocida'] += 1
+        fuente = p.fuente or 'desconocida'
+        sources = key_sources.get(key)
+
+        if p.url_origen and (fuente, p.url_origen) in seen_listings:
+            dropped[fuente] += 1          # the very same listing, seen twice
             continue
-        seen.add(key)
+        if sources is not None and (fuente not in sources or not p.url_origen):
+            dropped[fuente] += 1          # another portal's copy, or unprovable
+            continue
+
+        key_sources.setdefault(key, set()).add(fuente)
+        if p.url_origen:
+            seen_listings.add((fuente, p.url_origen))
         unique.append(p)
 
     # Silent shrinkage here reads downstream as "the portal had few listings".
@@ -356,22 +391,62 @@ def _split_by_criteria(
     return matched, rest
 
 
+# What each numeric column in `properties` can actually hold. Postgres rejects
+# the whole INSERT on the first value that does not fit, so one mis-parsed
+# figure takes the entire batch with it — observed live as
+# `numeric field overflow (22003)` losing 420 already-paid-for properties.
+# A value that cannot fit its column is not data: dropping that FIELD costs one
+# attribute, dropping the batch costs everything.
+_NUMERIC_CEILINGS: dict[str, float] = {
+    'precio': 10 ** 12,            # numeric(14,2)
+    'expensas': 10 ** 8,           # numeric(10,2)
+    'm2_total': 10 ** 8,
+    'm2_cubiertos': 10 ** 8,
+    'confianza_extraccion': 10,    # numeric(4,3)
+    'ambientes': 32_768,           # smallint
+    'banos': 32_768,
+    'cocheras': 32_768,
+    'piso': 32_768,
+    'antiguedad': 32_768,
+}
+
+
+def _fits(campo: str, valor: Any, direccion: str) -> Any:
+    """`valor`, or None when the column cannot hold it (and say so)."""
+    if valor is None:
+        return None
+    if abs(valor) < _NUMERIC_CEILINGS[campo]:
+        return valor
+    _log.warning(
+        'valor fuera de rango descartado: %s=%r no entra en la columna (%s)',
+        campo, valor, direccion,
+    )
+    return None
+
+
 def _prop_to_dict(p: NormalizedProperty, job_id: str | None) -> dict[str, Any]:
+    d = p.direccion
     return {
         'titulo': p.titulo, 'descripcion': p.descripcion,
         'direccion': p.direccion, 'direccion_norm': p.direccion_norm,
-        'precio': float(p.precio) if p.precio is not None else None,
+        'precio': _fits('precio', float(p.precio) if p.precio is not None else None, d),
         'moneda': p.moneda, 'tipo_operacion': p.tipo_operacion, 'tipo_propiedad': p.tipo_propiedad,
-        'ambientes': p.ambientes,
-        'banos': p.banos,
-        'cocheras': p.cocheras,
-        'piso': p.piso,
-        'expensas': float(p.expensas) if p.expensas is not None else None,
-        'm2_total': float(p.m2_total) if p.m2_total is not None else None,
-        'm2_cubiertos': float(p.m2_cubiertos) if p.m2_cubiertos is not None else None,
-        'antiguedad': p.antiguedad, 'amenities': p.amenities, 'imagenes': p.imagenes,
+        'ambientes': _fits('ambientes', p.ambientes, d),
+        'banos': _fits('banos', p.banos, d),
+        'cocheras': _fits('cocheras', p.cocheras, d),
+        'piso': _fits('piso', p.piso, d),
+        'expensas': _fits('expensas', float(p.expensas) if p.expensas is not None else None, d),
+        'm2_total': _fits('m2_total', float(p.m2_total) if p.m2_total is not None else None, d),
+        'm2_cubiertos': _fits(
+            'm2_cubiertos',
+            float(p.m2_cubiertos) if p.m2_cubiertos is not None else None, d,
+        ),
+        'antiguedad': _fits('antiguedad', p.antiguedad, d),
+        'amenities': p.amenities, 'imagenes': p.imagenes,
         'fuente': p.fuente, 'url_origen': p.url_origen, 'scraping_job_id': job_id,
-        'confianza_extraccion': float(p.confianza_extraccion),
+        'confianza_extraccion': _fits(
+            'confianza_extraccion', float(p.confianza_extraccion), d,
+        ),
     }
 
 
@@ -500,15 +575,43 @@ async def _fill_missing_images(sb: Any, props: list[NormalizedProperty]) -> None
         logging.getLogger(__name__).warning('_fill_missing_images failed: %s', exc)
 
 
+def _dedup_row_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    """The key `properties_dedup_idx` enforces, as a Python tuple."""
+    return (row['direccion'], row['precio'], row['tipo_operacion'], row['url_origen'])
+
+
 async def _upsert_properties(sb: Any, props: list[NormalizedProperty], job_id: str | None) -> None:
     if sb is None or not props:
         return
     data = [_prop_to_dict(p, job_id) for p in props]
+
+    # The write below is insert-ignore against `properties_dedup_idx`, so
+    # Postgres silently discards rows that share its key. Mirror that key
+    # EXACTLY — it now includes `url_origen` — or this line reports a collapse
+    # that stopped happening and sends the next investigation the wrong way.
+    keys = {
+        (r['direccion'], r['precio'], r['tipo_operacion'], r['url_origen'])
+        for r in data
+    }
+    if len(keys) < len(data):
+        colliding = Counter(
+            r['direccion'] for r in data
+            if sum(1 for o in data if _dedup_row_key(o) == _dedup_row_key(r)) > 1
+        )
+        worst = [d for d, _ in colliding.most_common(5)]
+        _log.warning(
+            'upsert collision: filas=%d distintas=%d (el indice unico se come %d) '
+            'direcciones=[%s]',
+            len(data), len(keys), len(data) - len(keys), ', '.join(worst),
+        )
+
     try:
         # insert-ignore: existing rows keep whatever the ficha editor curated.
         # `_fill_missing_images` then covers the rows that have no gallery yet.
         await sb.table('properties').upsert(
-            data, on_conflict='direccion,precio,tipo_operacion', ignore_duplicates=True
+            data,
+            on_conflict='direccion,precio,tipo_operacion,url_origen',
+            ignore_duplicates=True,
         ).execute()
     except Exception:
         import logging
@@ -543,10 +646,28 @@ async def _link_job_properties(
             for p in matched_props
         }
 
-        priced = [p for p in props if p.precio is not None]
-        null_priced = [p for p in props if p.precio is None]
+        # `url_origen` is the listing's identity, and every scraped row has
+        # one. The triple stopped being usable here the moment the unique
+        # index widened: several rows now legitimately share an address and
+        # price, so matching on it would both miss this job's other listings
+        # and drag in rows another search wrote at the same address.
+        with_url = [p for p in props if p.url_origen]
+        without_url = [p for p in props if not p.url_origen]
 
         id_flags: dict[str, bool] = {}
+
+        if with_url:
+            urls = [u for u in {p.url_origen for p in with_url} if u]
+            matched_urls = {p.url_origen for p in matched_props if p.url_origen}
+            for chunk in chunk_for_in_filter(urls):
+                res = await sb.table('properties').select(
+                    'id,url_origen'
+                ).in_('url_origen', chunk).execute()
+                for row in (res.data or []):
+                    id_flags[row['id']] = row.get('url_origen') in matched_urls
+
+        priced = [p for p in without_url if p.precio is not None]
+        null_priced = [p for p in without_url if p.precio is None]
 
         if priced:
             direcciones = list({p.direccion for p in priced})

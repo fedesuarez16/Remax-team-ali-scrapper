@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import logging
 import re
 import random
@@ -210,6 +211,449 @@ def _guard_phrases(filters: ScrapingFilters) -> set[str]:
     return seeds
 
 
+# ── ZonaProp, read directly ───────────────────────────────────────────────────
+# Everything below replaces the `crawlerbros/zonaprop-scraper` actor. The actor
+# pulls the listing in ~7 s and then opens one DETAIL page per result, ~85 s, and
+# that is where its Playwright driver dies:
+#
+#   TypeError: Cannot read properties of undefined (reading 'url')
+#   ... Browser.new_page: Connection closed while reading from the driver  (×19)
+#   Pushed 20 listings (total: 20) · Reached last page (1).
+#
+# A dead browser cannot fetch page 2 either, so the crash silently truncates
+# every multi-page search. Its input schema offers no switch to skip the
+# enrichment. Set `ZONAPROP_USE_APIFY=true` to fall back to it — the actor path
+# is still there, untouched.
+#
+# Everything we normalise already ships in `window.__PRELOADED_STATE__` on the
+# listing page, which `SCRAPER_PROXY_URL` (residential, already configured for
+# MercadoLibre) fetches with a plain 200 — measured: 1344 KB, 20 postings.
+
+_ZP_STATE_MARKER = '__PRELOADED_STATE__'
+_ZP_BASE = 'https://www.zonaprop.com.ar'
+
+
+def _zonaprop_state(html: str) -> dict[str, Any] | None:
+    """The `__PRELOADED_STATE__` object, or None when the page has none.
+
+    Brace-matched rather than regexed: more script follows the object, so a
+    regex either overshoots into it or truncates the JSON. Against the live
+    page a regex failed with `Extra data: line 1 column 354022`. String and
+    escape state are tracked so a `{` inside a description cannot end it.
+    """
+    start = html.find(_ZP_STATE_MARKER)
+    if start < 0:
+        return None
+    start = html.find('{', start)
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(html)):
+        ch = html[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(html[start:i + 1])  # type: ignore[no-any-return]
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def _zonaprop_paging(state: Mapping[str, Any]) -> dict[str, Any]:
+    """`{total, totalPages, currentPage, ...}` as the portal declares it.
+
+    This is why paging stops being guesswork: no more inferring a page size
+    from how many items came back and calling anything shorter the last page.
+    """
+    paging = (state.get('listStore') or {}).get('paging') or {}
+    return dict(paging)
+
+
+def _zone_id(location_id: Any) -> str:
+    """`"V1-D-1001379"` → `"1001379"`, matching the ids in `appliedFilters`."""
+    return str(location_id or '').rsplit('-', 1)[-1]
+
+
+def _zonaprop_applied_zone_ids(state: Mapping[str, Any]) -> set[str]:
+    """Which zones the portal says it filtered on.
+
+    The honest version of the redirect guard. `_item_matches_zona` had to infer
+    it from listing TEXT, which cost real results — "Grand Bell" and "Lomas de
+    City Bell" are inside City Bell and were thrown away for not spelling it.
+    Here the portal states the applied filter outright.
+    """
+    ids: set[str] = set()
+    for f in (state.get('listStore') or {}).get('appliedFilters') or []:
+        if f.get('type') != 'location':
+            continue
+        for opt in f.get('options') or []:
+            if opt.get('min'):
+                ids.add(str(opt['min']))
+    return ids
+
+
+def _zonaprop_applied_zone_labels(state: Mapping[str, Any]) -> set[str]:
+    """The NAMES of the zones the portal applied, for redirect detection."""
+    labels: set[str] = set()
+    for f in (state.get('listStore') or {}).get('appliedFilters') or []:
+        if f.get('type') != 'location':
+            continue
+        for opt in f.get('options') or []:
+            if opt.get('label'):
+                labels.add(str(opt['label']))
+    return labels
+
+
+def _zonaprop_requested_zone_ids(
+    state: Mapping[str, Any], zona: str,
+) -> set[str] | None:
+    """Of the zones the portal applied, the ones the USER actually asked for.
+
+    `None` means it applied none of them — the slug was unknown and the portal
+    answered with somewhere else.
+
+    Taking the UNION of applied zones is wrong, and measurably so. Live,
+    `casas-venta-city-bell-la-plata-...` applies TWO filters:
+
+        [{"label": "La Plata",  "type": "city", "min": "1001361"},
+         {"label": "City Bell", "type": "zone", "min": "1001379"}]
+
+    and returns 73 listings — Gonnet, Villa Elisa and Miralagos among them.
+    Every one of those carries the La Plata city in its parent chain, so a
+    union accepts the whole partido for a City Bell search. Only the applied
+    option whose LABEL matches the request counts; the containing city is a
+    widening the user did not ask for.
+
+    Matching by label rather than by `type` keeps it honest in both
+    directions: ask for "La Plata, La Plata" and the city-level filter IS the
+    request, so it is kept.
+    """
+    wanted = _slugify(zona.split(',')[0])
+    if not wanted:
+        return set()
+    ids: set[str] = set()
+    for f in (state.get('listStore') or {}).get('appliedFilters') or []:
+        if f.get('type') != 'location':
+            continue
+        for opt in f.get('options') or []:
+            if opt.get('min') and wanted in _slugify(str(opt.get('label') or '')):
+                ids.add(str(opt['min']))
+    if not ids:
+        # Nothing declared at all → no evidence either way, keep everything.
+        return set() if not _zonaprop_applied_zone_labels(state) else None
+    return ids
+
+
+def _zonaprop_posting_zone_ids(posting: Mapping[str, Any]) -> set[str]:
+    """Every zone the posting belongs to, walking `location.parent` upward —
+    zona, ciudad, provincia. A sub-barrio therefore carries its containing
+    zone's id, which is how Grand Bell survives a City Bell search."""
+    ids: set[str] = set()
+    node = ((posting.get('postingLocation') or {}).get('location')) or {}
+    while isinstance(node, Mapping) and node:
+        if node.get('locationId'):
+            ids.add(_zone_id(node['locationId']))
+        node = node.get('parent') or {}
+    return ids
+
+
+_ZP_REAL_ESTATE_TYPE = {
+    'casas': 'casa', 'departamentos': 'departamento', 'ph': 'ph',
+    'locales comerciales': 'local', 'oficinas': 'oficina', 'terrenos': 'terreno',
+    'quintas': 'casa', 'campos': 'terreno', 'cocheras': 'otro',
+    'depositos': 'local', 'galpones': 'local',
+}
+
+
+def _zp_num(value: Any) -> float | None:
+    """ZonaProp mixes numbers and numeric strings ("1000", "1.000", 450000)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    cleaned = re.sub(r'[^0-9,.]', '', str(value)).replace('.', '').replace(',', '.')
+    try:
+        return float(cleaned) if cleaned else None
+    except ValueError:
+        return None
+
+
+def _zp_feature(posting: Mapping[str, Any], label: str) -> float | None:
+    for feat in (posting.get('mainFeatures') or {}).values():
+        if feat.get('label') == label:
+            return _zp_num(feat.get('value'))
+    return None
+
+
+def _norm_zonaprop_posting(posting: Mapping[str, Any]) -> RawProperty | None:
+    """One `listPostings` entry → RawProperty, or None without a price."""
+    precio = moneda = None
+    for op in posting.get('priceOperationTypes') or []:
+        for price in op.get('prices') or []:
+            if price.get('amount'):
+                precio = _zp_num(price['amount'])
+                moneda = price.get('currency') or 'USD'
+    if precio is None:
+        return None
+
+    loc = posting.get('postingLocation') or {}
+    barrio = ((loc.get('location') or {}).get('name')) or ''
+    direccion = ((loc.get('address') or {}).get('name')) or barrio
+    raw_type = ((posting.get('realEstateType') or {}).get('name') or '').strip().lower()
+    pics = (posting.get('visiblePictures') or {}).get('pictures') or []
+
+    url = str(posting.get('url') or '')
+    return RawProperty(
+        fuente='zonaprop',
+        titulo=posting.get('title') or None,
+        descripcion=posting.get('descriptionNormalized') or None,
+        direccion=direccion or barrio,
+        precio=precio,
+        moneda='ARS' if str(moneda).upper().startswith('$') else 'USD',
+        tipo_operacion='venta',
+        tipo_propiedad=_ZP_REAL_ESTATE_TYPE.get(raw_type, 'otro'),  # type: ignore[arg-type]
+        ambientes=int(a) if (a := _zp_feature(posting, 'Ambientes')) else None,
+        banos=int(b) if (b := _zp_feature(posting, 'Baños')) else None,
+        cocheras=int(c) if (c := _zp_feature(posting, 'Cocheras')) else None,
+        m2_total=_zp_feature(posting, 'Superficie total'),
+        m2_cubiertos=_zp_feature(posting, 'Superficie cubierta'),
+        antiguedad=int(posting['antiquity']) if posting.get('antiquity') else None,
+        expensas=_zp_num((posting.get('expenses') or {}).get('amount')) or None,
+        imagenes=[p['url730x532'] for p in pics if p.get('url730x532')],
+        # Site-relative in the payload; a relative `url_origen` would break
+        # dedup and every link the UI renders.
+        url_origen=f'{_ZP_BASE}{url}' if url.startswith('/') else (url or None),
+    )
+
+
+_ZP_URL_SLUG = {
+    'departamento': 'departamentos',
+    'casa': 'casas',
+    'ph': 'ph',
+    'local': 'locales-comerciales',
+    'oficina': 'oficinas',
+    'terreno': 'terrenos',
+}
+
+
+def _zonaprop_search_url(filters: ScrapingFilters) -> str:
+    """The listing URL for a search. ONE builder for both paths — the direct
+    scrape and the Apify actor's `searchUrl` must never drift apart."""
+    zona = filters.zona or 'Buenos Aires'
+    op = filters.tipo_operacion or 'venta'
+    # Portal-known localidad slug when available (ADR-1/spec: unknown barrio
+    # slugs 404/redirect nationwide on ZonaProp) — else the barrio slug.
+    zona_slug = _slugify(filters.localidades[0]) if filters.localidades else _slugify(zona)
+    op_slug = 'alquiler' if op == 'alquiler' else 'venta'
+    tipos = filters.tipos_propiedad
+    prop_slug = _ZP_URL_SLUG.get(tipos[0], 'inmuebles') if len(tipos) == 1 else 'inmuebles'
+    # Price belongs in the URL: the portal filters server-side, so pages that
+    # cannot contain a match are never fetched at all.
+    return f'{_ZP_BASE}/{prop_slug}-{op_slug}-{zona_slug}{_zonaprop_price_segment(filters)}.html'
+
+
+_PROXY_SESSION_SEQ = count(1)
+
+
+def _next_proxy_session() -> str:
+    """A fresh Apify proxy session id — i.e. a fresh exit IP."""
+    return f'zp{next(_PROXY_SESSION_SEQ)}{random.randint(1000, 9999)}'
+
+
+def _proxy_with_session(proxy_url: str | None, session: str) -> str | None:
+    """`proxy_url` with `session-<id>` set in the USERNAME.
+
+    Apify selects the exit IP from the username: `groups-RESIDENTIAL` reuses
+    whatever session it had, `groups-RESIDENTIAL,session-abc` pins a specific
+    one. Rotating the id is how the actor never got stuck behind a burnt IP
+    (`Browser launching with proxy session: zp_71397` in its own log) while we,
+    reusing one session, ate consecutive 403s.
+
+    An existing `session-` is REPLACED, never appended — two of them make the
+    username invalid. A proxy without credentials has nothing to rotate and is
+    returned untouched.
+    """
+    if not proxy_url:
+        return None
+    scheme, _, rest = proxy_url.partition('://')
+    creds, at, host = rest.rpartition('@')
+    if not at:
+        return proxy_url
+    user, _, password = creds.partition(':')
+    opts = [o for o in user.split(',') if o and not o.startswith('session-')]
+    opts.append(f'session-{session}')
+    return f'{scheme}://{",".join(opts)}:{password}@{host}'
+
+
+async def _scrape_zonaprop_direct(
+    filters: ScrapingFilters, on_progress: ProgressCb,
+) -> list[RawProperty]:
+    """Page ZonaProp's own listing HTML — no Apify actor in the path.
+
+    Three things get better beyond dodging the actor's crash:
+
+    * Paging is DECLARED, not inferred. `paging.totalPages` says how many pages
+      exist, so we neither guess a page size nor pay for a request past the end.
+    * Membership is checked by ZONE ID against `appliedFilters` instead of
+      matching listing text — which is what keeps "Grand Bell" and "Lomas de
+      City Bell", real sub-barrios of City Bell that the text guard discarded.
+    * An unknown composite slug is DETECTED rather than guessed at: the portal
+      states which zone it applied.
+    """
+    from app.core.config import settings
+
+    await on_progress('zonaprop', 'running', 0)
+    base = _zonaprop_search_url(filters)
+    cap = settings.ZONAPROP_MAX_RESULTS
+    zona_req = filters.zona_pedida or filters.zona or ''
+
+    results: list[RawProperty] = []
+    seen: set[str] = set()
+    page = 1
+    total_pages = 1
+    retried_plain = False
+
+    # One session for the whole search, rotated only when it stops working.
+    # Rotating per request was self-inflicted: live, nearly every FIRST attempt
+    # drew a 403 and the retry then went through — a fresh exit IP gets
+    # challenged, a warmed one is let through. The actor used one session per
+    # run (`Browser launching with proxy session: zp_71397`).
+    session = _next_proxy_session()
+
+    async def _fetch(url: str) -> str | None:
+        """The page body, or None.
+
+        A 403/429 means this exit IP is burnt, not that the zona is empty, so
+        the session is rotated and the request tried once more. Two failures in
+        a row is a wall, not bad luck — it stops rather than spinning through
+        IPs, and whatever pages already came back are kept.
+        """
+        nonlocal session
+        for attempt in (1, 2):
+            if attempt == 2:
+                session = _next_proxy_session()
+            proxy = _proxy_with_session(settings.SCRAPER_PROXY_URL, session)
+            async with httpx.AsyncClient(
+                timeout=_HTTP_TIMEOUT, follow_redirects=True, proxy=proxy,
+                headers={'User-Agent': _BROWSER_UA, 'Accept-Language': 'es-AR,es;q=0.9'},
+            ) as client:
+                try:
+                    resp = await client.get(url)
+                    resp.raise_for_status()
+                    return resp.text
+                except httpx.HTTPStatusError as exc:
+                    code = exc.response.status_code
+                    # 403/429 = this exit IP is burnt. 5xx (Apify's own proxy
+                    # answers 590 UPSTREAM504) = a hiccup between us and the
+                    # portal. Both are worth one more try; a 404 is an ANSWER —
+                    # the slug does not exist — and paying twice for it is waste.
+                    if attempt == 1 and (code in (403, 429) or code >= 500):
+                        logger.info(
+                            'zonaprop: %s fallo transitorio (%d) — reintento con '
+                            'otra sesion de proxy', url, code,
+                        )
+                        continue
+                    logger.warning('zonaprop: %s fallo (%s)', url, exc)
+                    return None
+                except Exception as exc:
+                    # A timeout or a dropped connection: transient by nature.
+                    if attempt == 1:
+                        logger.info(
+                            'zonaprop: %s corto la conexion (%s) — reintento con '
+                            'otra sesion de proxy', url, type(exc).__name__,
+                        )
+                        continue
+                    logger.warning('zonaprop: %s fallo (%s)', url, exc)
+                    return None
+        return None
+
+    while page <= total_pages and (cap <= 0 or len(results) < cap):
+        url = base if page == 1 else base.replace('.html', f'-pagina-{page}.html')
+        body = await _fetch(url)
+        if body is None:
+            break
+
+        state = _zonaprop_state(body)
+
+        if state is not None and page == 1 and not retried_plain and ',' in zona_req:
+            if _zonaprop_requested_zone_ids(state, zona_req) is None:
+                # The portal served a zone we did not ask for: the composite
+                # slug is unknown to it, and it answers with the containing
+                # partido rather than a 404. Restart on the bare localidad,
+                # which is the form its own URLs use.
+                plain = zona_req.split(',')[0].strip()
+                logger.info(
+                    'zonaprop directo: %s sirvio %s en vez de %r — reintento con %r',
+                    url, sorted(_zonaprop_applied_zone_labels(state)), zona_req, plain,
+                )
+                retried_plain = True
+                base = _zonaprop_search_url(
+                    filters.model_copy(update={'zona': plain, 'localidades': []})
+                )
+                total_pages = 1
+                continue
+
+        if state is None:
+            # A WAF challenge or an error page. Say so: a silent empty list is
+            # indistinguishable from a zona with no listings, which is exactly
+            # how a broken source stays broken for weeks.
+            logger.warning(
+                'zonaprop: %s no trajo %s (%d KB) — puede ser el muro anti-bot; '
+                'revisa SCRAPER_PROXY_URL',
+                url, _ZP_STATE_MARKER, len(body) // 1024,
+            )
+            break
+
+        paging = _zonaprop_paging(state)
+        total_pages = int(paging.get('totalPages') or 1)
+        # NOT every applied zone — only the one that was asked for.
+        wanted = _zonaprop_requested_zone_ids(state, zona_req) or set()
+        postings = (state.get('listStore') or {}).get('listPostings') or []
+
+        kept = rejected = 0
+        for posting in postings:
+            pid = str(posting.get('postingId') or '')
+            if pid and pid in seen:
+                continue
+            if pid:
+                seen.add(pid)
+            if wanted and not (wanted & _zonaprop_posting_zone_ids(posting)):
+                rejected += 1
+                continue
+            prop = _norm_zonaprop_posting(posting)
+            if prop is None:
+                continue
+            if cap > 0 and len(results) >= cap:
+                break
+            results.append(prop)
+            kept += 1
+
+        logger.info(
+            'zonaprop directo: %s pagina=%d/%d avisos=%d kept=%d fuera_de_zona=%d '
+            'total_portal=%s',
+            url, page, total_pages, len(postings), kept, rejected, paging.get('total'),
+        )
+        page += 1
+
+    await on_progress('zonaprop', 'done', len(results))
+    return results
+
+
 def _zonaprop_price_segment(filters: ScrapingFilters) -> str:
     """ZonaProp's price slug for a search, or `''` when it cannot be built.
 
@@ -241,19 +685,43 @@ def _zonaprop_price_segment(filters: ScrapingFilters) -> str:
     return f'-menos-{int(pmax)}-dolar'
 
 
+def _locality_haystack(item: dict[str, Any]) -> str:
+    """Where a LOCALIDAD may be looked for — deliberately excluding `city`.
+
+    ZonaProp puts the PARTIDO in `city`, so letting the localidad match there
+    makes every listing in the partido answer to its head town: a search for
+    the La Plata casco came back full of City Bell and Villa Elisa.
+
+    `neighborhood` is authoritative when the portal filled it — believe the
+    label rather than an address that may spell out the partido too. Only when
+    it is missing do we fall back to the free text.
+    """
+    if hood := _slugify(str(item.get('neighborhood') or '')):
+        return hood
+    return _slugify(' '.join(
+        str(item.get(k) or '') for k in ('address', 'title', 'description')
+    ))
+
+
 def _item_matches_zona(item: dict[str, Any], zonas: Iterable[str]) -> bool:
     """Guard against ZonaProp redirecting an unknown zona slug to a nationwide
-    listing: keep items that mention ANY phrase in `zonas` (as a phrase) in
-    their neighborhood, address, title or description.
+    listing: keep items that mention ANY phrase in `zonas` (as a phrase).
 
     `zonas` is a phrase SET (ADR-1: union of barrios ∪ localidad for a
     localidad-branch, or a single-item set `{zona}` on the chat path — which
     preserves today's single-phrase behavior exactly). An empty set keeps
     everything, same as the old empty-string sentinel.
 
-    A composite phrase ("Villa Elisa, La Plata") requires EVERY comma part in
-    the haystack — the bare localidad also exists in other provinces, and the
-    item's `city` field (ZonaProp = partido) is what tells them apart.
+    A composite phrase is read as `localidad, partido` and the two halves are
+    checked against DIFFERENT fields. The localidad must appear where a
+    locality is named (`_locality_haystack`); only the partido and any further
+    parts may roam the whole record.
+
+    That split is the whole point. Checking both halves against one merged
+    blob collapsed "La Plata, La Plata" — the casco, whose localidad and
+    partido share a name — into "does 'la plata' appear anywhere", which the
+    `city` field satisfies for every listing in the partido. A single-part
+    phrase keeps roaming the whole record, unchanged.
     """
     phrase_parts = [
         parts for parts in
@@ -265,7 +733,14 @@ def _item_matches_zona(item: dict[str, Any], zonas: Iterable[str]) -> bool:
     haystack = _slugify(' '.join(
         str(item.get(k) or '') for k in ('neighborhood', 'city', 'address', 'title', 'description')
     ))
-    return any(all(part in haystack for part in parts) for parts in phrase_parts)
+    locality = _locality_haystack(item)
+
+    def _matches(parts: list[str]) -> bool:
+        if len(parts) == 1:
+            return parts[0] in haystack
+        return parts[0] in locality and all(p in haystack for p in parts[1:])
+
+    return any(_matches(parts) for parts in phrase_parts)
 
 
 # Share of a page the zona guard must reject before we treat the run as a
@@ -274,17 +749,33 @@ def _item_matches_zona(item: dict[str, Any], zonas: Iterable[str]) -> bool:
 # anything at or above half is a clean separation between the two cases.
 _REDIRECT_REJECT_RATIO = 0.5
 
+# How many DISTINCT rejected locality labels one page keeps. A nationwide dump
+# carries hundreds; a dozen is enough to recognise the shape and keeps the log
+# line readable.
+_REJECTED_SAMPLE = 12
+
 
 @dataclass
 class ZonaPropPage:
     """What one ZonaProp listing page yielded, and where each item died."""
     page: int
     raw: int = 0
+    attempt: int = 1         # >1 = this page came back stunted and was re-asked
     duplicates: int = 0      # already seen — an out-of-range page redirects to page 1
     zona_rejected: int = 0   # failed `_item_matches_zona` (nationwide-redirect guard)
     no_price: int = 0        # `_norm_zonaprop` dropped it: "consultar precio"
     capped: int = 0          # matched, but `ZONAPROP_MAX_RESULTS` was already full
     kept: int = 0
+    # The portal's own locality label for what the guard threw away. A count
+    # alone cannot tell "the portal served another place" from "the right place
+    # under a label the guard does not know" — and those need opposite fixes
+    # (retry the slug vs. loosen the guard).
+    rejected_zonas: dict[str, int] = field(default_factory=dict)
+
+    def note_rejected(self, zona: str) -> None:
+        label = (zona or '').strip() or '(sin barrio)'
+        if label in self.rejected_zonas or len(self.rejected_zonas) < _REJECTED_SAMPLE:
+            self.rejected_zonas[label] = self.rejected_zonas.get(label, 0) + 1
 
     @property
     def new_unique(self) -> int:
@@ -324,6 +815,14 @@ class ZonaPropFunnel:
     def kept(self) -> int: return self._total('kept')
 
     @property
+    def rejected_zonas(self) -> dict[str, int]:
+        merged: dict[str, int] = {}
+        for page in self.pages:
+            for label, n in page.rejected_zonas.items():
+                merged[label] = merged.get(label, 0) + n
+        return merged
+
+    @property
     def redirect_suspected(self) -> bool:
         """True when the guard threw out most of the page — the signature of
         ZonaProp answering an unknown slug with a NATIONWIDE listing instead of
@@ -356,8 +855,23 @@ class ZonaPropFunnel:
             f'raw={self.raw} duplicates={self.duplicates} '
             f'zona_rejected={self.zona_rejected} no_price={self.no_price} '
             f'capped={self.capped} kept={self.kept} stop={self.stop_reason} '
-            f'per_page=[{", ".join(f"p{p.page}:{p.raw}->{p.kept}" for p in self.pages)}]'
+            f'per_page=[{", ".join(self._page_label(p) for p in self.pages)}]'
+            + self._rejected_suffix()
         )
+
+    @staticmethod
+    def _page_label(page: ZonaPropPage) -> str:
+        n = f'p{page.page}' if page.attempt == 1 else f'p{page.page}#{page.attempt}'
+        return f'{n}:{page.raw}->{page.kept}'
+
+    def _rejected_suffix(self) -> str:
+        """Only printed when something was actually rejected — a clean page
+        must not pay for this in noise."""
+        rejected = self.rejected_zonas
+        if not rejected:
+            return ''
+        top = sorted(rejected.items(), key=lambda kv: (-kv[1], kv[0]))
+        return ' rechazados=[' + ', '.join(f'{k}:{n}' for k, n in top) + ']'
 
 
 _ZP_PROP_TYPE: dict[str, str] = {
@@ -2456,8 +2970,13 @@ class BaseApifyService(ABC):
 class ApifyService(BaseApifyService):
     def __init__(self, api_token: str) -> None:
         self._token = api_token
+        # The token travels as a HEADER, never as `?token=...`. httpx formats
+        # the full URL into every error it raises, so a query-string
+        # credential ends up verbatim in the funnel's `stop_reason` and in the
+        # log — which is exactly how a live 403 published this account's key.
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(_HTTP_TIMEOUT, connect=_HTTP_CONNECT_TIMEOUT),
+            headers={'Authorization': f'Bearer {api_token}'},
         )
 
     # Map internal property types → ZonaProp actor values
@@ -2499,18 +3018,7 @@ class ApifyService(BaseApifyService):
             # Portal-known localidad slug when available (ADR-1/spec: unknown
             # barrio slugs 404/redirect nationwide on ZonaProp) — else the
             # existing barrio slug, unchanged for the chat path.
-            zona_slug = _slugify(filters.localidades[0]) if filters.localidades else _slugify(zona)
-            op_slug = 'alquiler' if op == 'alquiler' else 'venta'
-            tipos = filters.tipos_propiedad
-            prop_slug = self._ZP_URL_SLUG.get(tipos[0], 'inmuebles') if len(tipos) == 1 else 'inmuebles'
-            # Price belongs in the URL, not downstream: every listing page is a
-            # PAID actor run, so a ceiling the portal applies server-side is
-            # pages we never pay to scrape. `-pagina-N` is appended after this
-            # segment by `_scrape_zonaprop_paginated`, matching the real URL.
-            price_slug = _zonaprop_price_segment(filters)
-            search_url = (
-                f'https://www.zonaprop.com.ar/{prop_slug}-{op_slug}-{zona_slug}{price_slug}.html'
-            )
+            search_url = _zonaprop_search_url(filters)
             from app.core.config import settings
             input_data: dict[str, Any] = {'searchUrl': search_url}
             if settings.ZONAPROP_MAX_RESULTS > 0:
@@ -2556,10 +3064,9 @@ class ApifyService(BaseApifyService):
         input_data: dict[str, Any],
     ) -> list[dict[str, Any]]:
         run_url = f'{_APIFY_BASE}/acts/{actor_id}/runs'
-        params = {'token': self._token}
 
         # Start run
-        resp = await self._client.post(run_url, params=params, json=input_data)
+        resp = await self._client.post(run_url, json=input_data)
         resp.raise_for_status()
         run_id = resp.json()['data']['id']
 
@@ -2571,7 +3078,7 @@ class ApifyService(BaseApifyService):
         while elapsed < _TIMEOUT:
             await asyncio.sleep(_POLL_INTERVAL)
             elapsed += _POLL_INTERVAL
-            status_resp = await self._client.get(status_url, params=params)
+            status_resp = await self._client.get(status_url)
             status_resp.raise_for_status()
             run_data = status_resp.json()['data']
             status = run_data['status']
@@ -2588,7 +3095,7 @@ class ApifyService(BaseApifyService):
 
         # Fetch dataset
         dataset_url = f'{_APIFY_BASE}/actor-runs/{run_id}/dataset/items'
-        items_resp = await self._client.get(dataset_url, params={**params, 'format': 'json'})
+        items_resp = await self._client.get(dataset_url, params={'format': 'json'})
         items_resp.raise_for_status()
         return items_resp.json()  # type: ignore[no-any-return]
 
@@ -2636,6 +3143,8 @@ class ApifyService(BaseApifyService):
         filters: ScrapingFilters,
         on_progress: ProgressCb,
     ) -> list[RawProperty]:
+        from app.core.config import settings
+
         if source == 'mercadolibre':
             return await _scrape_mercadolibre(filters, on_progress)
         if source == 'remax':
@@ -2646,6 +3155,10 @@ class ApifyService(BaseApifyService):
             return await _scrape_inmobusqueda(filters, on_progress)
         if source == 'mudafy':
             return await _scrape_mudafy(filters, on_progress)
+        if source == 'zonaprop' and not settings.ZONAPROP_USE_APIFY:
+            # Default path. `ZONAPROP_USE_APIFY=true` hands ZonaProp back to the
+            # Apify actor below, which is left intact for exactly that reason.
+            return await _scrape_zonaprop_direct(filters, on_progress)
 
         actor_id = _ACTORS.get(source)
         if not actor_id:
@@ -2699,9 +3212,14 @@ class ApifyService(BaseApifyService):
         await on_progress(source, 'done', len(results))
         return results
 
-    # ZonaProp listing pages hold ~30 items; the crawlerbros actor's browser
-    # dies after page 1 (every run returns one page regardless of maxResults),
-    # so WE paginate: one actor run per `...-pagina-N.html` URL.
+    # The crawlerbros actor's browser dies after page 1 (every run returns one
+    # page regardless of maxResults), so WE paginate: one actor run per
+    # `...-pagina-N.html` URL.
+    #
+    # 30 is only the SEED for the cap arithmetic. The real page size is
+    # whatever page 1 returns — hardcoding it made the "short page = last
+    # page" rule fire on page 1 of any portal serving fewer, cutting a
+    # five-page listing down to one.
     _ZP_PAGE_SIZE = 30
 
     async def _scrape_zonaprop_paginated(
@@ -2722,6 +3240,9 @@ class ApifyService(BaseApifyService):
         results: list[RawProperty] = []
         seen: set[str] = set()
         page = 1
+        page_size: int | None = None   # measured off page 1, never assumed
+        attempt = 1                    # of the page currently being fetched
+        retried: set[int] = set()      # pages already given a second chance
         # `try/finally`: `_run_actor` raises on a FAILED/ABORTED run, a non-2xx
         # from the Apify API or a bad token, and `run_portal_scraper` turns
         # that into a bare "0 props" in the UI — indistinguishable from a
@@ -2736,8 +3257,16 @@ class ApifyService(BaseApifyService):
                     input_data['maxResults'] = cap - len(results)
 
                 raw_items = await self._run_actor('zonaprop', actor_id, input_data)
-                row = ZonaPropPage(page=page, raw=len(raw_items))
+                row = ZonaPropPage(page=page, raw=len(raw_items), attempt=attempt)
                 funnel.pages.append(row)
+
+                # Page 1 defines the portal's real page size; re-derive the
+                # page ceiling from it so a smaller page cannot quietly shrink
+                # the cap (200 items over 20-item pages is 10 pages, not 7).
+                if page_size is None and raw_items:
+                    page_size = len(raw_items)
+                    if cap > 0:
+                        max_pages = -(-cap // page_size)
 
                 for item in raw_items:
                     key = str(item.get('listingId') or item.get('url') or '')
@@ -2748,6 +3277,7 @@ class ApifyService(BaseApifyService):
                         seen.add(key)
                     if not _item_matches_zona(item, phrases):
                         row.zona_rejected += 1
+                        row.note_rejected(str(item.get('neighborhood') or ''))
                         continue
                     prop = _norm_zonaprop(item, filters.zona or '')
                     if prop is None:
@@ -2758,6 +3288,28 @@ class ApifyService(BaseApifyService):
                         continue
                     results.append(prop)
                     row.kept += 1
+
+                # A page that came back SHORT and carried nothing new was cut
+                # off mid-read — the actor died partway and re-served a slice
+                # of page 1. Ask once more before believing the listing ended:
+                # observed live, a stunted page 2 cost pages 2 AND 3 of a
+                # three-page listing.
+                #
+                # Narrow on purpose, because every attempt is a PAID run. A
+                # FULL sterile page is an out-of-range `-pagina-N` bouncing
+                # back to page 1, and an EMPTY one says the same thing more
+                # cheaply — both are the real end and are not re-asked.
+                stunted = (
+                    raw_items
+                    and row.new_unique == 0
+                    and page_size is not None
+                    and len(raw_items) < page_size
+                )
+                if stunted and page not in retried:
+                    retried.add(page)
+                    attempt += 1
+                    continue
+                attempt = 1
 
                 # Stop on: empty page, all-duplicates (out-of-range page redirects
                 # back to page 1), all-rejected (drifted into a nationwide
@@ -2772,11 +3324,15 @@ class ApifyService(BaseApifyService):
                 if row.kept == 0:
                     funnel.stop_reason = 'all_rejected'
                     break
-                if len(raw_items) < self._ZP_PAGE_SIZE:
+                # Short RELATIVE to what this portal actually serves. Page 1
+                # can never be short — it IS the measurement — so a one-page
+                # listing costs one extra request to confirm the end, rather
+                # than a guess that silently drops four pages.
+                if page > 1 and page_size is not None and len(raw_items) < page_size:
                     funnel.stop_reason = 'short_page'
                     break
                 # A healthy actor run may span multiple pages; skip what it covered.
-                page += max(1, -(-len(raw_items) // self._ZP_PAGE_SIZE))
+                page += max(1, -(-len(raw_items) // (page_size or self._ZP_PAGE_SIZE)))
             else:
                 # Fell out of the `while` condition rather than a `break`: only a
                 # cap (or the page ceiling it implies) can do that.

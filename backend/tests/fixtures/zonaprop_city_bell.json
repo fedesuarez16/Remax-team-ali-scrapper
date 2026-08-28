@@ -1,0 +1,670 @@
+{
+ "listStore": {
+  "paging": {
+   "total": 20,
+   "offset": 0,
+   "limit": 30,
+   "totalPages": 1,
+   "currentPage": 1,
+   "showFrom": 1,
+   "showUntil": 1,
+   "pages": [
+    1
+   ],
+   "firstPage": true,
+   "lastPage": true,
+   "total5A": 0,
+   "pagesUrl": {
+    "1": "/casas-venta-city-bell-450000-500000-dolar.html",
+    "previousPage": null,
+    "nextPage": null
+   }
+  },
+  "appliedFilters": [
+   {
+    "type": "location",
+    "options": [
+     {
+      "label": "City Bell",
+      "type": "zone",
+      "min": "1001379"
+     }
+    ],
+    "renderType": 5
+   },
+   {
+    "type": "operationType",
+    "options": [
+     {
+      "label": "Comprar",
+      "min": "1"
+     }
+    ],
+    "renderType": 3
+   },
+   {
+    "type": "realestateType",
+    "options": [
+     {
+      "label": "Casa",
+      "min": "1"
+     }
+    ],
+    "renderType": 4
+   },
+   {
+    "type": "price",
+    "options": [
+     {
+      "label": "USD450K - USD500K",
+      "min": "450000",
+      "max": "500000"
+     }
+    ],
+    "units": [
+     {
+      "id": "2",
+      "label": "Dólares",
+      "symbol": "USD"
+     }
+    ],
+    "renderType": 7
+   },
+   {
+    "type": "publisherType",
+    "options": [
+     {
+      "label": "Todos",
+      "min": "ALL"
+     }
+    ],
+    "renderType": 3
+   },
+   {
+    "type": "sort",
+    "options": [
+     {
+      "label": "Relevantes",
+      "min": "relevance"
+     }
+    ]
+   }
+  ],
+  "listPostings": [
+   {
+    "postingId": "59792482",
+    "url": "/propiedades/clasificado/veclcain-casa-en-venta-city-bell.-barrio-cerrado-59792482.html",
+    "title": "Casa en Venta, City Bell. Barrio Cerrado",
+    "realEstateType": {
+     "name": "Casas",
+     "realEstateTypeId": "1"
+    },
+    "antiquity": null,
+    "expenses": {
+     "currencyId": null,
+     "amount": 0,
+     "formattedAmount": null,
+     "currency": "$"
+    },
+    "priceOperationTypes": [
+     {
+      "lowPricePercentage": null,
+      "operationType": {
+       "name": "Venta",
+       "operationTypeId": "1"
+      },
+      "prices": [
+       {
+        "currencyId": "2",
+        "amount": 450000,
+        "formattedAmount": "450.000",
+        "currency": "USD"
+       }
+      ]
+     }
+    ],
+    "postingLocation": {
+     "address": {
+      "name": "SAN Efrén. Calle 144 y Arroyo Carnaval.",
+      "visibility": "EXACT"
+     },
+     "location": {
+      "locationId": "V1-D-1001379",
+      "metadata": null,
+      "name": "City Bell",
+      "label": "ZONA",
+      "depth": 3,
+      "parent": {
+       "locationId": "V1-C-1001361",
+       "metadata": null,
+       "name": "La Plata",
+       "label": "CIUDAD",
+       "depth": 2,
+       "parent": {
+        "locationId": "V1-B-1000",
+        "metadata": null,
+        "name": "GBA Sur",
+        "label": "PROVINCIA",
+        "depth": 1,
+        "parent": {
+         "locationId": "V1-A-1",
+         "metadata": null,
+         "name": "Argentina",
+         "label": "PAIS",
+         "depth": 0,
+         "parent": null,
+         "acronym": null
+        },
+        "acronym": "GBAS"
+       },
+       "acronym": null
+      },
+      "acronym": null
+     },
+     "postingGeolocation": {
+      "geolocation": {
+       "latitude": -34.89792957,
+       "longitude": -58.0960773411
+      },
+      "urlStaticMap": "https://maps.google.com/maps/api/staticmap?center=-34.897929570000002286178641952574253082275390625,-58.096077341099999102880246937274932861328125&zoom=16&key=AIzaSyDuxqN04nAj6aHygffqUpehsbMFbxEZX90&size=780x456&sensor=true&scale=2&signature=ygregf7-KJHXov1miY9wICigIEI=&channel=rplis-zp",
+      "visibility": null
+     }
+    },
+    "mainFeatures": {
+     "1000027": {
+      "featureId": "1000027",
+      "label": "Luminoso",
+      "measure": null,
+      "value": null,
+      "icon": null,
+      "featureCategoryId": "4",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT100": {
+      "featureId": "CFT100",
+      "label": "Superficie total",
+      "measure": "m²",
+      "value": "1000",
+      "icon": null,
+      "featureCategoryId": "CFC2",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT101": {
+      "featureId": "CFT101",
+      "label": "Superficie cubierta",
+      "measure": "m²",
+      "value": "152",
+      "icon": null,
+      "featureCategoryId": "CFC2",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT1": {
+      "featureId": "CFT1",
+      "label": "Ambientes",
+      "measure": null,
+      "value": "4",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT2": {
+      "featureId": "CFT2",
+      "label": "Dormitorios",
+      "measure": null,
+      "value": "3",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT3": {
+      "featureId": "CFT3",
+      "label": "Baños",
+      "measure": null,
+      "value": "2",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT7": {
+      "featureId": "CFT7",
+      "label": "Cocheras",
+      "measure": null,
+      "value": "2",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT4": {
+      "featureId": "CFT4",
+      "label": "Toilette",
+      "measure": null,
+      "value": "1",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     }
+    },
+    "visiblePictures": {
+     "pictures": [
+      {
+       "multimediaTypeId": "2",
+       "order": 0,
+       "height": 900,
+       "width": 1600,
+       "url730x532": "https://imgar.zonapropcdn.com/avisos/1/00/59/79/24/82/720x532/2069794782.jpg?isFirstImage=true",
+       "url360x266": "https://imgar.zonapropcdn.com/avisos/1/00/59/79/24/82/360x266/2069794782.jpg?isFirstImage=true",
+       "url130x70": null,
+       "title": "Casa · 152m² · 4 Ambientes · 2 Cocheras · Casa en Venta, City Bell. Barrio Cerrado"
+      },
+      {
+       "multimediaTypeId": "2",
+       "order": 1,
+       "height": 900,
+       "width": 1600,
+       "url730x532": "https://imgar.zonapropcdn.com/avisos/1/00/59/79/24/82/720x532/2069794770.jpg",
+       "url360x266": "https://imgar.zonapropcdn.com/avisos/1/00/59/79/24/82/360x266/2069794770.jpg",
+       "url130x70": null,
+       "title": "Casa de 4 ambientes, La Plata"
+      }
+     ]
+    },
+    "descriptionNormalized": "Casa a Estrenar en San Efrén - Lote 43Naturaleza y Seguridad. Esta casa, desarrollada íntegramente en una planta, se sitúa sobre un extenso lote de 25 metros de"
+   },
+   {
+    "postingId": "52076769",
+    "url": "/propiedades/clasificado/veclcain-casa-5-dorm.-barrio-cerrado-el-cauce-city-bell-52076769.html",
+    "title": "Casa 5 Dorm. - Barrio Cerrado El Cauce City Bell",
+    "realEstateType": {
+     "name": "Casas",
+     "realEstateTypeId": "1"
+    },
+    "antiquity": null,
+    "expenses": {
+     "currencyId": null,
+     "amount": 250000,
+     "formattedAmount": "250.000",
+     "currency": "$"
+    },
+    "priceOperationTypes": [
+     {
+      "lowPricePercentage": null,
+      "operationType": {
+       "name": "Venta",
+       "operationTypeId": "1"
+      },
+      "prices": [
+       {
+        "currencyId": "2",
+        "amount": 478000,
+        "formattedAmount": "478.000",
+        "currency": "USD"
+       }
+      ]
+     }
+    ],
+    "postingLocation": {
+     "address": {
+      "name": "Calle 476 S/N. Entre Esquina  132 Bis",
+      "visibility": "EXACT"
+     },
+     "location": {
+      "locationId": "V1-D-1001379",
+      "metadata": null,
+      "name": "City Bell",
+      "label": "ZONA",
+      "depth": 3,
+      "parent": {
+       "locationId": "V1-C-1001361",
+       "metadata": null,
+       "name": "La Plata",
+       "label": "CIUDAD",
+       "depth": 2,
+       "parent": {
+        "locationId": "V1-B-1000",
+        "metadata": null,
+        "name": "GBA Sur",
+        "label": "PROVINCIA",
+        "depth": 1,
+        "parent": {
+         "locationId": "V1-A-1",
+         "metadata": null,
+         "name": "Argentina",
+         "label": "PAIS",
+         "depth": 0,
+         "parent": null,
+         "acronym": null
+        },
+        "acronym": "GBAS"
+       },
+       "acronym": null
+      },
+      "acronym": null
+     },
+     "postingGeolocation": {
+      "geolocation": {
+       "latitude": -34.89536483751938,
+       "longitude": -58.053581714630134
+      },
+      "urlStaticMap": "https://maps.google.com/maps/api/staticmap?center=-34.8953648375193807851246674545109272003173828125,-58.05358171463013405855235760100185871124267578125&zoom=16&key=AIzaSyDuxqN04nAj6aHygffqUpehsbMFbxEZX90&size=780x456&sensor=true&scale=2&signature=C9uMwauU0i-mtyJ8v6JnkHxuBeI=&channel=rplis-zp",
+      "visibility": null
+     }
+    },
+    "mainFeatures": {
+     "1000029": {
+      "featureId": "1000029",
+      "label": "Orientación",
+      "measure": null,
+      "value": "NO",
+      "icon": null,
+      "featureCategoryId": "4",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT100": {
+      "featureId": "CFT100",
+      "label": "Superficie total",
+      "measure": "m²",
+      "value": "615",
+      "icon": null,
+      "featureCategoryId": "CFC2",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT101": {
+      "featureId": "CFT101",
+      "label": "Superficie cubierta",
+      "measure": "m²",
+      "value": "352",
+      "icon": null,
+      "featureCategoryId": "CFC2",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT1": {
+      "featureId": "CFT1",
+      "label": "Ambientes",
+      "measure": null,
+      "value": "7",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT2": {
+      "featureId": "CFT2",
+      "label": "Dormitorios",
+      "measure": null,
+      "value": "6",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT7": {
+      "featureId": "CFT7",
+      "label": "Cocheras",
+      "measure": null,
+      "value": "2",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT4": {
+      "featureId": "CFT4",
+      "label": "Toilette",
+      "measure": null,
+      "value": "1",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT5": {
+      "featureId": "CFT5",
+      "label": "Antigüedad",
+      "measure": null,
+      "value": "3",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     }
+    },
+    "visiblePictures": {
+     "pictures": [
+      {
+       "multimediaTypeId": "2",
+       "order": 0,
+       "height": 810,
+       "width": 1440,
+       "url730x532": "https://imgar.zonapropcdn.com/avisos/1/00/52/07/67/69/720x532/2023769258.jpg?isFirstImage=true",
+       "url360x266": "https://imgar.zonapropcdn.com/avisos/1/00/52/07/67/69/360x266/2023769258.jpg?isFirstImage=true",
+       "url130x70": null,
+       "title": "BMP-BMP-802_2 · Casa 5 Dorm. - Barrio Cerrado El Cauce City Bell"
+      },
+      {
+       "multimediaTypeId": "2",
+       "order": 1,
+       "height": 810,
+       "width": 1440,
+       "url730x532": "https://imgar.zonapropcdn.com/avisos/1/00/52/07/67/69/720x532/1887159588.jpg",
+       "url360x266": "https://imgar.zonapropcdn.com/avisos/1/00/52/07/67/69/360x266/1887159588.jpg",
+       "url130x70": null,
+       "title": "BMP-BMP-802_3"
+      }
+     ]
+    },
+    "descriptionNormalized": "Venta de Casa 7 ambientes O mas en El Cuace - City Bell, La Plata. Casa en venta Barrio cerrado El Cauce, lote interno (no perimetral). Casa nueva sobre lote de"
+   },
+   {
+    "postingId": "57624359",
+    "url": "/propiedades/clasificado/veclcain-casa-en-venta-en-grand-bell-57624359.html",
+    "title": "Casa en Venta en Grand Bell",
+    "realEstateType": {
+     "name": "Casas",
+     "realEstateTypeId": "1"
+    },
+    "antiquity": null,
+    "expenses": null,
+    "priceOperationTypes": [
+     {
+      "lowPricePercentage": null,
+      "operationType": {
+       "name": "Venta",
+       "operationTypeId": "1"
+      },
+      "prices": [
+       {
+        "currencyId": "2",
+        "amount": 490000,
+        "formattedAmount": "490.000",
+        "currency": "USD"
+       }
+      ]
+     }
+    ],
+    "postingLocation": {
+     "address": {
+      "name": "Grand Bell",
+      "visibility": "EXACT"
+     },
+     "location": {
+      "locationId": "V1-E-208745",
+      "metadata": null,
+      "name": "Grand Bell",
+      "label": "SUBZONA",
+      "depth": 4,
+      "parent": {
+       "locationId": "V1-D-1001379",
+       "metadata": null,
+       "name": "City Bell",
+       "label": "ZONA",
+       "depth": 3,
+       "parent": {
+        "locationId": "V1-C-1001361",
+        "metadata": null,
+        "name": "La Plata",
+        "label": "CIUDAD",
+        "depth": 2,
+        "parent": {
+         "locationId": "V1-B-1000",
+         "metadata": null,
+         "name": "GBA Sur",
+         "label": "PROVINCIA",
+         "depth": 1,
+         "parent": {
+          "locationId": "V1-A-1",
+          "metadata": null,
+          "name": "Argentina",
+          "label": "PAIS",
+          "depth": 0,
+          "parent": null,
+          "acronym": null
+         },
+         "acronym": "GBAS"
+        },
+        "acronym": null
+       },
+       "acronym": null
+      },
+      "acronym": null
+     },
+     "postingGeolocation": {
+      "geolocation": {
+       "latitude": -34.9058219,
+       "longitude": -58.0712266
+      },
+      "urlStaticMap": "https://maps.google.com/maps/api/staticmap?center=-34.90582189999999940255293040536344051361083984375,-58.0712266000000028043359634466469287872314453125&zoom=16&key=AIzaSyDuxqN04nAj6aHygffqUpehsbMFbxEZX90&size=780x456&sensor=true&scale=2&signature=jnsSIqfMhR0K7X01YGXHBbxmqTM=&channel=rplis-zp",
+      "visibility": null
+     }
+    },
+    "mainFeatures": {
+     "1000027": {
+      "featureId": "1000027",
+      "label": "Luminoso",
+      "measure": null,
+      "value": "Luminoso",
+      "icon": null,
+      "featureCategoryId": "4",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT100": {
+      "featureId": "CFT100",
+      "label": "Superficie total",
+      "measure": "m²",
+      "value": "1125",
+      "icon": null,
+      "featureCategoryId": "CFC2",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT101": {
+      "featureId": "CFT101",
+      "label": "Superficie cubierta",
+      "measure": "m²",
+      "value": "242",
+      "icon": null,
+      "featureCategoryId": "CFC2",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT1": {
+      "featureId": "CFT1",
+      "label": "Ambientes",
+      "measure": null,
+      "value": "4",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT2": {
+      "featureId": "CFT2",
+      "label": "Dormitorios",
+      "measure": null,
+      "value": "3",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT3": {
+      "featureId": "CFT3",
+      "label": "Baños",
+      "measure": null,
+      "value": "2",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT7": {
+      "featureId": "CFT7",
+      "label": "Cochera",
+      "measure": null,
+      "value": "1",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT4": {
+      "featureId": "CFT4",
+      "label": "Toilette",
+      "measure": null,
+      "value": "1",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     },
+     "CFT5": {
+      "featureId": "CFT5",
+      "label": "Antigüedad",
+      "measure": null,
+      "value": "20",
+      "icon": null,
+      "featureCategoryId": "CFC1",
+      "minValue": null,
+      "maxValue": null
+     }
+    },
+    "visiblePictures": {
+     "pictures": [
+      {
+       "multimediaTypeId": "2",
+       "order": 1,
+       "height": null,
+       "width": null,
+       "url730x532": "https://imgar.zonapropcdn.com/avisos/1/00/57/62/43/59/720x532/2012830664.jpg?isFirstImage=true",
+       "url360x266": "https://imgar.zonapropcdn.com/avisos/1/00/57/62/43/59/360x266/2012830664.jpg?isFirstImage=true",
+       "url130x70": null,
+       "title": "Casa de 4 ambientes, La Plata · Casa en Venta en Grand Bell"
+      },
+      {
+       "multimediaTypeId": "2",
+       "order": 2,
+       "height": null,
+       "width": null,
+       "url730x532": "https://imgar.zonapropcdn.com/avisos/1/00/57/62/43/59/720x532/2012830672.jpg",
+       "url360x266": "https://imgar.zonapropcdn.com/avisos/1/00/57/62/43/59/360x266/2012830672.jpg",
+       "url130x70": null,
+       "title": "Casa en Venta de 4 ambientes City Bell"
+      }
+     ]
+    },
+    "descriptionNormalized": "Casa en cool de sack pb: Estar, Living con hogar, Comedor, toilette, escritorio, Dormitorio principal en Suite con Vestidor, Lavadero y Garage cubierto con parr"
+   }
+  ]
+ }
+}

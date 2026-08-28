@@ -29,12 +29,17 @@ from app.core.config import Settings, settings
 from app.models.property import ScrapingFilters
 from app.services import apify
 from app.services.apify import (
+
     ApifyService,
     _argenprop_search_urls,
     _inmobusqueda_search_urls,
     _mudafy_search_urls,
     _scrape_remax_api,
 )
+
+# These exercise the Apify actor path, kept as the documented fallback
+# (`ZONAPROP_USE_APIFY=true`). Production reads ZonaProp directly.
+pytestmark = pytest.mark.usefixtures('apify_zonaprop')
 
 
 async def _noop_progress(_src: str, _status: str, _count: int) -> None:

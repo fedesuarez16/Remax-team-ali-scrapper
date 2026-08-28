@@ -21,10 +21,16 @@ Everywhere` below records what that costs.
 """
 from typing import Any
 
+import pytest
+
 from app.models.property import RawProperty, ScrapingFilters
 from app.services.apify import (
     ApifyService, ZonaPropFunnel, _guard_phrases, _item_matches_zona,
 )
+
+# These exercise the Apify actor path, kept as the documented fallback
+# (`ZONAPROP_USE_APIFY=true`). Production reads ZonaProp directly.
+pytestmark = pytest.mark.usefixtures('apify_zonaprop')
 
 
 def _item(**kw) -> dict:

@@ -11,9 +11,15 @@ Both defaults were unbounded in ways that hurt in production:
   30 listings.
 """
 import httpx
+import pytest
 
 from app.core.config import settings
 from app.services.apify import _HTTP_TIMEOUT, ApifyService
+
+# These exercise the Apify actor path, kept as the documented fallback
+# (`ZONAPROP_USE_APIFY=true`). Production reads ZonaProp directly.
+pytestmark = pytest.mark.usefixtures('apify_zonaprop')
+
 
 
 def test_zonaprop_is_capped_by_default() -> None:

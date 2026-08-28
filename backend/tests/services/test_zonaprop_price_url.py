@@ -17,6 +17,11 @@ import pytest
 from app.models.property import ScrapingFilters
 from app.services.apify import ApifyService
 
+# These exercise the Apify actor path, kept as the documented fallback
+# (`ZONAPROP_USE_APIFY=true`). Production reads ZonaProp directly.
+pytestmark = pytest.mark.usefixtures('apify_zonaprop')
+
+
 
 @pytest.fixture()
 def service() -> ApifyService:
@@ -120,3 +125,56 @@ async def test_pagination_appends_after_the_price_segment(
 
     assert seen[0].endswith('-menos-30000-dolar.html')
     assert seen[1].endswith('-menos-30000-dolar-pagina-2.html')
+
+
+# ── Live-confirmed URLs ───────────────────────────────────────────────────────
+# Pasted from the portal by the user, byte for byte. These pin the whole slug
+# grammar at once — property type, operation, localidad+partido zona, price
+# range, and `-pagina-N` LAST — so a change to any single piece that breaks the
+# composition fails here rather than in production.
+
+_REAL_PAGE_1 = (
+    'https://www.zonaprop.com.ar/'
+    'casas-venta-la-plata-la-plata-300000-350000-dolar.html'
+)
+_REAL_PAGE_2 = (
+    'https://www.zonaprop.com.ar/'
+    'casas-venta-la-plata-la-plata-300000-350000-dolar-pagina-2.html'
+)
+
+
+def _casco_filters() -> ScrapingFilters:
+    return ScrapingFilters(
+        zona='La Plata, La Plata', tipo_operacion='venta',
+        tipos_propiedad=['casa'], precio_min=300000, precio_max=350000,
+    )
+
+
+def test_page_one_matches_the_portal_exactly(service: ApifyService) -> None:
+    assert service._input_for('zonaprop', _casco_filters())['searchUrl'] == _REAL_PAGE_1
+
+
+async def test_page_two_matches_the_portal_exactly(
+    service: ApifyService, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`-pagina-2` is appended AFTER the price segment, not before it."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, 'ZONAPROP_MAX_RESULTS', 0)
+
+    seen: list[str] = []
+
+    async def fake_run(src: str, actor: str, input_data: dict) -> list:
+        seen.append(input_data['searchUrl'])
+        return [{
+            'title': 'Casa en La Plata', 'url': f'https://z/{len(seen)}',
+            'listingId': str(len(seen)), 'neighborhood': 'La Plata',
+            'city': 'La Plata', 'address': 'Calle 47 500',
+            'propertyType': 'house', 'price': 320000, 'currency': 'USD',
+        }] * 20 if len(seen) <= 2 else []
+
+    monkeypatch.setattr(service, '_run_actor', fake_run)
+
+    await service._scrape_zonaprop_paginated('actor', _casco_filters())
+
+    assert seen[0] == _REAL_PAGE_1
+    assert seen[1] == _REAL_PAGE_2

@@ -11,6 +11,11 @@ import pytest
 from app.models.property import ScrapingFilters
 from app.services.apify import ApifyService
 
+# These exercise the Apify actor path, kept as the documented fallback
+# (`ZONAPROP_USE_APIFY=true`). Production reads ZonaProp directly.
+pytestmark = pytest.mark.usefixtures('apify_zonaprop')
+
+
 _LP_ITEM = {
     'title': 'Casa en Villa Elisa',
     'url': 'https://www.zonaprop.com.ar/propiedades/clasificado/x-1.html',
@@ -55,12 +60,15 @@ async def test_composite_slug_success_runs_actor_once(
 
     async def fake_run(src: str, actor: str, input_data: dict[str, Any]) -> list[dict[str, Any]]:
         calls.append(input_data)
-        return [_LP_ITEM]
+        # Page 1 only: page 2 ends the listing, so the call count below counts
+        # SLUGS tried, not pages walked.
+        return [] if '-pagina-' in input_data['searchUrl'] else [_LP_ITEM]
 
     monkeypatch.setattr(service, '_run_actor', fake_run)
     results = await service.scrape_source('zonaprop', _filters(), _noop_progress)
-    assert len(calls) == 1
-    assert 'villa-elisa-la-plata' in calls[0]['searchUrl']
+    slugs = [c['searchUrl'] for c in calls if '-pagina-' not in c['searchUrl']]
+    assert len(slugs) == 1
+    assert 'villa-elisa-la-plata' in slugs[0]
     assert len(results) == 1
 
 
@@ -71,16 +79,20 @@ async def test_fallback_to_plain_slug_when_guard_rejects_everything(
 
     async def fake_run(src: str, actor: str, input_data: dict[str, Any]) -> list[dict[str, Any]]:
         calls.append(input_data)
-        if len(calls) == 1:
+        url = input_data['searchUrl']
+        if '-pagina-' in url:
+            return []
+        if 'villa-elisa-la-plata' in url:
             # composite slug redirected nationwide → off-zona garbage only
             return [_ER_ITEM]
         return [_LP_ITEM]
 
     monkeypatch.setattr(service, '_run_actor', fake_run)
     results = await service.scrape_source('zonaprop', _filters(), _noop_progress)
-    assert len(calls) == 2
-    assert 'villa-elisa-la-plata' in calls[0]['searchUrl']
-    assert 'inmuebles-venta-villa-elisa.html' in calls[1]['searchUrl']
+    slugs = [c['searchUrl'] for c in calls if '-pagina-' not in c['searchUrl']]
+    assert len(slugs) == 2
+    assert 'villa-elisa-la-plata' in slugs[0]
+    assert 'inmuebles-venta-villa-elisa.html' in slugs[1]
     assert len(results) == 1
 
 
@@ -91,11 +103,15 @@ async def test_fallback_also_triggers_on_empty_actor_result(
 
     async def fake_run(src: str, actor: str, input_data: dict[str, Any]) -> list[dict[str, Any]]:
         calls.append(input_data)
-        return [] if len(calls) == 1 else [_LP_ITEM]
+        url = input_data['searchUrl']
+        if '-pagina-' in url or 'villa-elisa-la-plata' in url:
+            return []
+        return [_LP_ITEM]
 
     monkeypatch.setattr(service, '_run_actor', fake_run)
     results = await service.scrape_source('zonaprop', _filters(), _noop_progress)
-    assert len(calls) == 2
+    slugs = [c['searchUrl'] for c in calls if '-pagina-' not in c['searchUrl']]
+    assert len(slugs) == 2
     assert len(results) == 1
 
 

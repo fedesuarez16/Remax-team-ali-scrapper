@@ -11,10 +11,13 @@ EXTRACT_FILTERS_TOOL = {
                 'type': 'array',
                 'items': {'type': 'string'},
                 'description': (
-                    'TODAS las zonas mencionadas. Una entrada por zona. Cada barrio va con '
-                    'su ciudad o partido separados por coma ("Barrio, Ciudad"); una ciudad o '
-                    'partido a secas va sola. '
+                    'TODAS las zonas mencionadas. Una entrada por zona. Cada barrio o '
+                    'localidad va con su ciudad o partido separados por coma '
+                    '("Barrio, Partido"); un partido a secas va solo. '
                     'Ej: ["City Bell, La Plata", "Palermo, CABA", "La Plata"]. '
+                    'Cuando la localidad se llama IGUAL que su partido, se repite: '
+                    'el casco de La Plata es "La Plata, La Plata", distinto del '
+                    'partido entero que es "La Plata". '
                     'Si menciona una sola, devolvé una lista de un elemento.'
                 ),
             },
@@ -107,10 +110,20 @@ SYSTEM_PROMPT = (
     'en portales inmobiliarios argentinos: "citybell" → "City Bell", '
     '"sanandrés" → "San Andrés", "villacrespo" → "Villa Crespo", etc. '
     'Un barrio suelto es AMBIGUO y los portales resuelven el equivocado: existe un '
-    '"Casco Urbano" en San Luis y un "Palermo" en Salta. Por eso todo barrio va con '
-    'su ciudad o partido separados por coma: '
-    '"el casco de La Plata" → "Casco Urbano, La Plata"; '
-    '"citybell" → "City Bell, La Plata"; "palermo" → "Palermo, CABA". '
-    'Si el usuario nombra una ciudad o un partido a secas, dejala sola y NO le agregues '
-    'la provincia: "La Plata" → "La Plata", "Mar del Plata" → "Mar del Plata".'
+    '"Casco Urbano" en San Luis y un "Palermo" en Salta. Por eso todo barrio o '
+    'localidad va con su partido separados por coma: '
+    '"citybell" → "City Bell, La Plata"; "palermo" → "Palermo, CABA"; '
+    '"casco urbano" → "Casco Urbano, La Plata". '
+    'Si el usuario nombra un partido a secas, dejalo solo y NO le agregues la '
+    'provincia: "La Plata" → "La Plata", "Mar del Plata" → "Mar del Plata". '
+    'OJO: el partido y su cabecera son lugares DISTINTOS y los portales les dan '
+    'páginas distintas. El nombre solo es el PARTIDO entero (La Plata incluye '
+    'City Bell, Villa Elisa, Gonnet y Tolosa); la localidad cabecera se escribe '
+    'REPETIDA, igual que cualquier otro "Localidad, Partido". Respetá lo que pidió '
+    'el usuario y no colapses la forma repetida: '
+    '"la plata, la plata" → "La Plata, La Plata" (solo el casco); '
+    '"el casco de La Plata" → "La Plata, La Plata"; '
+    '"casas en La Plata" → "La Plata" (todo el partido). '
+    'Lo mismo con cualquier otro partido homónimo, p. ej. '
+    '"mar del plata, mar del plata" → "Mar del Plata, Mar del Plata".'
 )

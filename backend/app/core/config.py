@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     APIFY_API_TOKEN: str = ""
     APIFY_USE_MOCK: bool = True
-    APIFY_DISABLED: bool = False         # skip all Apify actors (zonaprop, googlemaps, instagram) — only direct scrapers (mercadolibre, inmobusqueda, mudafy)
+    APIFY_DISABLED: bool = False         # skip los actores de Apify (googlemaps, instagram) — quedan los scrapers directos (zonaprop, mercadolibre, inmobusqueda, mudafy)
     SCRAPE_ZONAPROP_ONLY: bool = False   # test mode: only fan out ZonaProp, skip ML + agencies
     SCRAPE_GOOGLEMAPS_ONLY: bool = False  # test mode: agencies-only — skip portal + Instagram scrapers
     MAX_WEBSITE_URLS: int = 0            # 0 = NO CAP: scrape every selected agency/curated website
@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     # These used to ship with low defaults, which is why a search topped out at
     # exactly 100 RE/MAX items (5 pages × 20) — a self-imposed ceiling, never a
     # portal constraint. Set a positive value to re-cap a source (cost/latency).
+    # ZonaProp se lee DIRECTO (HTML + __PRELOADED_STATE__ vía SCRAPER_PROXY_URL).
+    # `true` devuelve la fuente al actor de Apify `crawlerbros/zonaprop-scraper`,
+    # que quedó intacto: su browser de Playwright crashea enriqueciendo fichas
+    # y eso le trunca la paginación ("Reached last page (1)"), pero sirve como
+    # marcha atrás si el scraping directo se rompe.
+    ZONAPROP_USE_APIFY: bool = False
     ZONAPROP_MAX_RESULTS: int = 200      # items per ZonaProp search (~7 pages); PAID — one Apify actor run PER PAGE, each a browser cold start. Uncapped, one search was still paginating 21 min in.
     ARGENPROP_MAX_PAGES: int = 0         # 0 = the robots.txt ceiling (Allow: pagina-1..pagina-10)
     REMAX_MAX_PAGES: int = 0             # pages per RE/MAX search (API serves 3300+; verified live)

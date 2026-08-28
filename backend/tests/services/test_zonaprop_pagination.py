@@ -11,6 +11,11 @@ import pytest
 from app.models.property import ScrapingFilters
 from app.services.apify import ApifyService
 
+# These exercise the Apify actor path, kept as the documented fallback
+# (`ZONAPROP_USE_APIFY=true`). Production reads ZonaProp directly.
+pytestmark = pytest.mark.usefixtures('apify_zonaprop')
+
+
 _PAGE_SIZE = 30
 
 

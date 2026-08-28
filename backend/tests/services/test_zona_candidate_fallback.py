@@ -24,6 +24,11 @@ from app.models.property import RawProperty, ScrapingFilters
 from app.services import apify
 from app.services.apify import ApifyService, ZonaPropFunnel
 
+# These exercise the Apify actor path, kept as the documented fallback
+# (`ZONAPROP_USE_APIFY=true`). Production reads ZonaProp directly.
+pytestmark = pytest.mark.usefixtures('apify_zonaprop')
+
+
 
 def _prop(zona: str) -> RawProperty:
     return RawProperty(fuente='mudafy', titulo=f'Depto en {zona}',

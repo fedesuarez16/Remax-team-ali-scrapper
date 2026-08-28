@@ -58,3 +58,69 @@ class TestTheContractIsWhatTheChainNeeds:
     def test_bare_barrio_has_nowhere_to_degrade(self):
         """The regression this contract prevents."""
         assert zona_candidates('Casco Urbano') == ['Casco Urbano']
+
+
+class TestElPartidoNoEsLaCabecera:
+    """"La Plata" and "La Plata, La Plata" are DIFFERENT PLACES on the portals.
+
+    The bare name is the partido — 900 km² including City Bell, Villa Elisa,
+    Gonnet and Tolosa. The doubled one is the localidad inside it: the casco.
+    ZonaProp gives them different pages (`/casas-venta-la-plata-...` vs
+    `/casas-venta-la-plata-la-plata-...`), and the user's own URLs use the
+    doubled slug for the casco.
+
+    The prompt only knew how to keep a bare city bare, so "casas en la plata,
+    la plata" collapsed to "La Plata": the scraper fetched the PARTIDO page,
+    the guard got a single-part phrase that roams the whole record, `city`
+    (the partido) satisfied it for every listing, and a casco search came
+    back full of City Bell and Villa Elisa.
+    """
+
+    def test_schema_teaches_the_doubled_form(self):
+        assert 'La Plata, La Plata' in _zonas_description()
+
+    def test_prompt_teaches_the_doubled_form(self):
+        assert 'La Plata, La Plata' in SYSTEM_PROMPT
+
+    def test_prompt_says_the_bare_name_is_the_partido(self):
+        prompt = SYSTEM_PROMPT.lower()
+        assert 'partido' in prompt
+        assert 'casco' in prompt or 'cabecera' in prompt
+
+    def test_a_bare_partido_is_still_left_bare(self):
+        """Over-qualifying stays a bug: a user who wants the whole partido
+        must not be silently narrowed to the casco."""
+        assert 'La Plata" → "La Plata' in SYSTEM_PROMPT
+
+
+class TestTheDoubledZonaBehavesDownstream:
+    def test_it_degrades_to_the_partido_and_stops(self):
+        assert zona_candidates('La Plata, La Plata') == [
+            'La Plata, La Plata', 'La Plata',
+        ]
+
+    def test_the_guard_reads_it_as_localidad_plus_partido(self):
+        """The doubled phrase is what lets `_item_matches_zona` apply the
+        localidad/partido split at all — a bare name has no split to make."""
+        from app.models.property import ScrapingFilters
+        from app.services.apify import _guard_phrases, _item_matches_zona
+
+        f = ScrapingFilters(zona='La Plata, La Plata', zona_pedida='La Plata, La Plata')
+        casco = {'neighborhood': 'La Plata', 'city': 'La Plata',
+                 'address': 'Calle 7 500', 'title': 'Casa', 'description': ''}
+        city_bell = {'neighborhood': 'City Bell', 'city': 'La Plata',
+                     'address': 'Calle 13 470', 'title': 'Casa', 'description': ''}
+
+        assert _item_matches_zona(casco, _guard_phrases(f))
+        assert not _item_matches_zona(city_bell, _guard_phrases(f))
+
+    def test_the_bare_partido_keeps_everything_in_it(self):
+        """And the contrast that makes the distinction worth drawing."""
+        from app.models.property import ScrapingFilters
+        from app.services.apify import _guard_phrases, _item_matches_zona
+
+        f = ScrapingFilters(zona='La Plata', zona_pedida='La Plata')
+        city_bell = {'neighborhood': 'City Bell', 'city': 'La Plata',
+                     'address': 'Calle 13 470', 'title': 'Casa', 'description': ''}
+
+        assert _item_matches_zona(city_bell, _guard_phrases(f))

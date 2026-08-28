@@ -16,6 +16,11 @@ import pytest
 from app.models.property import ScrapingFilters
 from app.services.apify import ApifyService
 
+# These exercise the Apify actor path, kept as the documented fallback
+# (`ZONAPROP_USE_APIFY=true`). Production reads ZonaProp directly.
+pytestmark = pytest.mark.usefixtures('apify_zonaprop')
+
+
 
 @pytest.fixture()
 def service() -> ApifyService:
@@ -155,8 +160,13 @@ async def test_happy_path_still_reports_its_own_stop_reason(
     service: ApifyService, monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    calls: list[int] = []
+
     async def short(src: str, actor: str, input_data: dict) -> list:
-        return [_item(i) for i in range(1000, 1012)]
+        calls.append(1)
+        # Page 1 sets the page size; page 2 is short against it.
+        return [_item(i) for i in range(1000 * len(calls), 1000 * len(calls) + 30)] \
+            if len(calls) == 1 else [_item(i) for i in range(9000, 9012)]
 
     monkeypatch.setattr(service, '_run_actor', short)
 

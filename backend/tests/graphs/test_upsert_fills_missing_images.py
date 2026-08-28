@@ -235,7 +235,10 @@ async def test_upsert_still_writes_insert_ignore_so_curated_rows_survive(
     await _upsert_properties(sb, [_prop('A 1', 1.0)], 'job-1')
 
     assert seen['ignore_duplicates'] is True
-    assert seen['on_conflict'] == 'direccion,precio,tipo_operacion'
+    # `url_origen` joined the conflict target when `properties_dedup_idx` was
+    # widened: without it, distinct listings sharing an address and price were
+    # silently discarded by the index (54 scraped, 11 stored).
+    assert seen['on_conflict'] == 'direccion,precio,tipo_operacion,url_origen'
 
 
 async def _noop_coro() -> None:

@@ -13,6 +13,11 @@ import pytest
 from app.models.property import ScrapingFilters
 from app.services.apify import ApifyService
 
+# These exercise the Apify actor path, kept as the documented fallback
+# (`ZONAPROP_USE_APIFY=true`). Production reads ZonaProp directly.
+pytestmark = pytest.mark.usefixtures('apify_zonaprop')
+
+
 _PAGE_SIZE = 30
 
 
@@ -120,14 +125,29 @@ async def test_funnel_reports_empty_page_stop(
 async def test_funnel_reports_short_page_stop(
     service: ApifyService, monkeypatch: pytest.MonkeyPatch, no_cap: None,
 ) -> None:
-    """The `len(raw_items) < 30` break is the prime suspect for truncation —
-    it must be visible in the report, not silent."""
-    _stub_pages(service, monkeypatch, [_page(1000, 12)])
+    """The short-page break is the prime suspect for truncation — it must be
+    visible in the report, not silent. "Short" is now relative to what page 1
+    actually served, so it takes two pages to demonstrate."""
+    _stub_pages(service, monkeypatch, [_page(1000, _PAGE_SIZE), _page(2000, 12)])
 
     _, funnel = await service._scrape_zonaprop_paginated('actor', _filters())
 
     assert funnel.stop_reason == 'short_page'
     assert funnel.pages[-1].raw == 12
+
+
+async def test_a_lone_short_page_is_confirmed_not_assumed(
+    service: ApifyService, monkeypatch: pytest.MonkeyPatch, no_cap: None,
+) -> None:
+    """Page 1 IS the page-size measurement, so it can never be judged short.
+    One extra request confirms the listing ended — the alternative was
+    guessing 30 and dropping four pages of a 20-per-page portal."""
+    _stub_pages(service, monkeypatch, [_page(1000, 12), []])
+
+    results, funnel = await service._scrape_zonaprop_paginated('actor', _filters())
+
+    assert len(results) == 12
+    assert funnel.stop_reason == 'empty_page'
 
 
 async def test_funnel_reports_all_rejected_stop(
@@ -171,7 +191,7 @@ async def test_funnel_carries_the_search_url(
     service: ApifyService, monkeypatch: pytest.MonkeyPatch, no_cap: None,
 ) -> None:
     """Without the URL the numbers are unattributable across a fan-out."""
-    _stub_pages(service, monkeypatch, [_page(1000, 12)])
+    _stub_pages(service, monkeypatch, [_page(1000, 12), []])
 
     _, funnel = await service._scrape_zonaprop_paginated('actor', _filters())
 

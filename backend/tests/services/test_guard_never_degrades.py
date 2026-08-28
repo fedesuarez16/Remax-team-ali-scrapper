@@ -18,8 +18,13 @@ import pytest
 
 from app.models.property import ScrapingFilters
 from app.services.apify import (
+
     ApifyService, ZonaPropFunnel, ZonaPropPage, _guard_phrases, _item_matches_zona,
 )
+
+# These exercise the Apify actor path, kept as the documented fallback
+# (`ZONAPROP_USE_APIFY=true`). Production reads ZonaProp directly.
+pytestmark = pytest.mark.usefixtures('apify_zonaprop')
 
 
 def _item(**kw) -> dict[str, Any]:

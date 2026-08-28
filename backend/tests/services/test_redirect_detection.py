@@ -18,6 +18,11 @@ import pytest
 from app.models.property import RawProperty, ScrapingFilters
 from app.services.apify import ApifyService, ZonaPropFunnel, ZonaPropPage
 
+# These exercise the Apify actor path, kept as the documented fallback
+# (`ZONAPROP_USE_APIFY=true`). Production reads ZonaProp directly.
+pytestmark = pytest.mark.usefixtures('apify_zonaprop')
+
+
 
 def _funnel(raw: int, zona_rejected: int, kept: int) -> ZonaPropFunnel:
     f = ZonaPropFunnel(search_url='https://z/x')
