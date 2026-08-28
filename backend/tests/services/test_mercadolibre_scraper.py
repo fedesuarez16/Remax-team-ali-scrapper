@@ -104,17 +104,23 @@ class TestUsesListingHtml:
 
 
 class TestPaging:
+    # Paging is the subject here; the region probe would add five requests of
+    # its own to every count.
+    @pytest.fixture(autouse=True)
+    def _resuelta(self, ml_zona_ya_resuelta: None) -> None:
+        return None
+
     async def test_follows_desde_pagination(self, service, fetched, monkeypatch):
         monkeypatch.setattr(settings, 'MERCADOLIBRE_MAX_PAGES', 0)
         base = 'https://inmuebles.mercadolibre.com.ar/departamentos/venta/la-plata'
         fetched['pages'] = {
             base: _page(_card('https://x.com/MLA-1')),
-            f'{base}/_Desde_{_ML_HTML_PAGE_SIZE + 1}': _page(_card('https://x.com/MLA-2')),
+            f'{base}/_Desde_{_ML_HTML_PAGE_SIZE + 1}_NoIndex_True': _page(_card('https://x.com/MLA-2')),
         }
         res = await service.scrape_source('mercadolibre', _filters(), _noop)
 
         assert len(res) == 2
-        assert f'/_Desde_{_ML_HTML_PAGE_SIZE + 1}' in fetched['urls'][1]
+        assert f'/_Desde_{_ML_HTML_PAGE_SIZE + 1}_NoIndex_True' in fetched['urls'][1]
 
     async def test_stops_on_a_page_with_nothing_new(self, service, fetched, monkeypatch):
         """An out-of-range offset re-serves page 1; without this guard the

@@ -226,11 +226,15 @@ class TestUrlsDeBusqueda:
         assert urls == ['https://inmuebles.mercadolibre.com.ar/departamentos/venta/la-plata']
 
     def test_paginacion_usa_desde(self):
-        """El sitio pagina con `_Desde_49`, `_Desde_97` — de a 48."""
+        """El sitio pagina con `_Desde_49`, `_Desde_97` — de a 48.
+
+        `_NoIndex_True` cierra la ruta y NO es decorativo: sin él el portal
+        ignora el offset y vuelve a servir la pagina 1, lo que topaba cada
+        busqueda en 48 resultados (verificado en vivo)."""
         urls = list(_ml_search_urls(_filters(tipos_propiedad=['departamento'],
                                              tipo_operacion='venta'), 3))
-        assert urls[1].endswith(f'/_Desde_{_ML_HTML_PAGE_SIZE + 1}')
-        assert urls[2].endswith(f'/_Desde_{2 * _ML_HTML_PAGE_SIZE + 1}')
+        assert urls[1].endswith(f'/_Desde_{_ML_HTML_PAGE_SIZE + 1}_NoIndex_True')
+        assert urls[2].endswith(f'/_Desde_{2 * _ML_HTML_PAGE_SIZE + 1}_NoIndex_True')
 
     def test_alquiler_y_tipo_en_el_path(self):
         urls = list(_ml_search_urls(_filters(tipos_propiedad=['casa'],

@@ -1920,6 +1920,129 @@ _ML_HTML_URL_TIPO: dict[str, str] = {
 }
 
 
+def _ml_matches_zona(location: str, filters: ScrapingFilters) -> bool:
+    """Does a MercadoLibre card's location answer the requested zona?
+
+    The card writes `calle, LOCALIDAD, PROVINCIA` — the PARTIDO never appears.
+    So a composite zona ("City Bell, La Plata") cannot be satisfied in full,
+    and demanding it rejected legitimate City Bell listings for failing to
+    spell something MercadoLibre does not publish. Reported as "trae pocas".
+
+    The rule here is therefore: the LOCALIDAD (the first comma part) must be
+    in the string. Any FURTHER part is required only when the string mentions
+    it — which is what keeps the homonym protection the composite exists for:
+    "Palermo, Salta" carries a province and it is the wrong one, so it stays
+    out, while "City Bell, Buenos Aires" is simply silent about the partido
+    and is let through.
+
+    A single-part zona keeps matching anywhere in the string, unchanged.
+    """
+    phrase_parts = [
+        parts for parts in
+        ([_slugify(p) for p in z.split(',') if _slugify(p)] for z in _guard_phrases(filters))
+        if parts
+    ]
+    if not phrase_parts:
+        return True
+    haystack = _slugify(location)
+
+    named = [j for j in _ML_JURISDICTIONS if j in haystack]
+
+    def _ok(parts: list[str]) -> bool:
+        if parts[0] not in haystack:
+            return False
+        for part in parts[1:]:
+            if part in haystack:
+                continue                      # the card named it outright
+            # The card prints a PROVINCE, never a partido. So the second part
+            # is checked at ITS OWN level: a province directly, a partido
+            # through the province it belongs to. Comparing the two levels
+            # was the bug — it asked whether "la plata" equalled
+            # "buenos aires" and threw out real City Bell listings.
+            expected = _ML_PROVINCE_ALIASES.get(part) or _PARTIDO_PROVINCE.get(part)
+            if expected is None:
+                # An unknown partido: we cannot map it, so fall back to the
+                # strict rule rather than guess. Add it below to relax that.
+                return False
+            if named and not any(j in expected for j in named):
+                return False
+        return True
+
+    return any(_ok(parts) for parts in phrase_parts)
+
+
+# What MercadoLibre may print as the last element of a card location. Used to
+# tell "the card names a jurisdiction and it is the wrong one" (reject) from
+# "the card is silent about it" (keep) — the partido is never printed.
+# A province the USER may name → how MercadoLibre may spell it. Only these are
+# enforced; anything else in a composite is a partido, which the card omits.
+_ML_PROVINCE_ALIASES: dict[str, set[str]] = {
+    'caba': {'caba', 'capital-federal'},
+    'capital-federal': {'caba', 'capital-federal'},
+    'ciudad-autonoma-de-buenos-aires': {'caba', 'capital-federal'},
+    **{p: {p} for p in (
+        'buenos-aires', 'catamarca', 'chaco', 'chubut', 'cordoba', 'corrientes',
+        'entre-rios', 'formosa', 'jujuy', 'la-pampa', 'la-rioja', 'mendoza',
+        'misiones', 'neuquen', 'rio-negro', 'salta', 'san-juan', 'san-luis',
+        'santa-cruz', 'santa-fe', 'santiago-del-estero', 'tierra-del-fuego',
+        'tucuman',
+    )},
+}
+
+# Partido → the province MercadoLibre prints for it. Only what we have actually
+# seen; an unmapped partido keeps the strict "name it or be rejected" rule, so
+# a wrong entry here can loosen the guard but a MISSING one never breaks it.
+# This is what separates "City Bell, Buenos Aires" (La Plata IS in Buenos
+# Aires — keep) from "Gonnet, Santa Fe" (it is not — the homonym, reject).
+_PARTIDO_PROVINCE: dict[str, set[str]] = {
+    'la-plata': {'buenos-aires'},
+    'berisso': {'buenos-aires'},
+    'ensenada': {'buenos-aires'},
+}
+
+_ML_JURISDICTIONS = (
+    'capital-federal', 'caba', 'buenos-aires', 'catamarca', 'chaco', 'chubut',
+    'cordoba', 'corrientes', 'entre-rios', 'formosa', 'jujuy', 'la-pampa',
+    'la-rioja', 'mendoza', 'misiones', 'neuquen', 'rio-negro', 'salta',
+    'san-juan', 'san-luis', 'santa-cruz', 'santa-fe', 'santiago-del-estero',
+    'tierra-del-fuego', 'tucuman',
+)
+
+
+_ML_BASE = 'https://www.mercadolibre.com.ar'
+
+
+def _ml_canonical_url(href: str | None) -> str | None:
+    """A MercadoLibre listing link, stripped to what identifies the listing.
+
+    Every link the site renders carries the context it was clicked from —
+    `#position=3&search_layout=stack&tracking_id=...`, `?searchVariation=...` —
+    and `_ml_zona_slugs` deliberately searches several slugs, so ONE listing
+    comes back once per slug wearing a different URL each time. Stored raw,
+    that defeats both dedup layers at once: this scraper's `seen` set is keyed
+    on the URL, and graph dedup treats two distinct `url_origen` from the same
+    `fuente` as two properties. Reported as "trae pocas y muchas repetidas".
+
+    Only the query and the fragment are dropped. The readable part of the path
+    comes from the listing's own title, not from the search that found it, so
+    it is already stable across slugs — and it keeps `url_origen` a URL that
+    actually opens, which it also has to be: the UI links to it.
+
+    Reducing further to the bare `MLA-<id>` was considered and NOT done: the
+    short form was not verified to resolve, and guessing there would break
+    every listing link in the app to fix a duplicate problem the tracking
+    alone explains.
+    """
+    if not href:
+        return None
+    clean = str(href).split('#', 1)[0].split('?', 1)[0].rstrip('/')
+    if not clean:
+        return None
+    if not clean.startswith('http'):
+        clean = f'{_ML_BASE}/{clean.lstrip("/")}'
+    return clean
+
+
 def _ml_zona_slugs(filters: ScrapingFilters) -> list[str]:
     """Zona → the slugs to try, most specific first.
 
@@ -1941,6 +2064,88 @@ def _ml_zona_slugs(filters: ScrapingFilters) -> list[str]:
     return [x for x in slugs if x]
 
 
+# MercadoLibre nests a zona under a REGION, and the name alone does not say
+# which: `/casas/venta/la-plata` redirects to `buenos-aires-interior/la-plata`
+# (179 listings) while the La Plata people mean is `bsas-gba-sur/la-plata`
+# (2202). The flat page is also a dead end for paging — it renders no
+# `_Desde_` links, so page 2 silently re-serves page 1 and a search caps at 48.
+_ML_REGIONS = (
+    'bsas-gba-sur', 'bsas-gba-norte', 'bsas-gba-oeste',
+    'buenos-aires-interior', 'capital-federal',
+)
+
+
+# zona → the path that actually holds its listings. Probing costs five ~2 MB
+# pages through a metered proxy, so it is paid once per zona, not per search.
+_ML_ZONA_PATH_CACHE: dict[str, str] = {}
+
+
+def _ml_zona_path_candidates(zona: str) -> list[str]:
+    """Zona → the paths to try UNDER a region, most specific first.
+
+    The portal writes `region/PARTIDO/localidad` — the reverse of how we say
+    it ("City Bell, La Plata"), so the comma parts are flipped. The bare head
+    stays as a fallback for the same reason `_ml_zona_slugs` had one:
+    `gonnet-la-plata` 404s while `gonnet` serves the real listings.
+    """
+    parts = [_slugify(p) for p in zona.split(',') if _slugify(p)]
+    if not parts:
+        return []
+    paths = ['/'.join(reversed(parts))]
+    if parts[0] not in paths:
+        paths.append(parts[0])
+    return paths
+
+
+def _ml_result_count(page: str) -> int:
+    """How many listings the portal says the search has.
+
+    This is the number the region probe compares, so it has to be the
+    PORTAL's, not ours. Falls back to counting cards when the counter is
+    absent — some pages omit it.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(page, 'html.parser')
+    el = soup.select_one('.ui-search-search-result__quantity-results')
+    if el:
+        digits = re.sub(r'[^0-9]', '', el.get_text(' ', strip=True))
+        if digits:
+            return int(digits)
+    return len(soup.select('li.ui-search-layout__item'))
+
+
+def _ml_price_segment(filters: ScrapingFilters) -> str:
+    """MercadoLibre's `_PriceRange_<min>USD-<max>USD` token, or `''`.
+
+    Without it we paged the ENTIRE unfiltered listing — the portal caps around
+    2000 items at 48 a page, so ~42 pages of roughly 2 MB each through a
+    metered residential proxy — and discarded nearly all of it downstream. The
+    matching listings sit wherever they sit, so a search came back "muy pocos"
+    while the portal itself showed ten pages of them.
+
+    All three shapes verified live against `/casas/venta/la-plata`, which holds
+    179 listings unfiltered:
+
+        _PriceRange_99000USD-150000USD  →  37   both bounds
+        _PriceRange_0USD-150000USD      →  134  ceiling only
+        _PriceRange_99000USD            →  82   floor only, NO second bound
+
+    A floor written `99000USD-*USD` was tried and returns all 179 — it does
+    not filter, it only LOOKS like it does, which is the worst outcome of the
+    three. An inverted range is an upstream parse error rather than a search
+    and is dropped instead of sent.
+    """
+    lo, hi = filters.precio_min, filters.precio_max
+    if lo is None and hi is None:
+        return ''
+    if lo is not None and hi is not None and lo >= hi:
+        return ''
+    if hi is None:
+        return f'_PriceRange_{int(lo)}USD'          # type: ignore[arg-type]
+    return f'_PriceRange_{int(lo) if lo is not None else 0}USD-{int(hi)}USD'
+
+
 def _ml_search_urls(
     filters: ScrapingFilters, max_pages: int, zona_slug: str | None = None,
 ) -> Iterator[str]:
@@ -1949,16 +2154,27 @@ def _ml_search_urls(
     site's own `/_Desde_<offset>` suffix (49, 97, ... — read off its pagination
     links), which keeps the crawl on plain paths with no query string."""
     if zona_slug is None:
-        zona_slug = _ml_zona_slugs(filters)[0]
+        zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
+        # The probed path when we have one, else the flat slug — which is what
+        # the probe falls back to anyway when no region claims the zona.
+        zona_slug = _ML_ZONA_PATH_CACHE.get(_slugify(zona)) or _ml_zona_slugs(filters)[0]
     op = 'alquiler' if filters.tipo_operacion == 'alquiler' else 'venta'
     tipos = filters.tipos_propiedad or []
     tipo = _ML_HTML_URL_TIPO.get(tipos[0], 'inmuebles') if len(tipos) == 1 else 'inmuebles'
     base = f'{_ML_HTML_BASE}/{tipo}/{op}/{zona_slug}'
-    yield base
+    price = _ml_price_segment(filters)
+    yield f'{base}/{price}' if price else base
     for n in count(1):
         if max_pages > 0 and n >= max_pages:
             return
-        yield f'{base}/_Desde_{n * _ML_HTML_PAGE_SIZE + 1}'
+        # One path element, offset FIRST, `_NoIndex_True` LAST — the portal's
+        # own order. That trailing token is not decoration: WITHOUT it
+        # `_Desde_` is ignored and the portal re-serves page 1, which capped
+        # every search at 48 results. Verified live on
+        # `bsas-gba-sur/la-plata`: page 2 is identical to page 1 without it
+        # and genuinely different with it, and the price filter survives
+        # either way (1097 results both times).
+        yield f'{base}/_Desde_{n * _ML_HTML_PAGE_SIZE + 1}{price}_NoIndex_True'
 
 
 # Dos números unidos por un separador de rango. MercadoLibre usa DOS, y en la
@@ -2016,24 +2232,32 @@ def _ml_page_is_blocked(page: str) -> bool:
     return any(m in low for m in _ML_BLOCK_MARKERS)
 
 
+# Per-page counters the parser fills and `_scrape_mercadolibre` totals. Module
+# level rather than a return value so the parser's signature — used from tests
+# and from the candidate-chain retry — stays a plain list of properties.
+_ml_page_stats: dict[str, int] = {'cards': 0, 'off_zona': 0}
+
+
 def _parse_mercadolibre_page(page: str, filters: ScrapingFilters) -> list[RawProperty]:
     """Every `li.ui-search-layout__item` on a listing page → RawProperty.
 
-    Zona-guarded: an unknown slug does not 404 here, it quietly serves a wider
-    set — `manuel-b-gonnet` returns a SANTA FE listing among the Buenos Aires
-    ones (verified live) — so the searched zona is enforced over whatever the
-    page returned, same as every other portal.
+    Zona-guarded by `_ml_matches_zona`: an unknown slug does not 404 here, it
+    quietly serves a wider set — `manuel-b-gonnet` returns a SANTA FE listing
+    among the Buenos Aires ones (verified live) — so the searched zona is
+    enforced over whatever the page returned. The guard is shaped to THIS
+    portal's location format (`calle, LOCALIDAD, PROVINCIA`, no partido);
+    the generic all-comma-parts rule rejected valid listings here.
     """
     from bs4 import BeautifulSoup
 
-    phrase_parts = [
-        parts for parts in
-        ([_slugify(p) for p in z.split(',') if _slugify(p)] for z in _guard_phrases(filters))
-        if parts
-    ]
     soup = BeautifulSoup(page, 'html.parser')
     results: list[RawProperty] = []
+    # Filled for the caller's funnel line: a bare count of results cannot say
+    # whether a thin page was the portal's doing or the guard's.
+    stats = _ml_page_stats
+    stats['cards'] = stats['off_zona'] = 0
     for card in soup.select('li.ui-search-layout__item'):
+        stats['cards'] += 1
         location_el = card.select_one('.poly-component__location')
         direccion = location_el.get_text(' ', strip=True) if location_el else ''
         if not direccion:
@@ -2042,10 +2266,15 @@ def _parse_mercadolibre_page(page: str, filters: ScrapingFilters) -> list[RawPro
         # the city in the title ("Departamento En Venta, 2 Dormitorios, Centro,
         # La Plata"), so a full-text haystack would let a Rosario listing
         # through on the strength of a La Plata title.
-        if phrase_parts:
-            haystack = _slugify(direccion)
-            if not any(all(part in haystack for part in parts) for parts in phrase_parts):
-                continue
+        #
+        # `_ml_matches_zona` knows this portal's location shape — `calle,
+        # LOCALIDAD, PROVINCIA`, no partido — which the generic all-parts rule
+        # did not: it demanded "la plata" from a card that only ever prints
+        # "City Bell, Buenos Aires", and rejected the listings it was meant to
+        # keep.
+        if not _ml_matches_zona(direccion, filters):
+            stats['off_zona'] += 1
+            continue
 
         fraction = card.select_one('.andes-money-amount__fraction')
         precio = _ml_card_number(fraction.get_text(strip=True)) if fraction else None
@@ -2093,9 +2322,77 @@ def _parse_mercadolibre_page(page: str, filters: ScrapingFilters) -> list[RawPro
             m2_total=m2_total,
             m2_cubiertos=m2_cubiertos,
             imagenes=[imagen] if imagen.startswith('http') else [],
-            url_origen=str(title_el.get('href')) if title_el and title_el.get('href') else None,
+            url_origen=_ml_canonical_url(str(href) if (href := title_el.get('href') if title_el else None) else None),
         ))
     return results
+
+
+def _ml_zona_paths(filters: ScrapingFilters) -> list[str]:
+    """What to put after `/{tipo}/{op}/` — the resolved region path if the
+    probe found one, else the flat slugs as before."""
+    zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
+    if resolved := _ML_ZONA_PATH_CACHE.get(_slugify(zona)):
+        return [resolved]
+    return _ml_zona_slugs(filters)
+
+
+async def _ml_resolve_region(filters: ScrapingFilters) -> None:
+    """Find which REGION holds this zona, and remember it.
+
+    The name does not say: `/casas/venta/la-plata` redirects to
+    `buenos-aires-interior/la-plata` with 179 listings, while the La Plata
+    people mean is `bsas-gba-sur/la-plata` with 2202. So every candidate is
+    asked and the one the PORTAL says has the most listings wins.
+
+    The probe uses the real search URL, price filter and all, so the winner's
+    page is page 1 of the actual search — nothing is fetched twice. Result is
+    cached per zona; five ~2 MB pages through a metered proxy is a price worth
+    paying once, not once per search.
+
+    If no candidate returns anything, the flat slug stays: inventing a region
+    would be worse than the status quo.
+    """
+    from app.core.config import settings
+
+    zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
+    key = _slugify(zona)
+    if not key or key in _ML_ZONA_PATH_CACHE:
+        return
+
+    op = 'alquiler' if filters.tipo_operacion == 'alquiler' else 'venta'
+    tipos = filters.tipos_propiedad or []
+    tipo = _ML_HTML_URL_TIPO.get(tipos[0], 'inmuebles') if len(tipos) == 1 else 'inmuebles'
+    price = _ml_price_segment(filters)
+
+    best: tuple[int, str] | None = None
+    async with httpx.AsyncClient(
+        timeout=30, follow_redirects=True,
+        proxy=settings.SCRAPER_PROXY_URL or None,
+        headers={'User-Agent': _BROWSER_UA, 'Accept-Language': 'es-AR,es;q=0.9'},
+    ) as client:
+        for region in _ML_REGIONS:
+            for path in _ml_zona_path_candidates(zona):
+                full = f'{region}/{path}'
+                url = f'{_ML_HTML_BASE}/{tipo}/{op}/{full}'
+                if price:
+                    url = f'{url}/{price}'
+                try:
+                    resp = await client.get(url)
+                    resp.raise_for_status()
+                except Exception:
+                    continue
+                if _ml_page_is_blocked(resp.text):
+                    continue
+                n = _ml_result_count(resp.text)
+                if n and (best is None or n > best[0]):
+                    best = (n, full)
+
+    if best:
+        _ML_ZONA_PATH_CACHE[key] = best[1]
+        logger.info(
+            'mercadolibre: zona %r → %s (%d avisos, la mayor de %d regiones)',
+            zona, best[1], best[0], len(_ML_REGIONS),
+        )
 
 
 async def _scrape_mercadolibre(
@@ -2123,6 +2420,9 @@ async def _scrape_mercadolibre(
 
     results: list[RawProperty] = []
     seen: set[str] = set()
+    paginas = tarjetas = fuera_de_zona = 0
+    ultima_url = ''
+    await _ml_resolve_region(filters)
     async with httpx.AsyncClient(
         timeout=30, follow_redirects=True,
         proxy=settings.SCRAPER_PROXY_URL or None,
@@ -2134,8 +2434,11 @@ async def _scrape_mercadolibre(
             'Accept-Language': 'es-AR,es;q=0.9',
         },
     ) as client:
-        for zona_slug in _ml_zona_slugs(filters):
+        # The probed `region/partido/localidad` path when we have one — a flat
+        # slug lands on the wrong (much smaller) region and cannot paginate.
+        for zona_slug in _ml_zona_paths(filters):
             for url in _ml_search_urls(filters, settings.MERCADOLIBRE_MAX_PAGES, zona_slug):
+                ultima_url = url
                 try:
                     resp = await client.get(url)
                     resp.raise_for_status()
@@ -2162,7 +2465,11 @@ async def _scrape_mercadolibre(
                     break
 
                 new = 0
-                for prop in _parse_mercadolibre_page(resp.text, filters):
+                page_props = _parse_mercadolibre_page(resp.text, filters)
+                paginas += 1
+                tarjetas += _ml_page_stats['cards']
+                fuera_de_zona += _ml_page_stats['off_zona']
+                for prop in page_props:
                     key = str(prop.url_origen or '')
                     if key and key in seen:
                         continue
@@ -2180,6 +2487,16 @@ async def _scrape_mercadolibre(
             if results:
                 break  # this slug answered; no need for the broader one
 
+    # Always, not only on failure: a successful-but-thin run said nothing at
+    # all, so "trae muy pocos" could not be told apart from "the portal has
+    # few". The URL is included because the price filter lives in it and the
+    # numbers have to be checkable against the portal by hand.
+    logger.info(
+        'mercadolibre funnel: url=%s paginas=%d tarjetas=%d fuera_de_zona=%d '
+        'duplicadas=%d kept=%d',
+        ultima_url, paginas, tarjetas, fuera_de_zona,
+        max(0, tarjetas - fuera_de_zona - len(results)), len(results),
+    )
     await on_progress('mercadolibre', 'done', len(results))
     return results
 

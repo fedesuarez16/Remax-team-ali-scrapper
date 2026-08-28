@@ -46,3 +46,29 @@ def apify_zonaprop(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     from app.core.config import settings
     monkeypatch.setattr(settings, 'ZONAPROP_USE_APIFY', True)
+
+
+@pytest.fixture(autouse=True)
+def _clean_ml_zona_cache() -> None:
+    """`_ML_ZONA_PATH_CACHE` is process-global and survives between tests.
+
+    It leaked once already: a region-probe test resolved "la plata" to
+    `bsas-gba-sur/la-plata`, and every later test that expected the flat slug
+    failed in a way that looked like a URL-builder bug.
+    """
+    from app.services import apify
+    apify._ML_ZONA_PATH_CACHE.clear()
+    yield
+    apify._ML_ZONA_PATH_CACHE.clear()
+
+
+@pytest.fixture()
+def ml_zona_ya_resuelta() -> None:
+    """Pre-seed `_ML_ZONA_PATH_CACHE` so the region probe does not run.
+
+    For tests about PAGING or parsing, where five extra probe requests are
+    noise. A warm cache is also the normal state: the probe runs once per
+    zona, not once per search.
+    """
+    from app.services import apify
+    apify._ML_ZONA_PATH_CACHE['la-plata'] = 'la-plata'
