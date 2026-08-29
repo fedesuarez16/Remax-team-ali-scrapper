@@ -471,13 +471,17 @@ def _zonaprop_search_url(filters: ScrapingFilters) -> str:
     )
 
 
-# How many exit IPs to try before calling a block a wall. Two was the ceiling
-# production kept hitting: from Railway, ZonaProp answered 403 on both attempts
-# and the search ended at zero, while the SAME credential and `country-AR`
-# residential proxy answers 200 twice in a row from a laptop. What differs is
-# which IP the pool hands out, so the answer is more draws from it. Cheap: a
-# 403 body is a few KB against ~1.3 MB for a real listing page.
-_ZP_BLOCK_ATTEMPTS = 4
+# How many exit IPs to draw before calling a block a wall. Each attempt is a
+# fresh proxy session, so this is a probability budget, not a retry count.
+#
+# The block rate is NOT stable: it was ~1 in 2 first attempts (2 draws
+# sufficed), then rose to the point where ZonaProp 403s its OWN HOME PAGE half
+# the time through this pool — measured, and the reason production went to
+# zero on every search. At p(block)=0.8 four draws fail 41% of the time and
+# eight fail 17%. Cheap to raise: a 403 body is a few KB against ~1.3 MB for a
+# real listing page, so the cost of an extra draw is noise next to losing the
+# search.
+_ZP_BLOCK_ATTEMPTS = 8
 _ZP_BLOCK_BACKOFF = 0.7   # seconds between draws — a burst looks like a bot
 # Consecutive pages that may fail before the crawl gives up. ZonaProp's WAF
 # blocks a PAGE, not a listing: production logs show page 6 blocked three times
