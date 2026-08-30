@@ -498,6 +498,29 @@ def _next_proxy_session() -> str:
     return f'zp{next(_PROXY_SESSION_SEQ)}{random.randint(1000, 9999)}'
 
 
+def _proxy_fingerprint(proxy_url: str | None) -> str:
+    """The proxy, minus the secret: host plus the username OPTIONS.
+
+    Those options are what pick the exit IP — `groups-RESIDENTIAL` chooses the
+    pool, `country-AR` chooses the country — so they are the difference between
+    a request ZonaProp serves and one it 403s. And they live in an environment
+    variable that cannot be read from a laptop, which is how a production run
+    failing EIGHT of eight attempts stayed unexplained while the same commit
+    succeeded locally on the first try.
+
+    The password never appears: a log line that leaks it is its own incident.
+    """
+    if not proxy_url:
+        return 'sin proxy (salida directa)'
+    scheme, _, rest = str(proxy_url).partition('://')
+    creds, at, host = rest.rpartition('@')
+    if not at:
+        return f'{scheme}://{host or rest}'
+    user = creds.partition(':')[0]
+    opts = [o for o in user.split(',') if o and not o.startswith('session-')]
+    return f'{host} [{",".join(opts)}]'
+
+
 def _proxy_with_session(proxy_url: str | None, session: str) -> str | None:
     """`proxy_url` with `session-<id>` set in the USERNAME.
 
@@ -541,6 +564,10 @@ async def _scrape_zonaprop_direct(
     from app.core.config import settings
 
     await on_progress('zonaprop', 'running', 0)
+    # Say which proxy this run goes out through. Two environments on the same
+    # commit behaved completely differently and the only unreadable input was
+    # this one.
+    logger.info('zonaprop directo: proxy=%s', _proxy_fingerprint(settings.SCRAPER_PROXY_URL))
     base = _zonaprop_search_url(filters)
     cap = settings.ZONAPROP_MAX_RESULTS
     zona_req = filters.zona_pedida or filters.zona or ''
