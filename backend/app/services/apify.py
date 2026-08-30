@@ -576,7 +576,29 @@ def _proxy_with_session(proxy_url: str | None, session: str) -> str | None:
     return f'{scheme}://{",".join(opts)}:{password}@{host}'
 
 
-async def _zonaprop_via_browser(url: str) -> str | None:
+async def _read_zonaprop_state_from_page(page: Any) -> dict[str, Any] | None:
+    """`window.__PRELOADED_STATE__` straight out of the page's JS context.
+
+    NOT scraped from `page.content()`. Production proved why: the browser
+    solved the challenge and returned 934 KB of real page, yet the marker was
+    nowhere in the serialised DOM — hydration rewrites the document, and
+    `content()` is a snapshot of whatever it looks like at that instant. The
+    value the page assigned to `window` is still there regardless.
+
+    Waiting on the VALUE also replaces the fixed 2.5 s sleep, which was a race
+    against hydration rather than a wait for it.
+    """
+    try:
+        await page.wait_for_function(
+            'typeof window.__PRELOADED_STATE__ !== "undefined"', timeout=20000,
+        )
+        state = await page.evaluate('window.__PRELOADED_STATE__')
+    except Exception:
+        return None
+    return state if isinstance(state, Mapping) and state else None  # type: ignore[return-value]
+
+
+async def _zonaprop_via_browser(url: str) -> dict[str, Any] | None:
     """Last resort for a page httpx cannot get past: a real browser.
 
     Only after every proxy session has been challenged, because a browser page
@@ -586,15 +608,41 @@ async def _zonaprop_via_browser(url: str) -> str | None:
     """
     from app.core.config import settings
 
+    try:
+        from playwright.async_api import async_playwright
+    except Exception:
+        return None
+
     logger.info('zonaprop: %s desafiado por Cloudflare — lo intento con navegador', url)
-    html = await render_page_html(
-        url, proxy=_playwright_proxy(settings.SCRAPER_PROXY_URL),
-    )
-    if html and not _is_cloudflare_challenge(html):
+    proxy = _playwright_proxy(settings.SCRAPER_PROXY_URL)
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                args=['--disable-blink-features=AutomationControlled'],
+                proxy=proxy,  # type: ignore[arg-type]
+            )
+            try:
+                context = await browser.new_context(
+                    user_agent=_BROWSER_UA, locale='es-AR',
+                    viewport={'width': 1440, 'height': 900},
+                )
+                page = await context.new_page()
+                try:
+                    await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                    state = await _read_zonaprop_state_from_page(page)
+                finally:
+                    await page.close()
+            finally:
+                await browser.close()
+    except Exception as exc:
+        logger.warning('zonaprop: %s el navegador fallo (%s)', url, exc)
+        return None
+
+    if state:
         logger.info('zonaprop: %s resuelto con navegador', url)
-        return html
-    logger.warning('zonaprop: %s el navegador tampoco paso el desafio', url)
-    return None
+    else:
+        logger.warning('zonaprop: %s el navegador tampoco paso el desafio', url)
+    return state
 
 
 async def _scrape_zonaprop_direct(
@@ -671,8 +719,6 @@ async def _scrape_zonaprop_direct(
                             'otra sesion de proxy', url, code,
                         )
                         continue
-                    if _is_cloudflare_challenge(exc.response.text):
-                        return await _zonaprop_via_browser(url)
                     logger.warning('zonaprop: %s fallo (%s)', url, exc)
                     return None
                 except Exception as exc:
@@ -690,7 +736,14 @@ async def _scrape_zonaprop_direct(
     while page <= total_pages and (cap <= 0 or len(results) < cap):
         url = base if page == 1 else base.replace('.html', f'-pagina-{page}.html')
         body = await _fetch(url)
-        if body is None:
+        state = _zonaprop_state(body) if body else None
+        if state is None:
+            # httpx did not bring back a usable page — exhausted by Cloudflare's
+            # challenge, or served something without the state. A real browser
+            # solves the challenge AND hands over the object from its own JS
+            # context, which is where it actually lives.
+            state = await _zonaprop_via_browser(url)
+        if state is None:
             # Skip, do not surrender: the next page usually goes through, and
             # a whole listing is not worth losing to one blocked request.
             fallos_seguidos += 1
@@ -705,9 +758,7 @@ async def _scrape_zonaprop_direct(
             continue
         fallos_seguidos = 0
 
-        state = _zonaprop_state(body)
-
-        if state is not None and page == 1 and not retried_plain and ',' in zona_req:
+        if page == 1 and not retried_plain and ',' in zona_req:
             if _zonaprop_requested_zone_ids(state, zona_req) is None:
                 # The portal served a zone we did not ask for: the composite
                 # slug is unknown to it, and it answers with the containing
@@ -724,17 +775,6 @@ async def _scrape_zonaprop_direct(
                 )
                 total_pages = 1
                 continue
-
-        if state is None:
-            # A WAF challenge or an error page. Say so: a silent empty list is
-            # indistinguishable from a zona with no listings, which is exactly
-            # how a broken source stays broken for weeks.
-            logger.warning(
-                'zonaprop: %s no trajo %s (%d KB) — puede ser el muro anti-bot; '
-                'revisa SCRAPER_PROXY_URL',
-                url, _ZP_STATE_MARKER, len(body) // 1024,
-            )
-            break
 
         paging = _zonaprop_paging(state)
         total_pages = int(paging.get('totalPages') or 1)

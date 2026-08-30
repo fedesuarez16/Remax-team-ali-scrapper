@@ -86,3 +86,22 @@ def sin_esperas_reales(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services import apify
 
     monkeypatch.setattr(apify, '_ZP_BLOCK_BACKOFF', 0.0)
+
+
+@pytest.fixture(autouse=True)
+def sin_navegador_real(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may launch Chromium.
+
+    The ZonaProp fallback opens a real browser when a page comes back without
+    state — which is exactly what the sad-path tests simulate. Left alone they
+    launched Playwright for real and the suite hung instead of failing.
+
+    A test that exercises the fallback patches `_zonaprop_via_browser` with its
+    own stub, which replaces this one.
+    """
+    from app.services import apify
+
+    async def _sin_navegador(url: str) -> None:
+        return None
+
+    monkeypatch.setattr(apify, '_zonaprop_via_browser', _sin_navegador)

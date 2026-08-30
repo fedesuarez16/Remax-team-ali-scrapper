@@ -107,11 +107,13 @@ class TestTheFallbackFires:
         _all_challenged(monkeypatch)
         calls: list[str] = []
 
-        async def fake_render(url: str, **kw: Any) -> str:
-            calls.append(url)
-            return _state_page()
+        import json
 
-        monkeypatch.setattr(apify, 'render_page_html', fake_render)
+        async def fake_browser(url: str) -> dict:
+            calls.append(url)
+            return json.loads(_state_page().split('= ', 1)[1].rsplit(';window', 1)[0])
+
+        monkeypatch.setattr(apify, '_zonaprop_via_browser', fake_browser)
 
         results = await apify._scrape_zonaprop_direct(_filters(), _noop)
 
@@ -134,11 +136,11 @@ class TestTheFallbackFires:
         monkeypatch.setattr(httpx, 'AsyncClient', _Client)
         calls: list[str] = []
 
-        async def fake_render(url: str, **kw: Any) -> str | None:
+        async def fake_browser(url: str) -> None:
             calls.append(url)
             return None
 
-        monkeypatch.setattr(apify, 'render_page_html', fake_render)
+        monkeypatch.setattr(apify, '_zonaprop_via_browser', fake_browser)
 
         await apify._scrape_zonaprop_direct(_filters(), _noop)
 
@@ -149,9 +151,9 @@ class TestTheFallbackFires:
     ) -> None:
         _all_challenged(monkeypatch)
 
-        async def fake_render(url: str, **kw: Any) -> None:
+        async def fake_browser(url: str) -> None:
             return None
 
-        monkeypatch.setattr(apify, 'render_page_html', fake_render)
+        monkeypatch.setattr(apify, '_zonaprop_via_browser', fake_browser)
 
         assert await apify._scrape_zonaprop_direct(_filters(), _noop) == []
