@@ -498,6 +498,36 @@ def _next_proxy_session() -> str:
     return f'zp{next(_PROXY_SESSION_SEQ)}{random.randint(1000, 9999)}'
 
 
+def _is_cloudflare_challenge(body: str) -> bool:
+    """Is this Cloudflare's JS interstitial rather than a real block?
+
+    ZonaProp sits behind Cloudflare, and the 403 that emptied production is
+    `<title>Just a moment...</title>` with `server: cloudflare` — a CHALLENGE.
+    Cloudflare picks who to challenge partly from the TLS handshake, so the
+    same code and the same proxy sail through from a macOS laptop and are
+    stopped every time from a `python:3.12-slim` container. Rotating exit IPs
+    cannot answer that; a real browser can, because it solves the challenge.
+    """
+    return 'just a moment' in body[:2000].lower()
+
+
+def _playwright_proxy(proxy_url: str | None) -> dict[str, str] | None:
+    """`SCRAPER_PROXY_URL` in the shape Playwright wants.
+
+    The browser MUST go out through the same residential proxy: launched
+    bare it uses the container's own datacenter IP, which ZonaProp blocks
+    harder than the challenged residential one it is meant to replace.
+    """
+    if not proxy_url:
+        return None
+    scheme, _, rest = str(proxy_url).partition('://')
+    creds, at, host = rest.rpartition('@')
+    if not at:
+        return {'server': f'{scheme}://{rest}'}
+    user, _, password = creds.partition(':')
+    return {'server': f'{scheme}://{host}', 'username': user, 'password': password}
+
+
 def _proxy_fingerprint(proxy_url: str | None) -> str:
     """The proxy, minus the secret: host plus the username OPTIONS.
 
@@ -544,6 +574,27 @@ def _proxy_with_session(proxy_url: str | None, session: str) -> str | None:
     opts = [o for o in user.split(',') if o and not o.startswith('session-')]
     opts.append(f'session-{session}')
     return f'{scheme}://{",".join(opts)}:{password}@{host}'
+
+
+async def _zonaprop_via_browser(url: str) -> str | None:
+    """Last resort for a page httpx cannot get past: a real browser.
+
+    Only after every proxy session has been challenged, because a browser page
+    costs seconds and hundreds of MB against a ~1 s httpx fetch. It goes out
+    through the SAME residential proxy — bare, it would use the container's
+    datacenter IP and do worse than what it replaces.
+    """
+    from app.core.config import settings
+
+    logger.info('zonaprop: %s desafiado por Cloudflare — lo intento con navegador', url)
+    html = await render_page_html(
+        url, proxy=_playwright_proxy(settings.SCRAPER_PROXY_URL),
+    )
+    if html and not _is_cloudflare_challenge(html):
+        logger.info('zonaprop: %s resuelto con navegador', url)
+        return html
+    logger.warning('zonaprop: %s el navegador tampoco paso el desafio', url)
+    return None
 
 
 async def _scrape_zonaprop_direct(
@@ -620,6 +671,8 @@ async def _scrape_zonaprop_direct(
                             'otra sesion de proxy', url, code,
                         )
                         continue
+                    if _is_cloudflare_challenge(exc.response.text):
+                        return await _zonaprop_via_browser(url)
                     logger.warning('zonaprop: %s fallo (%s)', url, exc)
                     return None
                 except Exception as exc:
@@ -3191,7 +3244,10 @@ _BROWSER_UA = (
 )
 
 
-async def render_page_html(url: str, user_agent: str | None = None) -> str | None:
+async def render_page_html(
+    url: str, user_agent: str | None = None,
+    proxy: dict[str, str] | None = None,
+) -> str | None:
     """Load one page in headless Chromium and return its rendered HTML.
 
     Gets past the plain-UA blocks and the JS-hydration walls that make httpx
@@ -3209,7 +3265,10 @@ async def render_page_html(url: str, user_agent: str | None = None) -> str | Non
 
     try:
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(args=['--disable-blink-features=AutomationControlled'])
+            browser = await pw.chromium.launch(
+                args=['--disable-blink-features=AutomationControlled'],
+                proxy=proxy,  # type: ignore[arg-type]
+            )
             try:
                 context = await browser.new_context(
                     user_agent=user_agent or _BROWSER_UA,
