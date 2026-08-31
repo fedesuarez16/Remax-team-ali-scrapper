@@ -354,9 +354,60 @@ def _zonaprop_requested_zone_ids(
             if opt.get('min') and wanted in _slugify(str(opt.get('label') or '')):
                 ids.add(str(opt['min']))
     if not ids:
-        # Nothing declared at all → no evidence either way, keep everything.
-        return set() if not _zonaprop_applied_zone_labels(state) else None
+        # No applied zone answers the request. Two shapes, one meaning: the
+        # portal declared OTHER zones (a redirect, or the union below), or it
+        # declared NONE at all — verified live, `gonnet-la-plata` resolves to
+        # nothing, the location filter is dropped and the portal serves
+        # 171.067 houses across Argentina. Reading an empty `appliedFilters`
+        # as "no evidence, keep everything" is what turned that into a
+        # nationwide dump landing in a Gonnet search.
+        return None
     return ids
+
+
+def _zonaprop_canonical_zona(state: Mapping[str, Any], zona: str) -> str | None:
+    """The portal's OWN name for the requested zona, when the URL it answered
+    was a UNION — or `None` when the URL was already the right one.
+
+    A ZonaProp slug names ONE location. Joining barrio and partido does not
+    narrow: when both halves resolve, the portal reads the slug as a union and
+    throws the partido in. Verified live (appliedFilters → result count):
+
+        manuel-b-gonnet-la-plata → [La Plata (city), Manuel B Gonnet (zone)] 4.572
+        manuel-b-gonnet          → [Manuel B Gonnet (zone)]                    397
+        city-bell-la-plata       → [La Plata (city), City Bell (zone)]       5.967
+        city-bell                → [City Bell (zone)]                          848
+
+    The comma is NOT the tell, which is why this reads the portal instead of
+    the string: `villa-elisa-la-plata` (disambiguating the Entre Ríos
+    homonym, 432) and `la-plata-la-plata` (the cabecera, 1.844) are canonical
+    single locations and each applies exactly ONE option. Narrowing those
+    would break them.
+
+    The return value is the matched option's LABEL — the portal's own
+    spelling, which is what its own URLs slugify. That is how
+    `manuel-b-gonnet` is recovered from a request written "Manuel B Gonnet,
+    La Plata", with no hardcoded slug vocabulary to keep in sync.
+    """
+    wanted = _slugify(zona.split(',')[0])
+    if not wanted:
+        return None
+    options = [
+        opt
+        for f in (state.get('listStore') or {}).get('appliedFilters') or []
+        if f.get('type') == 'location'
+        for opt in f.get('options') or []
+        if opt.get('min')
+    ]
+    if len(options) < 2:
+        return None
+    matched = [
+        label for opt in options
+        if wanted in _slugify(label := str(opt.get('label') or ''))
+    ]
+    # Exactly one of the union's members is the request; anything else is not
+    # a union we know how to collapse.
+    return matched[0] if len(matched) == 1 else None
 
 
 def _zonaprop_posting_zone_ids(posting: Mapping[str, Any]) -> set[str]:
@@ -758,28 +809,53 @@ async def _scrape_zonaprop_direct(
             continue
         fallos_seguidos = 0
 
-        if page == 1 and not retried_plain and ',' in zona_req:
-            if _zonaprop_requested_zone_ids(state, zona_req) is None:
-                # The portal served a zone we did not ask for: the composite
-                # slug is unknown to it, and it answers with the containing
-                # partido rather than a 404. Restart on the bare localidad,
-                # which is the form its own URLs use.
-                plain = zona_req.split(',')[0].strip()
+        if page == 1 and not retried_plain and zona_req:
+            # The URL can be WIDER than the request in two ways, and the portal
+            # states which. Either it applied our zone plus the partido — a
+            # union, collapsed onto the portal's own name for the zone — or it
+            # honoured nothing we asked for, in which case its own URLs use the
+            # bare first part. A URL it already honours is left alone.
+            canonical = _zonaprop_canonical_zona(state, zona_req)
+            if canonical:
+                retry_zona = canonical
+            elif _zonaprop_requested_zone_ids(state, zona_req) is None and ',' in zona_req:
+                retry_zona = zona_req.split(',')[0].strip()
+            else:
+                retry_zona = ''
+            retry_base = _zonaprop_search_url(
+                filters.model_copy(update={'zona': retry_zona, 'localidades': []})
+            ) if retry_zona else base
+            if retry_base != base:
                 logger.info(
-                    'zonaprop directo: %s sirvio %s en vez de %r — reintento con %r',
-                    url, sorted(_zonaprop_applied_zone_labels(state)), zona_req, plain,
+                    'zonaprop directo: %s aplico %s para %r — reintento con %r',
+                    url, sorted(_zonaprop_applied_zone_labels(state)), zona_req, retry_zona,
                 )
                 retried_plain = True
-                base = _zonaprop_search_url(
-                    filters.model_copy(update={'zona': plain, 'localidades': []})
-                )
+                base = retry_base
                 total_pages = 1
                 continue
 
         paging = _zonaprop_paging(state)
         total_pages = int(paging.get('totalPages') or 1)
         # NOT every applied zone — only the one that was asked for.
-        wanted = _zonaprop_requested_zone_ids(state, zona_req) or set()
+        wanted = _zonaprop_requested_zone_ids(state, zona_req)
+        if wanted is None:
+            # The portal DECLARED zones and not one of them is the request: it
+            # served somewhere else. Never fold this into the empty set —
+            # empty means "nothing to check against" below, so the one signal
+            # that says "this is not your zona" would keep the whole partido.
+            # Live, that is exactly what happened: a Gonnet search came back
+            # with ~300 La Plata houses, because the bare `gonnet` slug
+            # redirects too and the composite retry above was already spent.
+            #
+            # Stop rather than page on. A redirect is settled on page 1, and
+            # the remaining pages are the same dump we would reject in full.
+            logger.warning(
+                'zonaprop directo: %s aplico %s en vez de %r — descarto la pagina '
+                'y corto (redireccion de zona)',
+                url, sorted(_zonaprop_applied_zone_labels(state)), zona_req,
+            )
+            break
         postings = (state.get('listStore') or {}).get('listPostings') or []
 
         kept = rejected = 0

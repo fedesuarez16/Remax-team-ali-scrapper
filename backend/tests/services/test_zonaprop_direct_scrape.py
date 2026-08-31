@@ -255,19 +255,22 @@ class TestTheCompositeSlugRedirect:
 class TestABroadUrlIsNarrowedToTheRequestedZone:
     """Measured live: `casas-venta-city-bell-la-plata-...` applies TWO filters —
     `La Plata` (type **city**, 1001361) AND `City Bell` (type zone, 1001379) —
-    and returns 73 listings including Gonnet, Villa Elisa and Miralagos.
+    and answers 5.967 listings, Gonnet and Villa Elisa among them, against 848
+    on `casas-venta-city-bell-...`.
 
-    Taking the UNION of applied zones accepts all of it, because every one of
-    those postings has the La Plata city in its parent chain. Only the applied
-    zone that matches what the user ASKED for may be used; the containing city
-    is a widening, not the request.
+    Two defences, and the ORDER matters. The union is first collapsed onto the
+    narrow URL, so the crawl pays for 848 listings instead of paging through
+    5.967. The zone-id filter then still runs on whatever comes back — a
+    narrowed page is not a trusted page, and only the applied zone that
+    matches what the user ASKED for may be used; the containing city is a
+    widening, not the request.
     """
 
-    async def test_only_the_requested_zone_survives(
+    async def test_a_union_is_collapsed_and_then_still_filtered(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        url = ('https://www.zonaprop.com.ar/'
-               'casas-venta-city-bell-la-plata-450000-500000-dolar')
+        union = ('https://www.zonaprop.com.ar/'
+                 'casas-venta-city-bell-la-plata-450000-500000-dolar')
         import json
         state = {'listStore': {
             'paging': {'total': 5, 'totalPages': 1, 'currentPage': 1},
@@ -275,19 +278,23 @@ class TestABroadUrlIsNarrowedToTheRequestedZone:
                 {'label': 'La Plata', 'type': 'city', 'min': '1001361'},
                 {'label': 'City Bell', 'type': 'zone', 'min': '1001379'},
             ]}],
-            'listPostings': [
-                _posting(1),                                        # City Bell
-                _posting(2, barrio='Grand Bell'),                   # dentro de City Bell
-                _gonnet(3), _gonnet(4), _gonnet(5),                 # otra zona del partido
-            ],
+            'listPostings': [_posting(1), _gonnet(2)],
         }}
-        _serve(monkeypatch, {
-            f'{url}.html': '<html><script>window.__PRELOADED_STATE__ = '
-                           + json.dumps(state) + ';window.x={};</script></html>',
+        asked = _serve(monkeypatch, {
+            f'{union}.html': '<html><script>window.__PRELOADED_STATE__ = '
+                             + json.dumps(state) + ';window.x={};</script></html>',
+            # The narrow URL the portal's own label builds. Gonnet rides along
+            # here too (same partido in its parent chain) and must still go.
+            f'{_BASE}.html': _page([
+                _posting(1),                        # City Bell
+                _posting(2, barrio='Grand Bell'),   # sub-barrio, se queda
+                _gonnet(3), _gonnet(4), _gonnet(5),  # otra zona del partido
+            ], total_pages=1, current=1),
         })
 
         results = await _scrape_zonaprop_direct(_filters('City Bell, La Plata'), _noop)
 
+        assert asked == [f'{union}.html', f'{_BASE}.html']
         assert len(results) == 2
         assert all('Calle' in p.direccion for p in results)
 
@@ -314,3 +321,171 @@ class TestABroadUrlIsNarrowedToTheRequestedZone:
         results = await _scrape_zonaprop_direct(_filters('La Plata, La Plata'), _noop)
 
         assert len(results) == 2
+
+
+class TestAZoneTheUserNeverAskedForIsNotKept:
+    """`_zonaprop_requested_zone_ids` returns `None` with a precise meaning:
+    the portal DECLARED zones and not one of them is the request — i.e. it
+    served somewhere else. Collapsing that into an empty set (`... or set()`)
+    turned the sentinel inside out: empty means "no filter" downstream, so the
+    one signal that says "this is not your zona" made the loop keep the whole
+    partido.
+
+    Live: a Gonnet search came back with ~300 La Plata houses — City Bell,
+    Tolosa, Villa Elisa — because the bare `gonnet` slug redirects too, so the
+    composite retry (which fires once, on page 1) had already been spent.
+    """
+
+    def _partido_page(self, postings: list[dict], *, total_pages: int = 1) -> str:
+        return _page(postings, total_pages=total_pages, current=1,
+                     applied=('La Plata', '1001361'))
+
+    async def test_a_plain_slug_the_portal_redirects_keeps_nothing(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No comma in the request, so the composite retry never applies —
+        this is line 782 on its own."""
+        url = 'https://www.zonaprop.com.ar/casas-venta-gonnet-450000-500000-dolar'
+        _serve(monkeypatch, {
+            f'{url}.html': self._partido_page([_gonnet(1), _posting(2), _posting(3)]),
+        })
+
+        results = await _scrape_zonaprop_direct(_filters('Gonnet'), _noop)
+
+        assert results == []
+
+    async def test_a_composite_whose_retry_also_redirects_keeps_nothing(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The retry is spent on page 1; the second pass must still refuse the
+        partido instead of falling through to "keep everything"."""
+        composite = ('https://www.zonaprop.com.ar/'
+                     'casas-venta-gonnet-la-plata-450000-500000-dolar')
+        plain = 'https://www.zonaprop.com.ar/casas-venta-gonnet-450000-500000-dolar'
+        asked = _serve(monkeypatch, {
+            f'{composite}.html': self._partido_page([_posting(i) for i in range(3)]),
+            f'{plain}.html': self._partido_page([_posting(i) for i in range(10, 20)]),
+        })
+
+        results = await _scrape_zonaprop_direct(_filters('Gonnet, La Plata'), _noop)
+
+        assert asked == [f'{composite}.html', f'{plain}.html']
+        assert results == []
+
+    async def test_it_does_not_page_through_a_listing_it_will_reject_whole(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A redirect is settled on page 1. Paying for 40 more pages of a
+        partido dump we reject in full is spend for nothing."""
+        url = 'https://www.zonaprop.com.ar/casas-venta-gonnet-450000-500000-dolar'
+        asked = _serve(monkeypatch, {
+            f'{url}.html': self._partido_page([_posting(1)], total_pages=40),
+        })
+
+        await _scrape_zonaprop_direct(_filters('Gonnet'), _noop)
+
+        assert asked == [f'{url}.html']
+
+
+# ── A ZonaProp slug names ONE location. Joining barrio and partido does not
+# narrow: when BOTH halves resolve, the portal reads the slug as a UNION and
+# throws the partido in. Verified live 2026-08-31 (appliedFilters / result
+# counts):
+#
+#   manuel-b-gonnet-la-plata → [La Plata (city), Manuel B Gonnet (zone)] 4.572
+#   manuel-b-gonnet          → [Manuel B Gonnet (zone)]                    397
+#   city-bell-la-plata       → [La Plata (city), City Bell (zone)]       5.967
+#   city-bell                → [City Bell (zone)]                          848
+#   villa-elisa-la-plata     → [Villa Elisa (zone)]                        432
+#   la-plata-la-plata        → [La Plata (zone)]                         1.844
+#   gonnet-la-plata          → []  → redirects to /casas-venta.html    171.067
+#
+# So "composite" is NOT the tell — `villa-elisa-la-plata` and `la-plata-la-plata`
+# are canonical single locations. The tell is what the portal DECLARED. ───────
+
+def _multi_page(postings: list[dict], options: list[dict], *, total_pages: int = 1) -> str:
+    import json
+    return ('<html><script>window.__PRELOADED_STATE__ = ' + json.dumps({'listStore': {
+        'paging': {'total': len(postings), 'totalPages': total_pages, 'currentPage': 1},
+        'appliedFilters': [{'type': 'location', 'options': options}],
+        'listPostings': postings,
+    }}) + ';window.x={};</script></html>')
+
+
+_LA_PLATA_CITY = {'label': 'La Plata', 'type': 'city', 'min': '1001361'}
+_GONNET_ZONE = {'label': 'Manuel B Gonnet', 'type': 'zone', 'min': '1001377'}
+
+
+def _gonnet_posting(i: int) -> dict:
+    return _posting(i, zone='1001377', barrio='Manuel B Gonnet')
+
+
+class TestAUnionSlugIsNarrowedToThePortalsOwnName:
+    """The retry no longer guesses at the user's text — it reads back the
+    portal's OWN label for the zone that was asked for, which is what its
+    canonical URLs slugify. That is how `manuel-b-gonnet` is recovered from a
+    request spelled "Manuel B Gonnet, La Plata", with no hardcoded vocabulary.
+    """
+
+    async def test_a_union_is_refetched_on_the_matched_zones_own_slug(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        union = ('https://www.zonaprop.com.ar/'
+                 'casas-venta-manuel-b-gonnet-la-plata-450000-500000-dolar')
+        narrow = ('https://www.zonaprop.com.ar/'
+                  'casas-venta-manuel-b-gonnet-450000-500000-dolar')
+        asked = _serve(monkeypatch, {
+            # The union: the partido rides along, so most of the page is not Gonnet.
+            f'{union}.html': _multi_page(
+                [_gonnet_posting(1)] + [_posting(i) for i in range(2, 30)],
+                [_LA_PLATA_CITY, _GONNET_ZONE], total_pages=46),
+            f'{narrow}.html': _multi_page(
+                [_gonnet_posting(i) for i in range(100, 108)], [_GONNET_ZONE]),
+        })
+
+        results = await _scrape_zonaprop_direct(
+            _filters('Manuel B Gonnet, La Plata'), _noop)
+
+        assert asked == [f'{union}.html', f'{narrow}.html']
+        assert len(results) == 8
+
+    async def test_a_canonical_composite_is_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`villa-elisa-la-plata` disambiguates the Entre Ríos homonym and
+        applies exactly ONE option — narrowing it would break the search."""
+        url = ('https://www.zonaprop.com.ar/'
+               'casas-venta-villa-elisa-la-plata-450000-500000-dolar')
+        asked = _serve(monkeypatch, {
+            f'{url}.html': _multi_page(
+                [_posting(i, zone='1001369', barrio='Villa Elisa') for i in range(6)],
+                [{'label': 'Villa Elisa', 'type': 'zone', 'min': '1001369'}]),
+        })
+
+        results = await _scrape_zonaprop_direct(_filters('Villa Elisa, La Plata'), _noop)
+
+        assert asked == [f'{url}.html']
+        assert len(results) == 6
+
+
+class TestASlugThePortalCannotResolveAtAll:
+    """`gonnet-la-plata` resolves to NOTHING: the portal drops the location
+    filter and serves 171.067 houses across Argentina. An empty
+    `appliedFilters` is therefore not "no evidence, keep everything" — with a
+    zona requested it is proof the slug was never understood."""
+
+    async def test_a_nationwide_dump_keeps_nothing(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        composite = 'https://www.zonaprop.com.ar/casas-venta-gonnet-la-plata-450000-500000-dolar'
+        plain = 'https://www.zonaprop.com.ar/casas-venta-gonnet-450000-500000-dolar'
+        _serve(monkeypatch, {
+            f'{composite}.html': _multi_page(
+                [_posting(i, zone='9999999', barrio='Nueva Córdoba') for i in range(30)], []),
+            f'{plain}.html': _multi_page(
+                [_posting(i, zone='9999999', barrio='Rosario') for i in range(30)], []),
+        })
+
+        results = await _scrape_zonaprop_direct(_filters('Gonnet, La Plata'), _noop)
+
+        assert results == []
