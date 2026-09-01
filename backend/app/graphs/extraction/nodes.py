@@ -20,6 +20,7 @@ from app.graphs.extraction.tools import (
 from app.services.apify import (
     PORTAL_SOURCES,
     ApifyBudgetExceeded,
+    agency_matches_zona,
     get_apify_service,
     harvest_page_images,
 )
@@ -326,7 +327,7 @@ async def discover_agencies(state: dict[str, Any], config: RunnableConfig) -> di
         }, config=config)
 
     # ── Cache read (read-through) ──────────────────────────────────────────────
-    cached = await _read_cached_agencies(sb, zona_norm)
+    cached = await _read_cached_agencies(sb, zona_norm, zona)
     if len(cached) >= _AGENCY_CACHE_MIN_ROWS:
         await on_progress('googlemaps', 'running', 0)
         await on_progress('googlemaps', 'done', len(cached))
@@ -347,7 +348,7 @@ async def discover_agencies(state: dict[str, Any], config: RunnableConfig) -> di
     # ── Write-behind (awaited) then adopt DB ids so selection round-trips ────
     try:
         await _upsert_agencies(sb, agencies, zona_norm)
-        fresh = await _read_cached_agencies(sb, zona_norm)
+        fresh = await _read_cached_agencies(sb, zona_norm, zona)
         if fresh:
             agencies = fresh
     except Exception as exc:
@@ -595,7 +596,21 @@ def _agency_to_row(a: Agency, zona_norm: str, scraped_at: str) -> dict[str, Any]
     }
 
 
-async def _read_cached_agencies(sb: Any, zona_norm: str) -> list[Agency]:
+async def _read_cached_agencies(sb: Any, zona_norm: str, zona: str = '') -> list[Agency]:
+    """Inmobiliarias frescas de esta zona, filtradas por dirección.
+
+    La guarda de `_norm_googlemaps_agency` sólo protege lo que entra de acá en
+    adelante. Las filas que ya se guardaron con la zona equivocada — cuando el
+    normalizador no miraba la dirección — siguen ahí y siguen contestando: con
+    UNA fila fresca `discover_agencies` sirve el caché entero y ni llama a
+    Apify, durante los 30 días del TTL.
+
+    Por eso el filtro corre también al leer, con la MISMA guarda y el MISMO
+    campo que usa la escritura: leer con un criterio más laxo que el de
+    escritura haría que el caché se comportara distinto según quién lo llenó.
+    Las filas no se borran, sólo dejan de contestar por una zona que no es la
+    suya.
+    """
     if sb is None or not zona_norm:
         return []
     from datetime import datetime, timedelta, timezone
@@ -608,7 +623,10 @@ async def _read_cached_agencies(sb: Any, zona_norm: str) -> list[Agency]:
         .gte('scraped_at', cutoff)
         .execute()
     )
-    return [_agency_row_to_model(r) for r in (res.data or [])]
+    return [
+        a for r in (res.data or [])
+        if agency_matches_zona((a := _agency_row_to_model(r)).direccion, zona)
+    ]
 
 
 async def _upsert_agencies(sb: Any, agencies: list[Agency], zona_norm: str) -> None:

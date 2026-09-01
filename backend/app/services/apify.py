@@ -3081,10 +3081,46 @@ def _extract_instagram_handle(website: str | None) -> str | None:
     return m.group(1) if m else None
 
 
+def agency_matches_zona(direccion: str | None, zona: str) -> bool:
+    """¿Esta inmobiliaria ESTÁ en la zona pedida?
+
+    Google Maps ensancha el radio de búsqueda solo cuando se le acaban los
+    resultados locales, así que "inmobiliarias en La Plata" vuelve con Berisso
+    y Ensenada adentro. Sin esta guarda todas se guardaban estampadas con la
+    zona pedida — el mismo bug que los portales ya resolvieron con
+    `_item_matches_zona`.
+
+    Mira SÓLO la dirección, nunca el nombre: "Inmobiliaria La Plata S.A." con
+    oficina en Berisso pasaría cualquier filtro que lea el título, y las
+    inmobiliarias se llaman como su zona todo el tiempo.
+
+    Una zona compuesta ('City Bell, La Plata') exige TODAS sus partes: una
+    dirección del casco nombra La Plata pero no City Bell, y es del partido,
+    no de la zona pedida.
+
+    Sin dirección devuelve False: es un dato que el actor casi siempre trae, y
+    cuando falta no hay con qué sostener que la inmobiliaria sea de la zona.
+    Zona vacía devuelve True — no hay nada que exigir, igual que
+    `_item_matches_zona` con un set vacío.
+    """
+    partes = [p for p in (_slugify(p) for p in zona.split(',')) if p]
+    if not partes:
+        return True
+    if not (direccion or '').strip():
+        return False
+    haystack = _slugify(direccion or '')
+    return all(parte in haystack for parte in partes)
+
+
 def _norm_googlemaps_agency(item: dict[str, Any], zona: str) -> Agency | None:
     import uuid
     name = item.get('title') or item.get('name', '')
     if not name:
+        return None
+    # Descartar ACÁ es lo que impide que entre a la base: todo lo que sobreviva
+    # se persiste bajo `zona_norm` y vuelve del caché en cada búsqueda
+    # posterior durante los 30 días del TTL.
+    if not agency_matches_zona(item.get('address'), zona):
         return None
     website = item.get('website') or ''
     # try social media links first, then fallback to website URL
