@@ -15,7 +15,7 @@ import logging
 
 import pytest
 
-from app.services.apify import _proxy_fingerprint
+from app.services.apify import proxy_fingerprint
 
 
 async def _noop(*_a: object) -> None:
@@ -24,19 +24,19 @@ async def _noop(*_a: object) -> None:
 
 class TestItNamesWhatDecidesTheExitIp:
     def test_the_options_are_shown(self):
-        fp = _proxy_fingerprint(
+        fp = proxy_fingerprint(
             'http://groups-RESIDENTIAL,country-AR:s3cr3t@proxy.apify.com:8000')
         assert 'groups-RESIDENTIAL' in fp
         assert 'country-AR' in fp
 
     def test_the_host_is_shown(self):
-        assert 'proxy.apify.com:8000' in _proxy_fingerprint(
+        assert 'proxy.apify.com:8000' in proxy_fingerprint(
             'http://user:pw@proxy.apify.com:8000')
 
     def test_a_missing_country_is_visible_by_its_absence(self):
         """THE case under suspicion: without `country-AR` the exit IP can be
         any country, and ZonaProp blocks far more aggressively."""
-        fp = _proxy_fingerprint('http://groups-RESIDENTIAL:pw@proxy.apify.com:8000')
+        fp = proxy_fingerprint('http://groups-RESIDENTIAL:pw@proxy.apify.com:8000')
         assert 'country-AR' not in fp
         assert 'groups-RESIDENTIAL' in fp
 
@@ -47,11 +47,11 @@ class TestItNeverLeaksTheSecret:
         'http://user:S3CRET@proxy.local:3128',
     ])
     def test_the_password_is_absent(self, url: str):
-        assert 'S3CRET' not in _proxy_fingerprint(url)
+        assert 'S3CRET' not in proxy_fingerprint(url)
 
     def test_no_proxy_says_so(self):
-        assert 'sin proxy' in _proxy_fingerprint('')
-        assert 'sin proxy' in _proxy_fingerprint(None)
+        assert 'sin proxy' in proxy_fingerprint('')
+        assert 'sin proxy' in proxy_fingerprint(None)
 
 
 class TestItIsSaidOncePerSearch:

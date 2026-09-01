@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.core.config import settings
 from app.graphs.extraction.graph import build_graph
 
 router = APIRouter()
@@ -233,6 +234,59 @@ async def _read_job_inputs(sb: Any, job_id: str) -> dict[str, Any]:
     return {k: row[k] for k in ('localidades', 'polygon', 'source_selection') if row.get(k)}
 
 
+async def _stream_graph_events(
+    queue: asyncio.Queue[Any],
+    sb: Any,
+    job_id: str,
+    cost_ledger: dict[str, dict[str, Any]],
+) -> AsyncGenerator[str, None]:
+    """El cuerpo SSE compartido por /stream y /resume.
+
+    Los dos endpoints tenían el mismo generador copiado, y sólo uno de los dos
+    se arreglaba cada vez. Uno solo también garantiza que el keepalive esté en
+    ambos: una búsqueda con 260 inmobiliarias pasa minutos sin emitir nada
+    mientras el fan-out corre, y Railway/Vercel cortan una conexión ociosa —
+    el cliente lo veía como 'error' con la búsqueda todavía viva del lado del
+    servidor.
+    """
+    seq = 0
+    try:
+        while True:
+            try:
+                kind, payload = await asyncio.wait_for(
+                    queue.get(), timeout=settings.SSE_KEEPALIVE_SECONDS
+                )
+            except asyncio.TimeoutError:
+                # Frame de comentario SSE: mantiene viva la conexión y los
+                # parsers (EventSource y el lector de `data:` del cliente) lo
+                # ignoran por completo.
+                yield ': keepalive\n\n'
+                continue
+            if kind == 'done':
+                break
+            if kind == 'error':
+                raise payload
+            ev = payload
+            if ev['event'] != 'on_custom_event':
+                continue
+            name = ev['name']
+            data = ev['data']
+            if name == 'done':
+                await _write_job_terminal(sb, job_id, 'done', data.get('total_count', 0), cost_ledger)
+                data = _stamp_cost(data, cost_ledger)
+            elif name == 'error' and not data.get('recoverable', True):
+                await _write_job_terminal(sb, job_id, 'error', 0, cost_ledger)
+            seq += 1
+            yield f'id: {seq}\nevent: {name}\ndata: {json.dumps(data)}\n\n'
+    except GeneratorExit:
+        # Client disconnected — graph task keeps running and will save the checkpoint
+        return
+    except Exception as exc:
+        await _write_job_terminal(sb, job_id, 'error', 0, cost_ledger)
+        seq += 1
+        yield f'id: {seq}\nevent: error\ndata: {json.dumps({"event":"error","message":str(exc),"recoverable":False})}\n\n'
+
+
 @router.get('/{job_id}/stream')
 async def stream_scraping(job_id: str, query: str, request: Request) -> StreamingResponse:
     checkpointer = request.app.state.checkpointer
@@ -246,36 +300,10 @@ async def stream_scraping(job_id: str, query: str, request: Request) -> Streamin
     cost_ledger: dict[str, dict[str, Any]] = {}
     _spawn_graph_task(_run_graph_into_queue(graph, inputs, config, queue, sb, job_id, cost_ledger))
 
-    async def event_generator() -> AsyncGenerator[str, None]:
-        seq = 0
-        try:
-            while True:
-                kind, payload = await queue.get()
-                if kind == 'done':
-                    break
-                if kind == 'error':
-                    raise payload
-                ev = payload
-                if ev['event'] != 'on_custom_event':
-                    continue
-                name = ev['name']
-                data = ev['data']
-                if name == 'done':
-                    await _write_job_terminal(sb, job_id, 'done', data.get('total_count', 0), cost_ledger)
-                    data = _stamp_cost(data, cost_ledger)
-                elif name == 'error' and not data.get('recoverable', True):
-                    await _write_job_terminal(sb, job_id, 'error', 0, cost_ledger)
-                seq += 1
-                yield f'id: {seq}\nevent: {name}\ndata: {json.dumps(data)}\n\n'
-        except GeneratorExit:
-            # Client disconnected — graph task keeps running and will save the checkpoint
-            return
-        except Exception as exc:
-            await _write_job_terminal(sb, job_id, 'error', 0, cost_ledger)
-            seq += 1
-            yield f'id: {seq}\nevent: error\ndata: {json.dumps({"event":"error","message":str(exc),"recoverable":False})}\n\n'
-
-    return StreamingResponse(event_generator(), media_type='text/event-stream', headers=_sse_headers())
+    return StreamingResponse(
+        _stream_graph_events(queue, sb, job_id, cost_ledger),
+        media_type='text/event-stream', headers=_sse_headers(),
+    )
 
 
 async def _seed_cost_ledger(sb: Any, job_id: str) -> dict[str, dict[str, Any]]:
@@ -316,35 +344,10 @@ async def resume_scraping(job_id: str, body: ResumeScrapingRequest, request: Req
         )
     )
 
-    async def event_generator() -> AsyncGenerator[str, None]:
-        seq = 0
-        try:
-            while True:
-                kind, payload = await queue.get()
-                if kind == 'done':
-                    break
-                if kind == 'error':
-                    raise payload
-                ev = payload
-                if ev['event'] != 'on_custom_event':
-                    continue
-                name = ev['name']
-                data = ev['data']
-                if name == 'done':
-                    await _write_job_terminal(sb, job_id, 'done', data.get('total_count', 0), cost_ledger)
-                    data = _stamp_cost(data, cost_ledger)
-                elif name == 'error' and not data.get('recoverable', True):
-                    await _write_job_terminal(sb, job_id, 'error', 0, cost_ledger)
-                seq += 1
-                yield f'id: {seq}\nevent: {name}\ndata: {json.dumps(data)}\n\n'
-        except GeneratorExit:
-            return
-        except Exception as exc:
-            await _write_job_terminal(sb, job_id, 'error', 0, cost_ledger)
-            seq += 1
-            yield f'id: {seq}\nevent: error\ndata: {json.dumps({"event":"error","message":str(exc),"recoverable":False})}\n\n'
-
-    return StreamingResponse(event_generator(), media_type='text/event-stream', headers=_sse_headers())
+    return StreamingResponse(
+        _stream_graph_events(queue, sb, job_id, cost_ledger),
+        media_type='text/event-stream', headers=_sse_headers(),
+    )
 
 
 def _classify_properties(

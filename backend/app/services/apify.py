@@ -167,6 +167,38 @@ def ledger_total_usd(ledger: Mapping[str, Mapping[str, Any]]) -> float:
     return round(sum(float(e.get('usd') or 0.0) for e in ledger.values()), 4)
 
 
+class ApifyBudgetExceeded(RuntimeError):
+    """La búsqueda alcanzó su techo de gasto; este run no se arranca.
+
+    Tipo propio y NO un `RuntimeError` pelado porque los nodos ya tratan
+    cualquier excepción como error rojo, y esto no es una falla: es una
+    decisión nuestra ejecutándose. El nodo la atrapa antes del `except
+    Exception`, se queda con lo que ya juntó y sigue.
+    """
+
+
+def _budget_stop(source: str) -> None:
+    """Corta ANTES de arrancar un run si la búsqueda ya gastó su presupuesto.
+
+    Sin ledger instalado no estamos en una búsqueda (ficha, importer): ahí no
+    hay contra qué acumular y `record_run_cost` ya es no-op, así que el tope
+    también lo es — leer un ledger inexistente como "presupuesto cero" dejaría
+    esos caminos sin poder correr un solo actor.
+    """
+    from app.core.config import settings
+    cap = float(settings.APIFY_MAX_USD_PER_SEARCH or 0.0)
+    ledger = _COST_LEDGER.get()
+    if cap <= 0 or ledger is None:
+        return
+    total = ledger_total_usd(ledger)
+    if total < cap:
+        return
+    raise ApifyBudgetExceeded(
+        f'gasto {total} USD supera el tope de {cap} USD por búsqueda; '
+        f'no arranco el run de {source}',
+    )
+
+
 # ── Normalisation helpers ──────────────────────────────────────────────────────
 
 def _slugify(value: str) -> str:
@@ -544,9 +576,13 @@ _ZP_MAX_PAGE_FAILURES = 3
 _PROXY_SESSION_SEQ = count(1)
 
 
-def _next_proxy_session() -> str:
-    """A fresh Apify proxy session id — i.e. a fresh exit IP."""
-    return f'zp{next(_PROXY_SESSION_SEQ)}{random.randint(1000, 9999)}'
+def _next_proxy_session(prefix: str = 'zp') -> str:
+    """A fresh Apify proxy session id — i.e. a fresh exit IP.
+
+    El prefijo separa las sesiones por track: una IP quemada scrapeando
+    inmobiliarias no tiene por qué arrastrar a la paginación de ZonaProp.
+    """
+    return f'{prefix}{next(_PROXY_SESSION_SEQ)}{random.randint(1000, 9999)}'
 
 
 def _is_cloudflare_challenge(body: str) -> bool:
@@ -579,7 +615,7 @@ def _playwright_proxy(proxy_url: str | None) -> dict[str, str] | None:
     return {'server': f'{scheme}://{host}', 'username': user, 'password': password}
 
 
-def _proxy_fingerprint(proxy_url: str | None) -> str:
+def proxy_fingerprint(proxy_url: str | None) -> str:
     """The proxy, minus the secret: host plus the username OPTIONS.
 
     Those options are what pick the exit IP — `groups-RESIDENTIAL` chooses the
@@ -717,7 +753,7 @@ async def _scrape_zonaprop_direct(
     # Say which proxy this run goes out through. Two environments on the same
     # commit behaved completely differently and the only unreadable input was
     # this one.
-    logger.info('zonaprop directo: proxy=%s', _proxy_fingerprint(settings.SCRAPER_PROXY_URL))
+    logger.info('zonaprop directo: proxy=%s', proxy_fingerprint(settings.SCRAPER_PROXY_URL))
     base = _zonaprop_search_url(filters)
     cap = settings.ZONAPROP_MAX_RESULTS
     zona_req = filters.zona_pedida or filters.zona or ''
@@ -3239,9 +3275,14 @@ async def harvest_page_images(urls: list[str], render_budget: int = 8) -> dict[s
     images, capped at ``render_budget`` since each render costs seconds.
     Returns ``{url: [image_urls]}``; URLs that fail are simply absent.
     """
+    from app.core.config import settings
+
     out: dict[str, list[str]] = {}
+    # Mismo trato que los portales: UA de browser real y salida por el proxy
+    # residencial. Con `PropSearchBot/1.0` desde una IP de datacenter la
+    # mayoría de las fichas devuelve 403 y la propiedad se guardaba sin fotos.
     headers = {
-        'User-Agent': 'Mozilla/5.0 (compatible; PropSearchBot/1.0)',
+        'User-Agent': _BROWSER_UA,
         'Accept-Language': 'es-AR,es;q=0.9',
     }
     sem = asyncio.Semaphore(5)
@@ -3257,7 +3298,10 @@ async def harvest_page_images(urls: list[str], render_budget: int = 8) -> dict[s
             except Exception:
                 return u, []
 
-    async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        headers=headers, timeout=15, follow_redirects=True,
+        proxy=_proxy_with_session(settings.SCRAPER_PROXY_URL, _next_proxy_session('img')),
+    ) as client:
         for u, imgs in await asyncio.gather(*(_fetch(client, u) for u in urls)):
             if imgs:
                 out[u] = imgs
@@ -3442,15 +3486,40 @@ async def fetch_page_html_via_actor(url: str) -> str | None:
 
 
 async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict[str, str]]:
+    """Sitio de inmobiliaria por HTTP directo, con el MISMO método que los portales.
+
+    Dos cosas se alinearon acá con `_scrape_mercadolibre` / el track directo de
+    ZonaProp, porque este track las tenía las dos mal:
+
+    1. **Proxy.** Salía directo, con `User-Agent: PropSearchBot/1.0`. Desde
+       Railway eso es una IP de datacenter anunciándose como bot: la mayoría de
+       los sitios responde 403 o un HTML vacío, y el `except` de más abajo lo
+       convertía en `[]` — una búsqueda entera sin una sola propiedad y sin un
+       motivo visible. Ahora sale por `SCRAPER_PROXY_URL` con UA de browser y
+       una sesión propia por sitio, así una IP quemada no arrastra a las demás.
+
+    2. **Chromium.** Cada sitio abría un browser headless para rehacer las
+       galerías: hasta 6 páginas con `wait_until='networkidle'` (25 s de techo
+       cada una) y todas las imágenes bajadas de verdad. Con 260 inmobiliarias
+       eso son 260 Chromiums y decenas de GB por el proxy residencial, que se
+       factura por GB — el gasto y el cuelgue reportados. Queda detrás de
+       `WEBSITE_RENDER_GALLERIES`, apagado: las fotos salen del HTML y las
+       fichas que quedan cortas las recupera `harvest_page_images`, que sí
+       tiene presupuesto de render acotado.
+    """
     from bs4 import BeautifulSoup  # type: ignore[import-untyped]
+
+    from app.core.config import settings
 
     label = url.replace('https://', '').replace('http://', '').split('/')[0]
     await on_progress(f'web:{label}', 'running', 0)
 
     headers = {
-        'User-Agent': 'Mozilla/5.0 (compatible; PropSearchBot/1.0)',
+        'User-Agent': _BROWSER_UA,
         'Accept-Language': 'es-AR,es;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     }
+    proxy = _proxy_with_session(settings.SCRAPER_PROXY_URL, _next_proxy_session('web'))
 
     def parse_page(html: str, base: str) -> tuple[str, list[str]]:
         from urllib.parse import urljoin, urlparse
@@ -3484,7 +3553,10 @@ async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict
     pages: list[dict] = []
     visited: set[str] = set()
 
-    async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        headers=headers, timeout=settings.WEBSITE_HTTP_TIMEOUT,
+        follow_redirects=True, proxy=proxy,
+    ) as client:
         # Fetch the main page
         try:
             resp = await client.get(url)
@@ -3502,13 +3574,16 @@ async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict
         prop_keywords = ['propiedad', 'propiedades', 'inmueble', 'venta', 'alquiler', 'listing']
         sub_urls: list[str] = []
         for a in soup.find_all('a', href=True):
+            # El tope se chequea ANTES de sumar: chequearlo después dejaba
+            # pasar siempre una sub-página, así que un presupuesto de 0 no
+            # apagaba nada.
+            if len(sub_urls) >= settings.WEBSITE_MAX_SUBPAGES:
+                break
             href = str(a['href'])
             if any(k in href.lower() for k in prop_keywords):
                 full = href if href.startswith('http') else url.rstrip('/') + '/' + href.lstrip('/')
                 if full not in visited and label in full:
                     sub_urls.append(full)
-                    if len(sub_urls) >= 5:
-                        break
 
         for sub_url in sub_urls:
             try:
@@ -3521,17 +3596,18 @@ async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict
             except Exception:
                 continue
 
-    # Enrich with full galleries via a headless browser. JS-rendered sites hide
-    # their photos from the httpx HTML, so this recovers the real galleries.
-    # Falls back silently to the httpx-parsed images if Playwright is unavailable.
-    try:
-        rendered = await _render_gallery_images([p['url'] for p in pages])
-        for p in pages:
-            gallery = rendered.get(p['url'])
-            if gallery:
-                p['images'] = gallery
-    except Exception:
-        pass
+    # Un Chromium POR SITIO no escala: ver el docstring. Apagado por defecto;
+    # `WEBSITE_RENDER_GALLERIES=true` lo devuelve para una corrida puntual sobre
+    # pocas inmobiliarias, donde la galería completa vale los segundos y los MB.
+    if settings.WEBSITE_RENDER_GALLERIES:
+        try:
+            rendered = await _render_gallery_images([p['url'] for p in pages])
+            for p in pages:
+                gallery = rendered.get(p['url'])
+                if gallery:
+                    p['images'] = gallery
+        except Exception:
+            pass
 
     await on_progress(f'web:{label}', 'done', len(pages))
     return pages
@@ -3674,6 +3750,11 @@ class ApifyService(BaseApifyService):
         input_data: dict[str, Any],
     ) -> list[dict[str, Any]]:
         run_url = f'{_APIFY_BASE}/acts/{actor_id}/runs'
+
+        # El tope se consulta ACÁ, antes del POST, porque es el único lugar por
+        # el que pasa todo run de todo actor — y porque un run rechazado
+        # después de arrancar ya se pagó.
+        _budget_stop(source)
 
         # Start run
         resp = await self._client.post(run_url, json=input_data)

@@ -10,10 +10,19 @@ the sweep:
 - `GOOGLEMAPS_MAX_PLACES=20` → discovery stopped at 20 places per zona.
 - `INSTAGRAM_RESULTS_LIMIT=10` → 10 posts per profile.
 
-`0` now means uncapped on all three, matching the convention the paging block
-already documents. For the two Apify actors, uncapped means OMITTING the input
-key entirely rather than sending a literal `0`: the actors read `0` as "crawl
-zero items", so sending it would silence the source instead of freeing it.
+`0` now means uncapped, matching the convention the paging block already
+documents. For the two Apify actors, uncapped means OMITTING the input key
+entirely rather than sending a literal `0`: the actors read `0` as "crawl zero
+items", so sending it would silence the source instead of freeing it.
+
+`GOOGLEMAPS_MAX_PLACES` volvió después a un valor positivo, y NO es una recaída
+en el bug de arriba. La diferencia está en de dónde sale el número: `20` era un
+techo que nadie eligió; `660` es un techo de GASTO que sí se eligió, traducido a
+la única unidad que el actor entiende. `compass/crawler-google-places` cobra USD
+1.50 / 1.000 lugares, así que 660 x 0.0015 = USD 0.99 por zona. Uncapped acá no
+significaba "barrer todo": significaba que el tamaño de la zona decidía la
+factura. El contrato que este archivo defiende es "ningún techo arbitrario", no
+"ningún techo".
 """
 from typing import Any
 
@@ -37,8 +46,41 @@ def test_shipped_defaults_impose_no_agency_ceiling() -> None:
     concreto es legítimo y no debe poner en rojo un test sobre el contrato."""
     defaults = {n: f.default for n, f in Settings.model_fields.items()}
     assert defaults['MAX_WEBSITE_URLS'] == 0
-    assert defaults['GOOGLEMAPS_MAX_PLACES'] == 0
     assert defaults['INSTAGRAM_RESULTS_LIMIT'] == 0
+
+
+_USD_PER_PLACE = 1.50 / 1000  # apify.com/compass/crawler-google-places, 2026-09-01
+
+
+def test_the_places_cap_is_a_price_not_a_taste() -> None:
+    """El único techo positivo del track, y está atado a un precio."""
+    cap = Settings.model_fields['GOOGLEMAPS_MAX_PLACES'].default
+
+    assert cap > 0, 'sin tope, el tamaño de la zona decide la factura'
+    assert cap * _USD_PER_PLACE == pytest.approx(0.30, abs=0.01)
+
+
+def test_one_maps_run_cannot_eat_the_whole_search_budget() -> None:
+    """El invariante que ata los dos knobs, y el que de verdad protege la
+    factura.
+
+    `APIFY_MAX_USD_PER_SEARCH` es un tope BLANDO: se consulta antes de arrancar
+    cada run, nunca durante. Google Maps es el PRIMER run del track, así que
+    siempre arranca con el ledger en cero y el tope blando no puede frenarlo —
+    lo único que acota ese run es el cap de lugares.
+
+    Si `GOOGLEMAPS_MAX_PLACES` creciera hasta costar el presupuesto entero, el
+    track se quedaría sin un centavo para los runs de Instagram que vienen
+    después y el tope los rechazaría a todos. Este test cae ANTES de que eso
+    llegue a producción.
+    """
+    cap = Settings.model_fields['GOOGLEMAPS_MAX_PLACES'].default
+    budget = Settings.model_fields['APIFY_MAX_USD_PER_SEARCH'].default
+
+    assert cap * _USD_PER_PLACE < budget, (
+        'un solo run de Google Maps se come toda la búsqueda: '
+        'bajá GOOGLEMAPS_MAX_PLACES o subí APIFY_MAX_USD_PER_SEARCH'
+    )
 
 
 # ── MAX_WEBSITE_URLS: the website fan-out ─────────────────────────────────────

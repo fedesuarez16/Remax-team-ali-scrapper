@@ -1,11 +1,17 @@
 import { Check, Loader2, X, Circle } from 'lucide-react'
-import type { ProgressMap, SourceStatus } from '@/hooks/useSSEStream'
+import type { ProgressMap, SourceProgress, SourceStatus } from '@/hooks/useSSEStream'
 
 const LABEL: Record<string, string> = {
   zonaprop: 'ZonaProp',
   mercadolibre: 'MercadoLibre',
   googlemaps: 'Google Maps',
+  inmobiliarias: 'Inmobiliarias',
+  extraccion: 'Analizando páginas',
 }
+
+/** Fuentes que sí conocen su universo de antemano y por eso merecen una barra
+ * con números absolutos ("132 de 260") en vez de una fila más de la lista. */
+const COUNTED_SOURCES = ['inmobiliarias', 'extraccion'] as const
 
 function StatusIcon({ status }: { status: SourceStatus }) {
   if (status === 'running') return <Loader2 className="size-3.5 animate-spin text-foreground" />
@@ -36,7 +42,53 @@ function StatusBar({ progress }: { progress: ProgressMap }) {
   )
 }
 
+/** Barra con cuenta absoluta: cuántas van y cuántas faltan. Es la única forma
+ * de saber si una búsqueda de 260 inmobiliarias está avanzando o colgada. */
+function CountedBar({ label, s }: { label: string; s: SourceProgress }) {
+  const total = s.total ?? 0
+  const done = Math.min(s.done ?? 0, total)
+  const pct = total ? (done / total) * 100 : 0
+  const faltan = total - done
+
+  return (
+    <div className="space-y-1.5 rounded-xl bg-muted/50 p-2.5">
+      <div className="flex items-center gap-2">
+        <StatusIcon status={s.status} />
+        <span className="flex-1 text-xs font-medium text-foreground">{label}</span>
+        <span className="text-xs font-medium tabular-nums text-foreground">
+          {done} / {total}
+        </span>
+      </div>
+
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-border">
+        <div
+          className="h-full rounded-full bg-foreground transition-all duration-300"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+
+      <p className="text-[11px] text-muted-foreground">
+        {s.status === 'done'
+          ? s.message
+          : faltan > 0
+          ? `Faltan ${faltan} · ${Math.round(pct)}%`
+          : s.message}
+      </p>
+    </div>
+  )
+}
+
 export function ProgressBubble({ progress, matchedCount, totalCount = 0 }: { progress: ProgressMap; matchedCount: number; totalCount?: number }) {
+  const counted = COUNTED_SOURCES
+    .map((key) => [key, progress[key]] as const)
+    .filter(([, s]) => s && (s.total ?? 0) > 0)
+
+  // Las fuentes con barra propia salen de la lista de abajo: repetirlas sería
+  // mostrar el mismo dato dos veces con menos información.
+  const rows = Object.entries(progress).filter(
+    ([src, s]) => !(COUNTED_SOURCES as readonly string[]).includes(src) || !s.total
+  )
+
   return (
     <div className="w-full max-w-xs space-y-2.5 rounded-2xl rounded-tl-sm border border-border bg-card p-3.5">
       <div className="flex items-center justify-between">
@@ -52,8 +104,12 @@ export function ProgressBubble({ progress, matchedCount, totalCount = 0 }: { pro
 
       <StatusBar progress={progress} />
 
+      {counted.map(([key, s]) => (
+        <CountedBar key={key} label={LABEL[key] ?? key} s={s!} />
+      ))}
+
       <ul className="space-y-2">
-        {Object.entries(progress).map(([src, s]) => (
+        {rows.map(([src, s]) => (
           <li key={src} className="flex items-center gap-2.5">
             <StatusIcon status={s.status} />
             <span className={`flex-1 text-xs font-medium transition-colors ${

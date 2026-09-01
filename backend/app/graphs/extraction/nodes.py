@@ -17,7 +17,12 @@ from app.graphs.extraction.state import ScrapingState
 from app.graphs.extraction.tools import (
     EXTRACT_FILTERS_TOOL, INSTAGRAM_EXTRACT_TOOL, INSTAGRAM_SYSTEM_PROMPT, SYSTEM_PROMPT,
 )
-from app.services.apify import PORTAL_SOURCES, get_apify_service, harvest_page_images
+from app.services.apify import (
+    PORTAL_SOURCES,
+    ApifyBudgetExceeded,
+    get_apify_service,
+    harvest_page_images,
+)
 from app.services.llm_costs import (
     SCOPE_EXTRACT_INSTAGRAM,
     SCOPE_EXTRACT_WEBSITE,
@@ -34,6 +39,108 @@ MODEL = 'claude-haiku-4-5-20251001'
 _client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
 _log = logging.getLogger(__name__)
+
+
+# ── Fan-out de inmobiliarias: cola + contador compartido ──────────────────────
+#
+# LangGraph despacha los N `Send` de `route_after_review` de un saque. Con 260
+# inmobiliarias tildadas eso son 260 scrapers simultáneos, cada uno abriendo
+# hasta 6 conexiones: el proceso se queda sin sockets y la búsqueda muere. El
+# semáforo los pone en fila sin descartar ninguno.
+#
+# El contador vive acá y no en el estado del grafo porque las ramas de un
+# fan-out NO comparten estado hasta el fan-in: una rama no puede saber cuántas
+# hermanas terminaron. Es un dict de proceso, igual que `_graph_tasks` en la
+# capa de API, y se limpia solo cuando el job llega al total.
+_website_semaphore: asyncio.Semaphore | None = None
+_website_progress: dict[str, dict[str, int]] = {}
+
+# Jobs que ya avisaron que se quedaron sin presupuesto de Apify. Cuando el tope
+# corta, corta para TODAS las ramas del fan-out a la vez: sin este registro una
+# zona con 50 inmobiliarias mandaría 50 avisos idénticos por el mismo motivo.
+# Mismo criterio que `_website_progress` — de proceso, porque las ramas no
+# comparten estado hasta el fan-in.
+_budget_notified: set[str] = set()
+# Acotado a mano: acá no hay evento de "job terminado" del que colgar la
+# limpieza. Al llenarse se vacía entero; el peor caso es un aviso repetido en
+# un job viejo que siga vivo, que es una burbuja de más, no un error.
+_BUDGET_NOTICE_MEMORY = 512
+
+
+def _claim_budget_notice(job_id: str | None) -> bool:
+    """True sólo para la PRIMERA rama de este job que se queda sin presupuesto."""
+    key = job_id or ''
+    if key in _budget_notified:
+        return False
+    if len(_budget_notified) >= _BUDGET_NOTICE_MEMORY:
+        _budget_notified.clear()
+    _budget_notified.add(key)
+    return True
+
+
+async def _announce_budget_stop(
+    exc: Exception, job_id: str | None, config: RunnableConfig,
+) -> None:
+    """Avisa el corte por tope como `progress`, no como `error`.
+
+    La búsqueda no falló: gastó lo que se le dijo que podía gastar y sigue con
+    lo que ya juntó. Los números viajan en el mensaje de la excepción porque
+    "se agotó el presupuesto" a secas no le dice al usuario si subir el tope o
+    achicar la zona.
+    """
+    if not _claim_budget_notice(job_id):
+        return
+    await adispatch_custom_event('progress', {
+        'event': 'progress', 'source': 'apify_budget', 'status': 'done', 'count': 0,
+        'message': f'Tope de gasto alcanzado ({exc}). Sigo con lo que encontré hasta acá.',
+    }, config=config)
+
+
+def _get_website_semaphore() -> asyncio.Semaphore:
+    global _website_semaphore
+    if _website_semaphore is None:
+        _website_semaphore = asyncio.Semaphore(max(1, settings.WEBSITE_SCRAPE_CONCURRENCY))
+    return _website_semaphore
+
+
+def _reset_website_progress(job_id: str | None, total: int) -> None:
+    """Arranca (o reinicia) el contador del fan-out. `total=0` lo borra: sin
+    total no hay agregado y cada sitio vuelve a reportarse solo."""
+    if not job_id:
+        return
+    if total > 0:
+        _website_progress[job_id] = {'total': total, 'done': 0, 'announced': 0}
+    else:
+        _website_progress.pop(job_id, None)
+
+
+def _website_progress_total(job_id: str | None) -> int:
+    entry = _website_progress.get(job_id or '')
+    return entry['total'] if entry else 0
+
+
+def _claim_website_announcement(job_id: str | None) -> int:
+    """El primer scraper del fan-out se queda con el derecho a anunciar el
+    `0 de N` inicial; los demás reciben 0. Sin `await` en el medio, así que en
+    un loop de asyncio esto es atómico."""
+    entry = _website_progress.get(job_id or '')
+    if entry is None or entry['announced']:
+        return 0
+    entry['announced'] = 1
+    return entry['total']
+
+
+def _bump_website_progress(job_id: str | None) -> tuple[int, int]:
+    """Marca un sitio como terminado (haya traído páginas o haya fallado) y
+    devuelve `(hechos, total)`. `(0, 0)` = este job no tiene agregado."""
+    entry = _website_progress.get(job_id or '')
+    if entry is None:
+        return 0, 0
+    entry['done'] += 1
+    done, total = entry['done'], entry['total']
+    if done >= total:
+        _website_progress.pop(job_id or '', None)
+    return done, total
 
 
 # ── Phase 1: Parse & portal scraping ──────────────────────────────────────────
@@ -228,6 +335,9 @@ async def discover_agencies(state: dict[str, Any], config: RunnableConfig) -> di
     # ── Cache miss → pay Apify (as today) ────────────────────────────────────
     try:
         agencies = await service.scrape_agencies(zona, on_progress)
+    except ApifyBudgetExceeded as exc:
+        await _announce_budget_stop(exc, state.get('job_id'), config)
+        return {'agencies': []}
     except Exception as exc:
         await adispatch_custom_event('error', {
             'event': 'error', 'source': 'googlemaps', 'message': str(exc), 'recoverable': True,
@@ -879,6 +989,24 @@ def route_after_review(state: ScrapingState) -> str | list[Any]:
         if a.instagram_handle and not settings.SCRAPE_GOOGLEMAPS_ONLY:
             sends.append(Send('run_instagram_scraper', {'nombre': a.nombre, 'handle': a.instagram_handle, 'job_id': job_id}))
 
+    # El total del fan-out sólo se conoce acá. Las ramas lo leen del registro
+    # para poder reportar "132 de 260" en vez de 260 filas sueltas.
+    _reset_website_progress(job_id, websites_sent)
+
+    if websites_sent:
+        from app.services.apify import proxy_fingerprint
+
+        # El embudo de este track no se veía en ningún lado, y sin proxy la
+        # búsqueda vuelve vacía desde Railway sin decir por qué. Que el log lo
+        # diga ANTES de empezar, no después de 20 minutos.
+        _log.info(
+            'inmobiliarias: %d sitios al fan-out (%d curadas + %d descubiertas), '
+            'concurrencia %d, proxy=%s',
+            websites_sent, len(manual_sources), len(selected_agencies),
+            settings.WEBSITE_SCRAPE_CONCURRENCY,
+            proxy_fingerprint(settings.SCRAPER_PROXY_URL),
+        )
+
     return sends if sends else 'no_websites'
 
 
@@ -887,10 +1015,18 @@ def route_after_review(state: ScrapingState) -> str | list[Any]:
 async def run_website_scraper(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     url: str = state['url']
     nombre: str = state.get('nombre', url)
+    job_id: str | None = state.get('job_id')
     service = get_apify_service()
     label = url.replace('https://', '').replace('http://', '').split('/')[0]
 
+    # Con agregado, una fila por sitio son 520 eventos y 520 re-renders de una
+    # lista de 260 ítems en el cliente. Los per-sitio quedan sólo para el caso
+    # sin contador (job sin id), donde son el único feedback que hay.
+    aggregated = _website_progress_total(job_id) > 0
+
     async def on_progress(src: str, status: str, count: int) -> None:
+        if aggregated:
+            return
         await adispatch_custom_event('progress', {
             'event': 'progress', 'source': f'web:{label}',
             'status': status, 'count': count,
@@ -901,14 +1037,34 @@ async def run_website_scraper(state: dict[str, Any], config: RunnableConfig) -> 
             }.get(status, ''),
         }, config=config)
 
+    async def emit_total(done: int, total: int) -> None:
+        await adispatch_custom_event('progress', {
+            'event': 'progress', 'source': 'inmobiliarias',
+            'status': 'done' if done >= total else 'running',
+            'count': done, 'done': done, 'total': total,
+            'message': f'{done} de {total} inmobiliarias escaneadas',
+        }, config=config)
+
+    if (announced_total := _claim_website_announcement(job_id)):
+        await emit_total(0, announced_total)
+
     try:
-        pages = await service.scrape_website(url, on_progress)
+        # Los N `Send` ya existen todos; el semáforo decide cuántos corren.
+        async with _get_website_semaphore():
+            pages = await service.scrape_website(url, on_progress)
     except Exception as exc:
         await adispatch_custom_event('error', {
             'event': 'error', 'source': f'web:{label}',
             'message': str(exc), 'recoverable': True,
         }, config=config)
+        # Un sitio caído igual avanza la barra: si no, con 260 inmobiliarias la
+        # barra se clava en 258/260 para siempre.
+        if (counted := _bump_website_progress(job_id))[1]:
+            await emit_total(*counted)
         return {'website_pages': [], 'errors': [f'{url}: {exc}']}
+
+    if (counted := _bump_website_progress(job_id))[1]:
+        await emit_total(*counted)
     return {'website_pages': pages}
 
 
@@ -958,9 +1114,88 @@ _WEBSITE_SYSTEM_PROMPT = (
 )
 
 
+async def _extract_page_properties(
+    page: dict[str, str],
+    sb: Any,
+    job_id: str | None,
+) -> list[NormalizedProperty]:
+    """Extrae las propiedades de UNA página. Nunca propaga: una página que
+    falla vale [] y la búsqueda sigue — con 1500 páginas en juego, una sola
+    excepción no puede tirar abajo la corrida entera."""
+    text = page.get('text', '')
+    if not text or len(text) < 100:
+        return []
+    # Truncate very long pages — Claude context limit
+    text = text[:6000]
+    try:
+        msg = await asyncio.wait_for(
+            _client.messages.create(  # type: ignore[call-overload]
+                model=MODEL,
+                max_tokens=1024,
+                system=_WEBSITE_SYSTEM_PROMPT,
+                tools=[_WEBSITE_EXTRACT_TOOL],  # type: ignore[list-item]
+                tool_choice={'type': 'tool', 'name': 'extract_properties_from_webpage'},
+                messages=[{'role': 'user', 'content': f'Página: {page.get("url", "")}\n\n{text}'}],
+            ),
+            timeout=settings.WEBSITE_EXTRACT_TIMEOUT,
+        )
+    except Exception:
+        # Never reached Anthropic (o se colgó) → nothing billed, nothing to book.
+        return []
+
+    await record_llm_usage(
+        sb,
+        scope=SCOPE_EXTRACT_WEBSITE,
+        model=MODEL,
+        usage=getattr(msg, 'usage', None),
+        job_id=job_id,
+        url=page.get('url') or None,
+    )
+
+    tool_use = next((b for b in msg.content if b.type == 'tool_use'), None)
+    if not tool_use:
+        return []
+
+    page_images: list[str] = page.get('images') or []
+    page_props: list[NormalizedProperty] = []
+
+    for prop in (tool_use.input.get('propiedades') or []):
+        filled = sum(1 for f in ['precio', 'tipo_operacion', 'tipo_propiedad', 'ambientes', 'm2', 'direccion']
+                     if prop.get(f) is not None)
+        confianza = min(1.0, filled / 6)
+        page_props.append(NormalizedProperty(
+            titulo=prop.get('titulo') or '',
+            descripcion=prop.get('descripcion'),
+            direccion=prop.get('direccion') or '',
+            direccion_norm=_normalize_address(prop.get('direccion') or ''),
+            precio=prop.get('precio'),
+            moneda=prop.get('moneda') or 'USD',  # type: ignore[arg-type]
+            tipo_operacion=prop.get('tipo_operacion') or 'venta',  # type: ignore[arg-type]
+            tipo_propiedad=_normalize_tipo_propiedad(prop.get('tipo_propiedad')),
+            ambientes=prop.get('ambientes'),
+            banos=prop.get('banos'),
+            cocheras=prop.get('cocheras'),
+            piso=prop.get('piso'),
+            expensas=prop.get('expensas'),
+            amenities=prop.get('amenities') or [],
+            m2_total=prop.get('m2'),
+            fuente='googlemaps',
+            url_origen=prop.get('url_ficha') or page.get('url'),
+            confianza_extraccion=confianza,
+        ))
+
+    # A single-property page (a listing detail/ficha) owns ALL its images.
+    # On multi-property pages the page-level pool mixes every card's photos in
+    # network-arrival order, so positional assignment shuffles galleries between
+    # properties — those get their gallery from their own ficha below instead.
+    if len(page_props) == 1 and page_images:
+        page_props[0].imagenes = page_images[:20]
+
+    return page_props
+
+
 async def extract_website_properties_llm(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
     pages: list[dict[str, str]] = state.get('website_pages', [])
-    results: list[NormalizedProperty] = []
     total_pages = len(pages)
     # One ledger row per page rather than one aggregate for the node: this loop is
     # where token spend concentrates, and an aggregate would hide which site was
@@ -969,80 +1204,38 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
     sb = config['configurable'].get('supabase')
     job_id = state.get('job_id')
 
-    for page_idx, page in enumerate(pages, 1):
+    # Antes esto era un `for` secuencial. Con 260 inmobiliarias el fan-in trae
+    # ~1500 páginas y a ~4 s por llamada eso son más de 90 minutos con el
+    # stream abierto: la búsqueda moría antes de llegar al final. En paralelo
+    # acotado son minutos, y el tope existe para no reventar el rate limit de
+    # Anthropic (que sería el error siguiente).
+    sem = asyncio.Semaphore(max(1, settings.WEBSITE_EXTRACT_CONCURRENCY))
+    analyzed = 0
+
+    async def emit(status: str, done: int, count: int, message: str) -> None:
         await adispatch_custom_event('progress', {
-            'event': 'progress', 'source': 'extraccion', 'status': 'running',
-            'count': len(results),
-            'message': f'Analizando página {page_idx}/{total_pages}...',
+            'event': 'progress', 'source': 'extraccion', 'status': status,
+            'count': count, 'done': done, 'total': total_pages,
+            'message': message,
         }, config=config)
-        text = page.get('text', '')
-        if not text or len(text) < 100:
-            continue
-        # Truncate very long pages — Claude context limit
-        text = text[:6000]
-        try:
-            msg = await _client.messages.create(  # type: ignore[call-overload]
-                model=MODEL,
-                max_tokens=1024,
-                system=_WEBSITE_SYSTEM_PROMPT,
-                tools=[_WEBSITE_EXTRACT_TOOL],  # type: ignore[list-item]
-                tool_choice={'type': 'tool', 'name': 'extract_properties_from_webpage'},
-                messages=[{'role': 'user', 'content': f'Página: {page.get("url", "")}\n\n{text}'}],
-            )
-        except Exception:
-            # Never reached Anthropic → nothing billed, nothing to book.
-            continue
 
-        await record_llm_usage(
-            sb,
-            scope=SCOPE_EXTRACT_WEBSITE,
-            model=MODEL,
-            usage=getattr(msg, 'usage', None),
-            job_id=job_id,
-            url=page.get('url') or None,
-        )
+    async def extract(page: dict[str, str]) -> list[NormalizedProperty]:
+        nonlocal analyzed
+        async with sem:
+            props = await _extract_page_properties(page, sb, job_id)
+        analyzed += 1
+        # Un evento cada 5 páginas: con 1500 páginas, uno por página es ruido
+        # que el cliente no llega a renderizar. El último siempre se manda.
+        if analyzed % 5 == 0 or analyzed == total_pages:
+            await emit('running', analyzed, analyzed,
+                       f'Analizando páginas {analyzed}/{total_pages}...')
+        return props
 
-        tool_use = next((b for b in msg.content if b.type == 'tool_use'), None)
-        if not tool_use:
-            continue
+    if total_pages:
+        await emit('running', 0, 0, f'Analizando páginas 0/{total_pages}...')
 
-        page_images: list[str] = page.get('images') or []
-        page_props: list[NormalizedProperty] = []
-        page_url = page.get('url') or ''
-
-        for prop in (tool_use.input.get('propiedades') or []):
-            filled = sum(1 for f in ['precio', 'tipo_operacion', 'tipo_propiedad', 'ambientes', 'm2', 'direccion']
-                         if prop.get(f) is not None)
-            confianza = min(1.0, filled / 6)
-            page_props.append(NormalizedProperty(
-                titulo=prop.get('titulo') or '',
-                descripcion=prop.get('descripcion'),
-                direccion=prop.get('direccion') or '',
-                direccion_norm=_normalize_address(prop.get('direccion') or ''),
-                precio=prop.get('precio'),
-                moneda=prop.get('moneda') or 'USD',  # type: ignore[arg-type]
-                tipo_operacion=prop.get('tipo_operacion') or 'venta',  # type: ignore[arg-type]
-                tipo_propiedad=_normalize_tipo_propiedad(prop.get('tipo_propiedad')),
-                ambientes=prop.get('ambientes'),
-                banos=prop.get('banos'),
-                cocheras=prop.get('cocheras'),
-                piso=prop.get('piso'),
-                expensas=prop.get('expensas'),
-                amenities=prop.get('amenities') or [],
-                m2_total=prop.get('m2'),
-                fuente='googlemaps',
-                url_origen=prop.get('url_ficha') or page.get('url'),
-                confianza_extraccion=confianza,
-            ))
-
-        # A single-property page (a listing detail/ficha) owns ALL its images.
-        # On multi-property pages the page-level pool mixes every card's photos in
-        # network-arrival order, so positional assignment shuffles galleries between
-        # properties — those get their gallery from their own ficha below instead.
-        if len(page_props) == 1 and page_images:
-            page_props[0].imagenes = page_images[:20]
-
-        results.extend(page_props)
+    batches = await asyncio.gather(*(extract(page) for page in pages))
+    results: list[NormalizedProperty] = [prop for batch in batches for prop in batch]
 
     # Fetch each property's real gallery from its detail page. Only fichas the LLM
     # linked explicitly qualify; the listing page itself would re-yield the mixed pool.
@@ -1051,11 +1244,10 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
     pending = [p for p in results
                if len(p.imagenes) < 4 and p.url_origen and p.url_origen not in scraped_urls]
     if pending:
-        await adispatch_custom_event('progress', {
-            'event': 'progress', 'source': 'extraccion', 'status': 'running',
-            'count': len(results),
-            'message': f'Buscando fotos de {len(pending)} propiedades...',
-        }, config=config)
+        # `done == total`: las páginas ya están todas analizadas, esto es la
+        # cola de fotos. Si mandáramos otro par de números la barra retrocedería.
+        await emit('running', total_pages, len(results),
+                   f'Buscando fotos de {len(pending)} propiedades...')
         ficha_urls = list(dict.fromkeys(p.url_origen for p in pending))[:30]
         try:
             galleries = await harvest_page_images(ficha_urls)
@@ -1067,11 +1259,7 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
                 p.imagenes = gallery[:20]
 
     if total_pages:
-        await adispatch_custom_event('progress', {
-            'event': 'progress', 'source': 'extraccion', 'status': 'done',
-            'count': len(results),
-            'message': f'{len(results)} propiedades extraídas',
-        }, config=config)
+        await emit('done', total_pages, len(results), f'{len(results)} propiedades extraídas')
     return {'website_properties': results}
 
 
@@ -1133,6 +1321,9 @@ async def run_instagram_scraper(state: dict[str, Any], config: RunnableConfig) -
 
     try:
         raws = await service.scrape_instagram_profile(handle, on_progress)
+    except ApifyBudgetExceeded as exc:
+        await _announce_budget_stop(exc, state.get('job_id'), config)
+        return {'instagram_posts': []}
     except Exception as exc:
         await adispatch_custom_event('error', {
             'event': 'error', 'source': f'instagram:{handle}', 'message': str(exc), 'recoverable': True,

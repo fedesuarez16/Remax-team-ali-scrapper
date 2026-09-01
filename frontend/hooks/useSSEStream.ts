@@ -24,7 +24,15 @@ export type Property = {
   agente_email?: string | null
 }
 export type SourceStatus = 'pending' | 'running' | 'done' | 'error'
-export type ProgressMap = Record<string, { status: SourceStatus; count: number; message: string }>
+/** `done`/`total` sólo vienen en las fuentes que trabajan sobre un universo
+ * conocido — `inmobiliarias` (cuántos sitios de los seleccionados ya se
+ * scrapearon) y `extraccion` (cuántas páginas ya se analizaron). El resto de
+ * los portales no sabe su total de antemano y los deja en undefined. */
+export type SourceProgress = {
+  status: SourceStatus; count: number; message: string
+  done?: number; total?: number
+}
+export type ProgressMap = Record<string, SourceProgress>
 
 export type Message =
   | { id: string; type: 'user'; text: string }
@@ -70,10 +78,13 @@ export function useSSEStream() {
 
   useEffect(() => () => close(), [close])
 
-  const upsertProgress = useCallback((source: string, status: SourceStatus, count: number, message: string) => {
+  const upsertProgress = useCallback((
+    source: string, status: SourceStatus, count: number, message: string,
+    done?: number, total?: number,
+  ) => {
     setMessages((prev) => prev.map((m) =>
       m.id === progressMsgId.current && m.type === 'progress'
-        ? { ...m, progress: { ...m.progress, [source]: { status, count, message } } }
+        ? { ...m, progress: { ...m.progress, [source]: { status, count, message, done, total } } }
         : m
     ))
   }, [])
@@ -109,7 +120,7 @@ export function useSSEStream() {
 
     es.addEventListener('progress', (e) => {
       const d = JSON.parse((e as MessageEvent).data)
-      upsertProgress(d.source, d.status, d.count, d.message)
+      upsertProgress(d.source, d.status, d.count, d.message, d.done, d.total)
     })
 
     es.addEventListener('property_batch', (e) => {
@@ -226,6 +237,24 @@ export function useSSEStream() {
   ) => {
     setIsStreaming(true)
 
+    // Burbuja NUEVA, abajo de la tarjeta de inmobiliarias.
+    //
+    // Antes el resume seguía actualizando la burbuja de la fase 1, que quedó
+    // ARRIBA del selector de inmobiliarias. El usuario tildaba 260, apretaba
+    // Continuar, y se quedaba mirando la tarjeta con el spinner "Procesando..."
+    // mientras la barra avanzaba fuera de pantalla, scrolleada hacia arriba:
+    // desde su lugar, la búsqueda no mostraba absolutamente nada.
+    const pid = crypto.randomUUID()
+    progressMsgId.current = pid
+    setMessages((p) => [...p, {
+      id: pid, type: 'progress',
+      progress: {
+        inmobiliarias: { status: 'running', count: 0, message: 'Preparando inmobiliarias...' },
+      },
+      matchedCount: matchedCountRef.current,
+      totalCount: totalCountRef.current,
+    }])
+
     // POST /resume returns a StreamingResponse — consume it with fetch
     let resp: Response
     try {
@@ -248,7 +277,7 @@ export function useSSEStream() {
       if (!line.startsWith('data:')) return
       try {
         const d = JSON.parse(line.slice(5).trim())
-        if (d.event === 'progress') upsertProgress(d.source, d.status, d.count, d.message)
+        if (d.event === 'progress') upsertProgress(d.source, d.status, d.count, d.message, d.done, d.total)
         else if (d.event === 'property_batch')
           addMatched(d.count, d.total)
         else if (d.event === 'agent_message')
