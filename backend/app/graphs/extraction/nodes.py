@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import Counter
 from typing import Any
 
@@ -28,6 +29,7 @@ from app.services.llm_costs import (
     SCOPE_EXTRACT_INSTAGRAM,
     SCOPE_EXTRACT_WEBSITE,
     SCOPE_SEARCH_PARSE,
+    llm_budget_exhausted,
     record_llm_usage,
 )
 from app.services.zona import (
@@ -54,6 +56,10 @@ _log = logging.getLogger(__name__)
 # hermanas terminaron. Es un dict de proceso, igual que `_graph_tasks` en la
 # capa de API, y se limpia solo cuando el job llega al total.
 _website_semaphore: asyncio.Semaphore | None = None
+# Instagram tiene el suyo aparte: cada unidad ahí es un RUN DE APIFY que pollea
+# hasta 300 s, no un GET. Compartir el tope con los sitios web dejaría a un
+# perfil lento ocupando un lugar que le hace falta a un sitio.
+_instagram_semaphore: asyncio.Semaphore | None = None
 _website_progress: dict[str, dict[str, int]] = {}
 
 # Jobs que ya avisaron que se quedaron sin presupuesto de Apify. Cuando el tope
@@ -68,9 +74,14 @@ _budget_notified: set[str] = set()
 _BUDGET_NOTICE_MEMORY = 512
 
 
-def _claim_budget_notice(job_id: str | None) -> bool:
-    """True sólo para la PRIMERA rama de este job que se queda sin presupuesto."""
-    key = job_id or ''
+def _claim_budget_notice(job_id: str | None, kind: str = 'apify') -> bool:
+    """True sólo para la PRIMERA rama de este job que se queda sin presupuesto.
+
+    `kind` distingue quedarse sin créditos de Apify de quedarse sin tokens de
+    Anthropic: son dos hechos distintos y el operador necesita enterarse de los
+    dos. Con la llave sólo en el job, el primero silenciaba al segundo.
+    """
+    key = f'{kind}:{job_id or ""}'
     if key in _budget_notified:
         return False
     if len(_budget_notified) >= _BUDGET_NOTICE_MEMORY:
@@ -89,11 +100,31 @@ async def _announce_budget_stop(
     "se agotó el presupuesto" a secas no le dice al usuario si subir el tope o
     achicar la zona.
     """
-    if not _claim_budget_notice(job_id):
+    if not _claim_budget_notice(job_id, 'apify'):
         return
     await adispatch_custom_event('progress', {
         'event': 'progress', 'source': 'apify_budget', 'status': 'done', 'count': 0,
         'message': f'Tope de gasto alcanzado ({exc}). Sigo con lo que encontré hasta acá.',
+    }, config=config)
+
+
+async def _announce_llm_budget_stop(job_id: str | None, config: RunnableConfig) -> None:
+    """Avisa que se acabó el presupuesto de tokens, una vez por búsqueda.
+
+    Como `progress` y no `error` por lo mismo que el de Apify: la búsqueda
+    gastó lo que se le dijo que podía gastar. Lo extraído hasta acá ya está en
+    la base — cada página se persiste apenas sale — así que el corte no
+    descarta nada de lo que se pagó.
+    """
+    if not _claim_budget_notice(job_id, 'llm'):
+        return
+    cap = settings.LLM_MAX_USD_PER_SEARCH
+    await adispatch_custom_event('progress', {
+        'event': 'progress', 'source': 'llm_budget', 'status': 'done', 'count': 0,
+        'message': (
+            f'Alcancé el tope de USD {cap} en análisis con IA. '
+            'Dejo de analizar páginas nuevas y te muestro lo que ya extraje.'
+        ),
     }, config=config)
 
 
@@ -102,6 +133,13 @@ def _get_website_semaphore() -> asyncio.Semaphore:
     if _website_semaphore is None:
         _website_semaphore = asyncio.Semaphore(max(1, settings.WEBSITE_SCRAPE_CONCURRENCY))
     return _website_semaphore
+
+
+def _get_instagram_semaphore() -> asyncio.Semaphore:
+    global _instagram_semaphore
+    if _instagram_semaphore is None:
+        _instagram_semaphore = asyncio.Semaphore(max(1, settings.INSTAGRAM_SCRAPE_CONCURRENCY))
+    return _instagram_semaphore
 
 
 def _reset_website_progress(job_id: str | None, total: int) -> None:
@@ -1132,6 +1170,102 @@ _WEBSITE_SYSTEM_PROMPT = (
 )
 
 
+# ── Filtro previo al LLM ──────────────────────────────────────────────────────
+#
+# `_scrape_website_direct` trae la home de cada inmobiliaria más hasta 5
+# sub-páginas, y TODAS iban a Haiku a precio completo: "quiénes somos",
+# contacto, tasaciones, política de privacidad. El system prompt lo admite
+# ("Si no hay propiedades en la página, devolvé propiedades=[]") — esa respuesta
+# vacía cuesta lo mismo que una con veinte propiedades, porque lo que se paga es
+# el texto de ENTRADA, que es el 77% del costo de la llamada.
+#
+# El sesgo es explícito y va hacia mandar de más: un falso positivo cuesta una
+# llamada, que es exactamente lo que se paga hoy; un falso negativo pierde una
+# propiedad real. Por eso alcanza con CUALQUIERA de las dos señales.
+
+# Un precio publicado: moneda pegada a un número de tres dígitos o más. Toda
+# ficha con precio lo escribe así; ningún teléfono ni año lleva moneda adelante.
+_PRECIO_RE = re.compile(r'(?:u\$s|us\$|usd|ars|\$)\s*\d[\d.,]{2,}', re.IGNORECASE)
+
+# Vocabulario que una ficha usa y una página institucional no. Se piden DOS
+# DISTINTOS: uno solo aparece en cualquier menú o pie de página ("departamentos,
+# casas y terrenos"), y ese menú está en todas las páginas del sitio.
+_TERMINOS_INMOBILIARIOS = (
+    'ambiente', 'monoambiente', 'dormitorio', 'cochera', 'quincho', 'balcon',
+    'balcón', 'baño', 'bano', 'm2', 'm²', 'metros cuadrados', 'cubiertos',
+    'apto credito', 'apto crédito', 'expensas', 'contrafrente', 'duplex', 'dúplex',
+)
+
+_MIN_PAGE_CHARS = 100
+
+
+def page_is_worth_extracting(text: str | None) -> bool:
+    """¿Vale la pena pagarle al LLM por esta página?
+
+    Ver el bloque de arriba para el sesgo. `False` sólo cuando la página no
+    muestra NINGUNA señal de listar propiedades — ahí la llamada sólo puede
+    devolver `[]`, y se paga igual.
+    """
+    if not text or len(text.strip()) < _MIN_PAGE_CHARS:
+        return False
+    bajo = text.lower()
+    if _PRECIO_RE.search(bajo):
+        return True
+    return sum(1 for t in _TERMINOS_INMOBILIARIOS if t in bajo) >= 2
+
+
+# ── Números que vienen de un LLM ─────────────────────────────────────────────
+#
+# El tool schema pide un entero y el modelo igual manda '<UNKNOWN>', 'N/A', 'PB'
+# o ''. No es un caso raro: es lo que hace un LLM cuando el dato no está en la
+# página. Estos valores entraban CRUDOS a `NormalizedProperty` y Pydantic los
+# rechazaba — la excepción subía por el nodo, LangGraph la propagaba y la
+# corrida entera moría (job 342cc50e: 552 sitios tirados por un `piso` de un
+# post de Instagram).
+#
+# Un campo OPCIONAL que no se pudo leer vale None. Nunca una excepción.
+
+_NUM_RE = re.compile(r'\d+(?:[.,]\d+)*')
+
+
+def _llm_float(value: Any) -> float | None:
+    """Número opcional de una respuesta del LLM. Ilegible → None.
+
+    Lee el primer número del texto, así '3°' es 3 y '2 ambientes' son 2 — el
+    dato está ahí y tirarlo por el sufijo sería perderlo. Los separadores de
+    miles argentinos ('120.000') se resuelven por posición: un grupo de
+    exactamente 3 dígitos después del último separador es miles, no decimales.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value >= 0 else None
+    texto = str(value)
+    m = _NUM_RE.search(texto)
+    if not m:
+        return None
+    # Un signo pegado al número lo descarta entero. '-3' de piso es un subsuelo,
+    # y devolver 3 diría "tercer piso" — un dato equivocado es peor que ninguno.
+    if m.start() and texto[m.start() - 1] == '-':
+        return None
+    crudo = m.group(0)
+    cabeza, sep, cola = crudo.rpartition('.') if '.' in crudo else crudo.rpartition(',')
+    if sep and len(cola) != 3:
+        crudo = f'{cabeza.replace(".", "").replace(",", "")}.{cola}'
+    else:
+        crudo = crudo.replace('.', '').replace(',', '')
+    try:
+        return float(crudo)
+    except ValueError:
+        return None
+
+
+def _llm_int(value: Any) -> int | None:
+    """Entero opcional de una respuesta del LLM. Ilegible → None."""
+    n = _llm_float(value)
+    return None if n is None else int(n)
+
+
 async def _extract_page_properties(
     page: dict[str, str],
     sb: Any,
@@ -1181,26 +1315,34 @@ async def _extract_page_properties(
         filled = sum(1 for f in ['precio', 'tipo_operacion', 'tipo_propiedad', 'ambientes', 'm2', 'direccion']
                      if prop.get(f) is not None)
         confianza = min(1.0, filled / 6)
-        page_props.append(NormalizedProperty(
-            titulo=prop.get('titulo') or '',
-            descripcion=prop.get('descripcion'),
-            direccion=prop.get('direccion') or '',
-            direccion_norm=_normalize_address(prop.get('direccion') or ''),
-            precio=prop.get('precio'),
-            moneda=prop.get('moneda') or 'USD',  # type: ignore[arg-type]
-            tipo_operacion=prop.get('tipo_operacion') or 'venta',  # type: ignore[arg-type]
-            tipo_propiedad=_normalize_tipo_propiedad(prop.get('tipo_propiedad')),
-            ambientes=prop.get('ambientes'),
-            banos=prop.get('banos'),
-            cocheras=prop.get('cocheras'),
-            piso=prop.get('piso'),
-            expensas=prop.get('expensas'),
-            amenities=prop.get('amenities') or [],
-            m2_total=prop.get('m2'),
-            fuente='googlemaps',
-            url_origen=prop.get('url_ficha') or page.get('url'),
-            confianza_extraccion=confianza,
-        ))
+        # El docstring de esta función prometía "nunca propaga", pero el `try`
+        # de arriba sólo envolvía la llamada HTTP: armar los modelos quedaba
+        # afuera, y una propiedad mala mataba la página entera — y con ella la
+        # búsqueda. Ahora la promesa se cumple.
+        try:
+            page_props.append(NormalizedProperty(
+                titulo=prop.get('titulo') or '',
+                descripcion=prop.get('descripcion'),
+                direccion=prop.get('direccion') or '',
+                direccion_norm=_normalize_address(prop.get('direccion') or ''),
+                precio=_llm_float(prop.get('precio')),
+                moneda=prop.get('moneda') or 'USD',  # type: ignore[arg-type]
+                tipo_operacion=prop.get('tipo_operacion') or 'venta',  # type: ignore[arg-type]
+                tipo_propiedad=_normalize_tipo_propiedad(prop.get('tipo_propiedad')),
+                ambientes=_llm_int(prop.get('ambientes')),
+                banos=_llm_int(prop.get('banos')),
+                cocheras=_llm_int(prop.get('cocheras')),
+                piso=_llm_int(prop.get('piso')),
+                expensas=_llm_float(prop.get('expensas')),
+                amenities=prop.get('amenities') or [],
+                m2_total=_llm_float(prop.get('m2')),
+                fuente='googlemaps',
+                url_origen=prop.get('url_ficha') or page.get('url'),
+                confianza_extraccion=confianza,
+            ))
+        except Exception as exc:
+            _log.warning('propiedad descartada de %s: %s', page.get('url'), exc)
+            continue
 
     # A single-property page (a listing detail/ficha) owns ALL its images.
     # On multi-property pages the page-level pool mixes every card's photos in
@@ -1229,6 +1371,10 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
     # Anthropic (que sería el error siguiente).
     sem = asyncio.Semaphore(max(1, settings.WEBSITE_EXTRACT_CONCURRENCY))
     analyzed = 0
+    # Páginas que el filtro previo descartó sin pagarlas. Se reporta al cerrar:
+    # un filtro que trabaja en silencio es un filtro que nadie va a poder
+    # ajustar el día que descarte de más.
+    skipped = 0
 
     async def emit(status: str, done: int, count: int, message: str) -> None:
         await adispatch_custom_event('progress', {
@@ -1237,16 +1383,68 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
             'message': message,
         }, config=config)
 
-    async def extract(page: dict[str, str]) -> list[NormalizedProperty]:
+    filters = state.get('filters')
+
+    async def persist(props: list[NormalizedProperty]) -> None:
+        """Guarda lo de ESTA página apenas sale, sin esperar al fan-in.
+
+        Antes la fase entera se escribía en `save_website_properties`, el nodo
+        siguiente: hasta que las ~1500 páginas no terminaban no había una sola
+        fila en la base, y cortar ahí — el botón de detener, un deploy, un
+        timeout — tiraba minutos de trabajo ya pagado.
+
+        Este loop ya escribía el ledger de tokens por página por exactamente
+        este motivo ("a crash mid-run keeps the rows for the pages already paid
+        for"). El razonamiento estaba hecho para el GASTO; esto lo aplica a las
+        propiedades, que es lo que el usuario espera.
+
+        Best-effort a propósito: el guardado incremental es una mejora de
+        resiliencia y no puede convertirse en un punto nuevo de falla total.
+        Una página que no se pueda persistir no se lleva puestas a las otras —
+        `save_website_properties` la rescata al cerrar, porque el nodo sigue
+        devolviendo la lista completa.
+        """
+        if not props:
+            return
+        try:
+            await _upsert_properties(sb, props, job_id)
+            matched, _ = _split_by_criteria(props, filters)
+            await _link_job_properties(sb, props, job_id, matched)
+        except Exception as exc:
+            _log.warning('guardado incremental falló (se reintenta al cerrar): %s', exc)
+
+    async def advance() -> None:
+        """Avanza el contador y reporta cada 5. Lo comparten la página que se
+        analiza y la que se descarta: si la descartada no avanzara, una
+        búsqueda que filtró 500 de 1500 quedaría clavada en 1000/1500 para
+        siempre."""
         nonlocal analyzed
-        async with sem:
-            props = await _extract_page_properties(page, sb, job_id)
         analyzed += 1
         # Un evento cada 5 páginas: con 1500 páginas, uno por página es ruido
         # que el cliente no llega a renderizar. El último siempre se manda.
         if analyzed % 5 == 0 or analyzed == total_pages:
             await emit('running', analyzed, analyzed,
                        f'Analizando páginas {analyzed}/{total_pages}...')
+
+    async def extract(page: dict[str, str]) -> list[NormalizedProperty]:
+        nonlocal skipped
+        # ANTES del semáforo: una página que no se va a analizar no tiene por
+        # qué ocupar un lugar de la concurrencia ni esperar a que se libere.
+        if not page_is_worth_extracting(page.get('text', '')):
+            skipped += 1
+            await advance()
+            return []
+        async with sem:
+            # El corte va ACÁ, antes de la llamada, y no cancelando el `gather`:
+            # cancelarlo tiraría también las páginas en vuelo, que ya están
+            # pagadas. La que llega con el presupuesto agotado sale vacía y las
+            # demás drenan igual de rápido, sin gastar un token.
+            if llm_budget_exhausted():
+                await _announce_llm_budget_stop(job_id, config)
+                return []
+            props = await _extract_page_properties(page, sb, job_id)
+        await persist(props)
+        await advance()
         return props
 
     if total_pages:
@@ -1266,7 +1464,11 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
         # cola de fotos. Si mandáramos otro par de números la barra retrocedería.
         await emit('running', total_pages, len(results),
                    f'Buscando fotos de {len(pending)} propiedades...')
-        ficha_urls = list(dict.fromkeys(p.url_origen for p in pending))[:30]
+        ficha_urls = list(dict.fromkeys(p.url_origen for p in pending))
+        # El tope era un `30` clavado acá: con 300 propiedades, 270 salían sin
+        # una sola foto. Ahora es un knob, y `0` significa sin tope.
+        if settings.FICHA_IMAGE_HARVEST_MAX > 0:
+            ficha_urls = ficha_urls[:settings.FICHA_IMAGE_HARVEST_MAX]
         try:
             galleries = await harvest_page_images(ficha_urls)
         except Exception:
@@ -1277,7 +1479,10 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
                 p.imagenes = gallery[:20]
 
     if total_pages:
-        await emit('done', total_pages, len(results), f'{len(results)} propiedades extraídas')
+        cierre = f'{len(results)} propiedades extraídas'
+        if skipped:
+            cierre += f' · {skipped} páginas sin propiedades, no analizadas'
+        await emit('done', total_pages, len(results), cierre)
     return {'website_properties': results}
 
 
@@ -1338,7 +1543,10 @@ async def run_instagram_scraper(state: dict[str, Any], config: RunnableConfig) -
         }, config=config)
 
     try:
-        raws = await service.scrape_instagram_profile(handle, on_progress)
+        # Los N `Send` ya existen todos; el semáforo decide cuántos runs de
+        # Apify corren a la vez. Mismo criterio que el fan-out de sitios web.
+        async with _get_instagram_semaphore():
+            raws = await service.scrape_instagram_profile(handle, on_progress)
     except ApifyBudgetExceeded as exc:
         await _announce_budget_stop(exc, state.get('job_id'), config)
         return {'instagram_posts': []}
@@ -1366,6 +1574,11 @@ async def extract_instagram_properties_llm(state: ScrapingState, config: Runnabl
         caption = post.get('titulo', '')
         if not caption or len(caption) < 20:
             continue
+        # Instagram come del MISMO dólar que los sitios web: el presupuesto es
+        # de la búsqueda, no de cada loop.
+        if llm_budget_exhausted():
+            await _announce_llm_budget_stop(job_id, config)
+            break
         try:
             msg = await _client.messages.create(  # type: ignore[call-overload]
                 model=MODEL,
@@ -1393,26 +1606,34 @@ async def extract_instagram_properties_llm(state: ScrapingState, config: Runnabl
         if not tool_use or not tool_use.input.get('es_propiedad'):
             continue
         data = tool_use.input
-        results.append(NormalizedProperty(
-            titulo=data.get('descripcion', caption)[:120],
-            descripcion=data.get('descripcion') or caption,
-            direccion=data.get('direccion_zona') or '',
-            direccion_norm=_normalize_address(data.get('direccion_zona') or ''),
-            precio=data.get('precio'),
-            moneda=data.get('moneda') or 'USD',  # type: ignore[arg-type]
-            tipo_operacion=data.get('tipo_operacion') or 'venta',  # type: ignore[arg-type]
-            tipo_propiedad=_normalize_tipo_propiedad(data.get('tipo_propiedad')),
-            ambientes=data.get('ambientes'),
-            banos=data.get('banos'),
-            cocheras=data.get('cocheras'),
-            piso=data.get('piso'),
-            expensas=data.get('expensas'),
-            m2_total=data.get('m2'),
-            amenities=data.get('amenities') or [],
-            imagenes=post.get('imagenes') or [],
-            fuente='instagram',
-            url_origen=post.get('url_origen'),
-        ))
+        # Mismo contrato que el loop de sitios web: un post que no se puede
+        # armar vale cero posts, no cero búsqueda. La coerción de arriba cubre
+        # lo conocido; esto cubre lo que todavía no vimos.
+        try:
+            prop_ig = NormalizedProperty(
+                titulo=data.get('descripcion', caption)[:120],
+                descripcion=data.get('descripcion') or caption,
+                direccion=data.get('direccion_zona') or '',
+                direccion_norm=_normalize_address(data.get('direccion_zona') or ''),
+                precio=_llm_float(data.get('precio')),
+                moneda=data.get('moneda') or 'USD',  # type: ignore[arg-type]
+                tipo_operacion=data.get('tipo_operacion') or 'venta',  # type: ignore[arg-type]
+                tipo_propiedad=_normalize_tipo_propiedad(data.get('tipo_propiedad')),
+                ambientes=_llm_int(data.get('ambientes')),
+                banos=_llm_int(data.get('banos')),
+                cocheras=_llm_int(data.get('cocheras')),
+                piso=_llm_int(data.get('piso')),
+                expensas=_llm_float(data.get('expensas')),
+                m2_total=_llm_float(data.get('m2')),
+                amenities=data.get('amenities') or [],
+                imagenes=post.get('imagenes') or [],
+                fuente='instagram',
+                url_origen=post.get('url_origen'),
+            )
+        except Exception as exc:
+            _log.warning('post de Instagram descartado (%s): %s', post.get('url_origen'), exc)
+            continue
+        results.append(prop_ig)
     if total_posts:
         await adispatch_custom_event('progress', {
             'event': 'progress', 'source': 'extraccion:instagram', 'status': 'done',

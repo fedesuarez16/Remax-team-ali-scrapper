@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { ArrowRight, Check } from 'lucide-react'
+import { ArrowRight, Check, Square } from 'lucide-react'
 import { ApifyCostChip } from '@/components/cost/ApifyCostChip'
 import type { ApifyCostBreakdown } from '@/lib/apifyCost'
 
@@ -10,6 +10,7 @@ export function SearchDoneCard({
   insideCount = null,
   apifyCostUsd = null,
   apifyCostBreakdown = null,
+  cancelled = false,
 }: {
   jobId: string
   matchedCount: number
@@ -25,6 +26,10 @@ export function SearchDoneCard({
   // backend no lo informó y no se muestra nada.
   apifyCostUsd?: number | null
   apifyCostBreakdown?: ApifyCostBreakdown | null
+  // El usuario la detuvo. Los resultados son los que había hasta ese momento,
+  // así que la tarjeta no puede decir "completada" — sería mentirle sobre si
+  // vio todo lo que había.
+  cancelled?: boolean
 }) {
   const count = insideCount ?? matchedCount
   const total = insideCount != null ? count : Math.max(totalCount ?? count, count)
@@ -34,9 +39,13 @@ export function SearchDoneCard({
     <div className="w-full max-w-sm space-y-3 rounded-2xl rounded-tl-sm border border-border bg-card p-4">
       <div className="flex items-center gap-2">
         <div className="flex size-5 shrink-0 items-center justify-center rounded-full bg-foreground">
-          <Check className="size-3 text-background" strokeWidth={3} />
+          {cancelled
+            ? <Square className="size-2.5 text-background" strokeWidth={3} />
+            : <Check className="size-3 text-background" strokeWidth={3} />}
         </div>
-        <span className="text-sm font-medium text-foreground">Búsqueda completada</span>
+        <span className="text-sm font-medium text-foreground">
+          {cancelled ? 'Búsqueda detenida' : 'Búsqueda completada'}
+        </span>
         <ApifyCostChip
           costUsd={apifyCostUsd}
           breakdown={apifyCostBreakdown}

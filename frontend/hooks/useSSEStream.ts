@@ -22,6 +22,8 @@ export type Property = {
   enviada_at?: string | null
   /** Email del agente del equipo a cuyo nombre se generó la Ficha Propio. */
   agente_email?: string | null
+  /** Carpeta de la pestaña Ficha Propio (cliente, búsqueda…). null = sin carpeta. */
+  ficha_folder_id?: string | null
 }
 export type SourceStatus = 'pending' | 'running' | 'done' | 'error'
 /** `done`/`total` sólo vienen en las fuentes que trabajan sobre un universo
@@ -44,6 +46,11 @@ export type Message =
       // backend. `0` = salió gratis (caché o fuentes directas); `null` =
       // desconocido (backend anterior a este campo) y no se muestra.
       apifyCostUsd: number | null; apifyCostBreakdown: ApifyCostBreakdown | null
+      /** La búsqueda se detuvo a pedido del usuario. Los resultados son los que
+       * había hasta ese momento — completos hasta donde llegó, no parciales por
+       * una falla. Cambia el copy, no el camino: una búsqueda detenida cierra
+       * por `done` como cualquier otra. */
+      cancelled?: boolean
     }
   | {
       id: string; type: 'agencies'; agencies: Agency[]
@@ -61,6 +68,7 @@ type DonePayload = {
   job_id?: string
   apify_cost_usd?: number | null
   apify_cost_breakdown?: ApifyCostBreakdown | null
+  cancelled?: boolean
 }
 
 export function useSSEStream() {
@@ -71,6 +79,9 @@ export function useSSEStream() {
   const progressMsgId = useRef<string | null>(null)
   const matchedCountRef = useRef(0)
   const totalCountRef = useRef(0)
+  // El job que está corriendo AHORA. `lastJobId` no sirve para esto: se setea
+  // recién en el `done`, y detener sólo tiene sentido antes de que eso pase.
+  const runningJobId = useRef<string | null>(null)
 
   const close = useCallback(() => {
     esRef.current?.close(); esRef.current = null; setIsStreaming(false)
@@ -112,7 +123,31 @@ export function useSSEStream() {
     // queda para "el campo no vino" y ahí no se muestra nada.
     apifyCostUsd: typeof d.apify_cost_usd === 'number' ? d.apify_cost_usd : null,
     apifyCostBreakdown: d.apify_cost_breakdown ?? null,
+    cancelled: d.cancelled === true,
   }), [])
+
+  /** Detiene la búsqueda en curso y conserva lo encontrado hasta acá.
+   *
+   * No cierra el stream: el backend contesta el corte por el MISMO stream con
+   * un `done` que trae `cancelled: true`, y ese camino ya sabe armar el
+   * mensaje final y traer las propiedades. Cerrarlo desde acá sería quedarse
+   * sin el costo de la búsqueda y sin el conteo final.
+   *
+   * Las propiedades ya están en la base — se persisten a medida que se
+   * extraen — así que detener no descarta nada de lo scrapeado.
+   */
+  const stopScraping = useCallback(async () => {
+    const jobId = runningJobId.current
+    if (!jobId) return
+    try {
+      await fetch(`${API}/api/v1/scraping/${jobId}/cancel`, { method: 'POST' })
+    } catch {
+      // El backend puede haber cerrado ya. Si el stream no contesta, el
+      // `finally` del lector y el `close()` del EventSource igual bajan
+      // `isStreaming` — el usuario no queda con un botón muerto.
+      close()
+    }
+  }, [close])
 
   const openSSE = useCallback((url: string) => {
     const es = new EventSource(url)
@@ -217,6 +252,7 @@ export function useSSEStream() {
         return
       }
       jobId = data.job_id
+      runningJobId.current = jobId
     } catch { setIsStreaming(false); return }
 
     const pid = crypto.randomUUID()
@@ -236,6 +272,10 @@ export function useSSEStream() {
     selectedManualSourceIds?: string[]
   ) => {
     setIsStreaming(true)
+    // La fase 2 es la larga — el fan-out de inmobiliarias — o sea justo donde
+    // el botón de detener hace falta. Sin esto, resumir dejaba el botón sin
+    // job al que apuntar.
+    runningJobId.current = jobId
 
     // Burbuja NUEVA, abajo de la tarjeta de inmobiliarias.
     //
@@ -306,5 +346,5 @@ export function useSSEStream() {
     }
   }, [upsertProgress, addMatched, doneMessage])
 
-  return { messages, isStreaming, lastJobId, startScraping, resumeScraping }
+  return { messages, isStreaming, lastJobId, startScraping, resumeScraping, stopScraping }
 }

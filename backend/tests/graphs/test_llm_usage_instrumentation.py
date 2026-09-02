@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from app.graphs.extraction import nodes
+from tests.conftest import listing_text
 from app.services.llm_costs import (
     SCOPE_EXTRACT_INSTAGRAM,
     SCOPE_EXTRACT_WEBSITE,
@@ -164,7 +165,7 @@ async def test_parse_query_survives_a_missing_supabase(
 
 
 def _page(url: str, text_len: int = 500) -> dict[str, Any]:
-    return {'url': url, 'text': 'x' * text_len, 'images': []}
+    return {'url': url, 'text': listing_text(text_len), 'images': []}
 
 
 async def test_website_extraction_books_one_row_per_analyzed_page(

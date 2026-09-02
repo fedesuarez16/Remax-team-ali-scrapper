@@ -1,9 +1,10 @@
 'use client'
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Loader2, Send } from 'lucide-react'
+import { Loader2, MapPin, Send } from 'lucide-react'
 import { SelectionBar } from '@/components/properties/SelectionBar'
 import { AgenteSelector } from '@/components/ficha/AgenteSelector'
+import { SeleccionMapModal } from '@/components/map/SeleccionMapModal'
 import type { Property } from '@/hooks/useSSEStream'
 import { AGENTES, agenteByEmail, asignarAgente, enrichFicha, guardarSeleccion, marcarEnviadas } from '@/lib/ficha'
 
@@ -35,6 +36,9 @@ export function EnviarFichasBar({ seleccionadas, ids, onClear, onDeleted, onEnvi
   const [agenteEmail, setAgenteEmail] = useState<string>(AGENTES[0].email)
   const [preparing, setPreparing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [mapaAbierto, setMapaAbierto] = useState(false)
+
+  const ubicadas = seleccionadas.filter((p) => p.lat != null && p.lng != null).length
 
   const cerrarPaso = () => {
     setEligiendoAgente(false)
@@ -97,6 +101,26 @@ export function EnviarFichasBar({ seleccionadas, ids, onClear, onDeleted, onEnvi
         }}
         onDeleted={onDeleted}
       >
+        {/* Ver la selección ubicada antes de decidir qué mandar. Modal, no
+            navegación: irse a /map perdería la selección a mitad de camino. */}
+        <button
+          onClick={() => setMapaAbierto(true)}
+          disabled={preparing}
+          title={
+            ubicadas === 0
+              ? 'Ninguna de las seleccionadas tiene ubicación todavía'
+              : `${ubicadas} de ${seleccionadas.length} con ubicación`
+          }
+          className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition hover:bg-muted disabled:opacity-50"
+        >
+          <MapPin className="size-3.5" />
+          Ver en mapa
+          {ubicadas < seleccionadas.length && (
+            <span className="font-mono text-[10px] tabular-nums text-muted-foreground">
+              {ubicadas}/{seleccionadas.length}
+            </span>
+          )}
+        </button>
         {eligiendoAgente && (
           <button
             onClick={cerrarPaso}
@@ -119,6 +143,8 @@ export function EnviarFichasBar({ seleccionadas, ids, onClear, onDeleted, onEnvi
               : 'Preparar y enviar'}
         </button>
       </SelectionBar>
+
+      {mapaAbierto && <SeleccionMapModal propiedades={seleccionadas} onClose={() => setMapaAbierto(false)} />}
     </div>
   )
 }

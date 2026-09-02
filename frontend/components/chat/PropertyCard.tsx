@@ -1,4 +1,6 @@
-import { CheckCircle2, ImageIcon, MapPin } from 'lucide-react'
+'use client'
+import { CheckCircle2, MapPin } from 'lucide-react'
+import { PropertyPhoto } from '@/components/property/PropertyPhoto'
 import type { Property } from '@/hooks/useSSEStream'
 import { operacionLabel } from '@/lib/operacion'
 
@@ -82,17 +84,12 @@ export function PropertyCard({ p }: { p: Property }) {
 
       {/* Image */}
       <div className="relative aspect-[4/3] overflow-hidden bg-muted">
-        {p.imagenes?.[0] ? (
-          <img
-            src={p.imagenes[0]}
-            alt={p.titulo ?? p.direccion}
-            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center bg-muted">
-            <ImageIcon className="size-8 text-muted-foreground/40" />
-          </div>
-        )}
+        <PropertyPhoto
+          src={p.imagenes?.[0]}
+          alt={p.titulo ?? p.direccion}
+          imgClassName="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+          boxClassName="h-full w-full"
+        />
         {/* Source badge overlay */}
         <div className="absolute right-2 top-2">
           <span className="inline-flex items-center rounded-full border border-border bg-background/90 px-2 py-0.5 text-xs font-medium text-foreground backdrop-blur-sm">

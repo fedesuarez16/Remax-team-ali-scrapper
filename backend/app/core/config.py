@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     # sockets antes de terminar. El tope NO recorta resultados: sólo pone los
     # sitios en fila.
     WEBSITE_SCRAPE_CONCURRENCY: int = 12
+    # Lo mismo para Instagram, que había quedado afuera de esa lección. Cada
+    # perfil es un RUN DE APIFY que pollea hasta 300 s, y `route_after_review`
+    # emite uno por inmobiliaria con handle: con 390 agencias eran 390 runs
+    # simultáneos y la búsqueda parecía colgada esperándolos a todos.
+    # Más bajo que el de sitios web porque acá cada unidad es un actor pago,
+    # no un GET. `0` NO significa "sin tope": se lee como 1.
+    INSTAGRAM_SCRAPE_CONCURRENCY: int = 6
     # Los sitios de inmobiliarias salen por el MISMO proxy residencial que los
     # portales (`SCRAPER_PROXY_URL`) y con UA de browser real. Antes iban con
     # `PropSearchBot/1.0` y salida directa: desde Railway (datacenter) eso es
@@ -37,6 +44,16 @@ class Settings(BaseSettings):
     # (`og:image` + `<img>`) y las fichas que quedan cortas las recupera
     # `harvest_page_images`, que rinde con presupuesto acotado.
     WEBSITE_RENDER_GALLERIES: bool = False
+    # Cuántas fichas se visitan para traerles la galería. Estaba clavado en 30
+    # dentro del nodo: una búsqueda que devuelve 300 propiedades le buscaba
+    # fotos a 30 y las otras 270 salían sin una sola imagen — que es como se
+    # veían la mayoría de los resultados.
+    #
+    # Esto NO gasta Apify ni tokens: es un GET por ficha con `httpx` (5 en
+    # paralelo) por el proxy residencial, que se factura por GB. Es la plata
+    # más barata del pipeline, pero no es gratis — de ahí que sea un knob.
+    # `0` = sin tope.
+    FICHA_IMAGE_HARVEST_MAX: int = 150
     # Segundos por request a un sitio de inmobiliaria. Por proxy residencial
     # una home tarda más que directo, pero un sitio muerto no puede comerse
     # minutos: son `1 + WEBSITE_MAX_SUBPAGES` requests por sitio.
@@ -106,6 +123,16 @@ class Settings(BaseSettings):
     # exigiría abortarlo en Apify y leer el dataset parcial.
     # `0` = sin tope, misma convención que el resto de los knobs.
     APIFY_MAX_USD_PER_SEARCH: float = 1.0
+    # Techo de tokens de Anthropic por búsqueda, hermano del de arriba. El loop
+    # de extracción corre UNA llamada a Haiku por página y el fan-in trae ~1500:
+    # medido en producción, una búsqueda venía costando ~USD 4 sin que nadie
+    # hubiera elegido ese número — lo elegía el tamaño de la zona.
+    #
+    # También BLANDO: se consulta antes de cada llamada, las que ya están en
+    # vuelo terminan. Lo extraído hasta el corte no se pierde, porque cada
+    # página se persiste apenas sale.
+    # `0` = sin tope.
+    LLM_MAX_USD_PER_SEARCH: float = 1.0
     INSTAGRAM_RESULTS_LIMIT: int = 0     # posts per agency profile; PAID per post
     AGENCY_CACHE_TTL_DAYS: int = 30      # reuse cached agencies per zona within N days (skip paid Google Maps actor)
     # MercadoLibre bloquea por IP de DATACENTER y lo hace con un 200: misma URL

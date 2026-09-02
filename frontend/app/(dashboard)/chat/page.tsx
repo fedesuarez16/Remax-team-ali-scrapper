@@ -12,7 +12,10 @@ import { DEFAULT_SELECTION, describeSelection, isSelectionEmpty, type SourceSele
 import { cn } from '@/lib/utils'
 
 function ChatPage() {
-  const { messages, isStreaming, lastJobId, startScraping, resumeScraping } = useSSEStream()
+  const { messages, isStreaming, lastJobId, startScraping, resumeScraping, stopScraping } = useSSEStream()
+  // La última burbuja de progreso del hilo: la única que puede estar viva, y
+  // por lo tanto la única que muestra el botón de detener.
+  const lastProgressId = [...messages].reverse().find((m) => m.type === 'progress')?.id
   const [input, setInput] = useState('')
   // Where to scrape. Chosen before submit and sent with POST /scraping/start;
   // the default reproduces the pre-selector behaviour (search everything).
@@ -165,7 +168,15 @@ function ChatPage() {
                   <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-foreground">
                     <Sparkles className="size-3.5 text-background" />
                   </div>
-                  <ProgressBubble progress={m.progress} matchedCount={m.matchedCount} totalCount={m.totalCount} />
+                  <ProgressBubble
+                    progress={m.progress}
+                    matchedCount={m.matchedCount}
+                    totalCount={m.totalCount}
+                    // Sólo la burbuja VIVA se puede detener. Las de búsquedas
+                    // anteriores siguen en el hilo y mostrarles el botón sería
+                    // ofrecer frenar algo que ya terminó.
+                    onStop={isStreaming && m.id === lastProgressId ? stopScraping : undefined}
+                  />
                 </div>
               )
 
@@ -195,6 +206,7 @@ function ChatPage() {
                     totalCount={m.totalCount}
                     apifyCostUsd={m.apifyCostUsd}
                     apifyCostBreakdown={m.apifyCostBreakdown}
+                    cancelled={m.cancelled}
                   />
                 </div>
               )

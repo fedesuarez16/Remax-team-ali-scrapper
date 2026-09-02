@@ -21,6 +21,7 @@ import pytest
 
 from app.core.config import settings
 from app.graphs.extraction import nodes
+from tests.conftest import listing_text
 from app.graphs.extraction.nodes import extract_website_properties_llm
 
 
@@ -39,7 +40,7 @@ class _Msg:
 
 
 def _pages(n: int) -> list[dict[str, str]]:
-    return [{'url': f'https://inmo.com/p{i}', 'text': 'x' * 200} for i in range(n)]
+    return [{'url': f'https://inmo.com/p{i}', 'text': listing_text()} for i in range(n)]
 
 
 def _stub_llm(monkeypatch, behaviour) -> None:

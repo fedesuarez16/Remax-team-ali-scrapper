@@ -1,4 +1,4 @@
-import { Check, Loader2, X, Circle } from 'lucide-react'
+import { Check, Loader2, X, Circle, Square } from 'lucide-react'
 import type { ProgressMap, SourceProgress, SourceStatus } from '@/hooks/useSSEStream'
 
 const LABEL: Record<string, string> = {
@@ -78,7 +78,15 @@ function CountedBar({ label, s }: { label: string; s: SourceProgress }) {
   )
 }
 
-export function ProgressBubble({ progress, matchedCount, totalCount = 0 }: { progress: ProgressMap; matchedCount: number; totalCount?: number }) {
+export function ProgressBubble({
+  progress, matchedCount, totalCount = 0, onStop,
+}: {
+  progress: ProgressMap; matchedCount: number; totalCount?: number
+  /** Detiene la búsqueda conservando lo encontrado. Omitido = sin botón, que
+   * es el caso de las burbujas históricas (una búsqueda ya terminada no se
+   * detiene) y el del mapa, que no tiene el hook a mano. */
+  onStop?: () => void
+}) {
   const counted = COUNTED_SOURCES
     .map((key) => [key, progress[key]] as const)
     .filter(([, s]) => s && (s.total ?? 0) > 0)
@@ -131,6 +139,19 @@ export function ProgressBubble({ progress, matchedCount, totalCount = 0 }: { pro
           </li>
         ))}
       </ul>
+
+      {onStop && (
+        <button
+          type="button"
+          onClick={onStop}
+          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-border
+                     px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors
+                     hover:bg-muted hover:text-foreground"
+        >
+          <Square className="size-3" strokeWidth={2.5} />
+          Detener y ver resultados
+        </button>
+      )}
     </div>
   )
 }

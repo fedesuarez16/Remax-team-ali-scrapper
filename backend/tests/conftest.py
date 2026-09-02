@@ -105,3 +105,21 @@ def sin_navegador_real(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(apify, '_zonaprop_via_browser', _sin_navegador)
+
+
+# ── Texto de página que el extractor acepta ──────────────────────────────────
+
+def listing_text(length: int = 500) -> str:
+    """Texto de una página de inmobiliaria que PASA el filtro previo.
+
+    Desde que existe `page_is_worth_extracting`, un `'x' * 200` no llega nunca
+    al LLM: no tiene precio ni vocabulario inmobiliario, así que el loop lo
+    descarta antes de llamar. Los fixtures que usaban relleno para simular una
+    página real pasaron a medir el filtro sin querer.
+
+    Todo test sobre el loop de extracción que necesite una página "de verdad"
+    tiene que partir de acá. `length` por debajo de 100 devuelve una página que
+    el filtro rechaza — el caso de la página demasiado corta, que ya existía.
+    """
+    unidad = 'Departamento 2 ambientes con cochera y balcon. USD 110.000. '
+    return (unidad * (length // len(unidad) + 1))[:length]

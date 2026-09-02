@@ -16,7 +16,10 @@ one thing here that goes stale: when the model changes, add its row.
 """
 from __future__ import annotations
 
+import contextvars
 import logging
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -93,6 +96,66 @@ def usage_cost_usd(model: str, usage: Any) -> float:
     return round(total, 8)
 
 
+# ── Presupuesto por búsqueda ─────────────────────────────────────────────────
+#
+# `record_llm_usage` anota contra la BASE: sirve para la factura de ayer, no
+# para frenar la de hoy. Este contador vive en memoria y se consulta ANTES de
+# cada llamada.
+#
+# En un ContextVar y no en el estado del grafo por lo mismo que el ledger de
+# Apify: el loop de extracción abre cientos de tareas hijas y todas heredan el
+# mismo dict, así que el fan-out entero suma en un solo lugar.
+#
+# Forma: {scope: usd}. Por scope y no un total pelado para poder decir QUÉ se
+# llevó el presupuesto cuando se agota.
+
+_LLM_LEDGER: contextvars.ContextVar[dict[str, float] | None] = contextvars.ContextVar(
+    'llm_cost_ledger', default=None,
+)
+
+
+@contextmanager
+def use_llm_ledger(ledger: dict[str, float]) -> Iterator[None]:
+    """Anota en `ledger` todo lo que gaste el LLM dentro de este bloque."""
+    token = _LLM_LEDGER.set(ledger)
+    try:
+        yield
+    finally:
+        _LLM_LEDGER.reset(token)
+
+
+def book_llm_cost(scope: str, usd: float) -> None:
+    """Suma una llamada. No-op fuera de una búsqueda (caminos de CRM)."""
+    ledger = _LLM_LEDGER.get()
+    if ledger is None:
+        return
+    ledger[scope] = round(ledger.get(scope, 0.0) + float(usd or 0.0), 8)
+
+
+def llm_total_usd(ledger: Mapping[str, float]) -> float:
+    return round(sum(float(v or 0.0) for v in ledger.values()), 6)
+
+
+def llm_budget_exhausted() -> bool:
+    """¿Esta búsqueda ya gastó su presupuesto de tokens?
+
+    Devuelve un bool y no levanta a propósito. El loop de extracción corre
+    ~1500 llamadas en un `asyncio.gather`: mil quinientas excepciones serían
+    ruido, no información. La página que encuentra el presupuesto agotado
+    devuelve vacío y sale.
+
+    Sin ledger instalado no estamos en una búsqueda (ficha, importer): ahí no
+    hay contra qué acumular, y leerlo como presupuesto agotado dejaría a esos
+    caminos sin poder hacer una sola llamada.
+    """
+    from app.core.config import settings
+    cap = float(settings.LLM_MAX_USD_PER_SEARCH or 0.0)
+    ledger = _LLM_LEDGER.get()
+    if cap <= 0 or ledger is None:
+        return False
+    return llm_total_usd(ledger) >= cap
+
+
 async def record_llm_usage(
     sb: Any,
     *,
@@ -121,6 +184,11 @@ async def record_llm_usage(
     Never raises: this is a side ledger, and losing an accounting row must not
     cost the user the ficha or the search they were running.
     """
+    # ANTES del corte por `sb`: el conteo en memoria es lo que sostiene el tope,
+    # y si viviera después de ese return una instalación sin Supabase gastaría
+    # sin techo y sin enterarse.
+    book_llm_cost(scope, usage_cost_usd(model, usage))
+
     if sb is None:
         return
     try:

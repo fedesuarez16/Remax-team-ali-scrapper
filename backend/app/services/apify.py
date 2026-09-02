@@ -53,17 +53,36 @@ _REMAX_API_BASE = 'https://api-ar.redremax.com/remaxweb-ar/api'
 # Location autocomplete (what remax.com.ar's own search box calls — public,
 # verified live) + resolved `locations` filter cache.
 _REMAX_LOCATION_CACHE: dict[str, str | None] = {}
-# `locations` is `in:` + 7 colon slots; the id goes in the slot matching the
-# autocomplete result's `level` (0-based index == level). Which id field to
-# read also depends on the level. Reverse-engineered from the Angular
-# frontend's own request and verified live: level 3 (city) slot 4 →
-# `in::::1067:::` returns Manuel B Gonnet listings; level 4 (neighborhood)
-# slot 5 → `in:::::5::` returns Las Cañitas listings. The `@label` suffix the
-# frontend appends is ignored by the server.
-_REMAX_LEVEL_ID_FIELD: dict[int, str] = {
-    2: 'countyId', 3: 'cityId', 4: 'neighborhoodId', 5: 'privatecommunityId',
-}
+# `locations` is `in:` + 7 colon slots; the id goes in the slot that belongs
+# to its id FIELD. Reverse-engineered from the Angular frontend's own request
+# and verified live: `cityId` in slot 3 → `in::::1067:::` returns Manuel B
+# Gonnet listings; `neighborhoodId` in slot 4 → `in:::::5::` returns Las
+# Cañitas listings; `privatecommunityId` in slot 5 → `in::::::2439:` returns
+# Grand Bell listings. The `@label` suffix the frontend appends is ignored by
+# the server.
+#
+# The autocomplete's `level` does NOT pick the slot. A gated community comes
+# back as level 4 — the same level as a barrio — with `neighborhoodId` 0 and
+# its id in `privatecommunityId` (verified live: Grand Bell, City Bell). Read
+# by level, that was a 0, the candidate was dropped, and every country search
+# silently fell back to nationwide paging. Every entry carries ALL id fields,
+# the ones that do not apply set to 0, and the shallower populated ones are
+# the parent chain — so an entry's own identity is its DEEPEST populated id.
+# Deepest first.
+_REMAX_ID_FIELD_SLOT: tuple[tuple[str, int], ...] = (
+    ('privatecommunityId', 5), ('neighborhoodId', 4), ('cityId', 3), ('countyId', 2),
+)
 _REMAX_LOCATION_SLOTS = 7
+
+
+def _remax_location_slot(entry: Mapping[str, Any]) -> tuple[int, str] | None:
+    """(slot, id) an autocomplete entry filters on, or None when it carries
+    no usable id at all."""
+    for id_field, slot in _REMAX_ID_FIELD_SLOT:
+        loc_id = entry.get(id_field)
+        if loc_id:
+            return slot, str(loc_id)
+    return None
 
 # id → value from GET {_REMAX_API_BASE}/listingTypes/findAll (relevé el catálogo
 # completo en vivo). typeId query values, no reverse-engineered guess.
@@ -2973,22 +2992,25 @@ async def _remax_resolve_location(zona: str) -> str | None:
             label_slug = _slugify(label)
             if not all(part in label_slug for part in wanted):
                 continue
-            level = entry.get('level') or 0
-            id_field = _REMAX_LEVEL_ID_FIELD.get(level)
-            loc_id = entry.get(id_field) if id_field else None
-            if not loc_id:
+            resolved = _remax_location_slot(entry)
+            if resolved is None:
                 continue
+            slot, loc_id = resolved
             # An exact head is the strong signal, and among those the DEEPEST
-            # level wins — that is what picks "La Plata, La Plata" (level 3,
-            # the localidad) over "La Plata, Buenos Aires" (level 2, the
-            # partido). Without an exact head the portal simply spells the
+            # slot wins — that is what picks "La Plata, La Plata" (the
+            # localidad, `cityId`) over "La Plata, Buenos Aires" (the partido,
+            # `countyId`). Without an exact head the portal simply spells the
             # zona more fully than the user did ("Gonnet" → "Manuel B
             # Gonnet"), so its own relevance order decides.
-            rank = (1, level) if _slugify(label.split(',')[0]) == wanted[0] else (0, -idx)
+            #
+            # Depth is read off the SLOT, not the autocomplete `level`: a
+            # gated community and a barrio share level 4 and only their id
+            # field tells them apart.
+            rank = (1, slot) if _slugify(label.split(',')[0]) == wanted[0] else (0, -idx)
             if best_rank is None or rank > best_rank:
                 best_rank = rank
                 slots = [''] * _REMAX_LOCATION_SLOTS
-                slots[level] = str(loc_id)
+                slots[slot] = loc_id
                 location = 'in:' + ':'.join(slots)
     except Exception:
         return None  # transient failure — don't cache, retry next search
@@ -3521,6 +3543,98 @@ async def fetch_page_html_via_actor(url: str) -> str | None:
     return None
 
 
+# ── Texto de una página de inmobiliaria, sin el chrome ───────────────────────
+#
+# Lo que se le manda al LLM se corta con `text[:6000]` DESDE ARRIBA, y
+# `get_text()` respeta el orden del documento. O sea que todo lo que el menú
+# ocupe al principio son propiedades que quedan del otro lado del corte: se
+# paga la llamada entera y vuelve con menos. Sacar chrome no baja ese techo —
+# hace que lo que entra adentro sea contenido.
+#
+# Etiquetas que nunca son contenido. `nav`/`footer`/`header` ya estaban; el
+# resto son formularios, banners y widgets que aparecen en toda página.
+_CHROME_TAGS = (
+    'script', 'style', 'nav', 'footer', 'header',
+    'form', 'aside', 'noscript', 'iframe', 'svg', 'button', 'select', 'option',
+)
+
+# Y los contenedores que hacen de menú SIN ser un `<nav>`, que es como los arma
+# la mayoría de estos sitios: `<ul class="main-menu">`, `<div id="navbar">`.
+# Se compara por substring contra `class` e `id`.
+_CHROME_HINTS = (
+    'menu', 'navbar', 'navigation', 'sidebar', 'cookie', 'breadcrumb',
+    'social', 'newsletter', 'widget', 'topbar', 'offcanvas', 'drawer',
+)
+
+# Texto de link que jamás va a ser una ficha. Conservan la palabra y pierden la
+# URL: `[Contacto](https://sitio.com/contacto)` cuesta más del doble que
+# `Contacto` y no aporta nada. Las de fichas se conservan enteras — el system
+# prompt las pide para poder devolver `url_ficha`, y de ahí salen las fotos.
+_LINKS_SIN_VALOR = frozenset({
+    'inicio', 'home', 'contacto', 'contactanos', 'contactenos', 'nosotros',
+    'quienes somos', 'quiénes somos', 'tasaciones', 'tasacion', 'tasación',
+    'blog', 'novedades', 'servicios', 'empresa', 'institucional', 'staff',
+    'preguntas frecuentes', 'terminos y condiciones', 'términos y condiciones',
+    'politica de privacidad', 'política de privacidad', 'mapa del sitio',
+    'ver mas', 'ver más', 'siguiente', 'anterior',
+})
+
+
+def _is_chrome(tag: Any) -> bool:
+    attrs = tag.get('class') or []
+    haystack = ' '.join([*attrs, str(tag.get('id') or '')]).lower()
+    return any(hint in haystack for hint in _CHROME_HINTS)
+
+
+def _collapse_adjacent(text: str) -> str:
+    """Colapsa líneas iguales PEGADAS — el bloque que el sitio renderiza dos
+    veces (escritorio y mobile).
+
+    Adyacentes y no todas las iguales del documento: dos propiedades distintas
+    pueden costar lo mismo, y quedarnos con una sería perder la otra.
+    """
+    salida: list[str] = []
+    for linea in text.split('\n'):
+        if salida and linea.strip() and linea.strip() == salida[-1].strip():
+            continue
+        salida.append(linea)
+    return '\n'.join(salida)
+
+
+def _clean_page_text(html: str, base: str) -> str:
+    """Texto de la página listo para el LLM: sin chrome, con las URLs que sirven."""
+    from urllib.parse import urljoin, urlparse
+
+    from bs4 import BeautifulSoup  # type: ignore[import-untyped]
+
+    soup = BeautifulSoup(html, 'html.parser')
+    base_domain = urlparse(base).netloc
+
+    for tag in soup(list(_CHROME_TAGS)):
+        tag.decompose()
+    for tag in soup.find_all(_is_chrome):
+        tag.decompose()
+
+    # Render same-domain anchors as markdown links so the LLM can see individual property URLs
+    for a in soup.find_all('a', href=True):
+        link_text = a.get_text(strip=True)
+        if not link_text:
+            continue
+        if link_text.lower().strip(' .:-') in _LINKS_SIN_VALOR:
+            a.replace_with(link_text)
+            continue
+        href = str(a.get('href', ''))
+        if not href or href.startswith(('#', 'mailto:', 'tel:', 'javascript:')):
+            continue
+        full_href = urljoin(base, href) if not href.startswith('http') else href
+        if urlparse(full_href).netloc != base_domain:
+            continue
+        a.replace_with(f'[{link_text}]({full_href})')
+
+    text = re.sub(r'\n{3,}', '\n\n', soup.get_text(separator='\n')).strip()
+    return _collapse_adjacent(text)
+
+
 async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict[str, str]]:
     """Sitio de inmobiliaria por HTTP directo, con el MISMO método que los portales.
 
@@ -3558,33 +3672,11 @@ async def _scrape_website_direct(url: str, on_progress: ProgressCb) -> list[dict
     proxy = _proxy_with_session(settings.SCRAPER_PROXY_URL, _next_proxy_session('web'))
 
     def parse_page(html: str, base: str) -> tuple[str, list[str]]:
-        from urllib.parse import urljoin, urlparse
-        soup = BeautifulSoup(html, 'html.parser')
-        base_domain = urlparse(base).netloc
-
         # Harvest images before stripping markup. Real-estate sites are usually
         # JS-rendered, so the reliable server-side photo is og:image; content <img>
         # tags are often UI chrome (flags, logos) or lazy-loaded via data-* attrs.
         imgs = _extract_images_from_html(html, base)
-
-        # Remove noise before processing links
-        for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
-            tag.decompose()
-
-        # Render same-domain anchors as markdown links so the LLM can see individual property URLs
-        for a in soup.find_all('a', href=True):
-            href = str(a.get('href', ''))
-            if not href or href.startswith(('#', 'mailto:', 'tel:', 'javascript:')):
-                continue
-            full_href = urljoin(base, href) if not href.startswith('http') else href
-            if urlparse(full_href).netloc != base_domain:
-                continue
-            link_text = a.get_text(strip=True)
-            if link_text:
-                a.replace_with(f'[{link_text}]({full_href})')
-
-        text = soup.get_text(separator='\n')
-        return re.sub(r'\n{3,}', '\n\n', text).strip(), imgs[:20]
+        return _clean_page_text(html, base), imgs[:20]
 
     pages: list[dict] = []
     visited: set[str] = set()

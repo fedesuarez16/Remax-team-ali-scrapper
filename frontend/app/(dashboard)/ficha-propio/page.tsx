@@ -1,14 +1,16 @@
 'use client'
 import { useCallback, useEffect, useState } from 'react'
 import {
-  Check, ChevronDown, ChevronUp, Copy, ExternalLink, FileText, Link2, Loader2,
+  Check, ChevronDown, ChevronUp, Copy, ExternalLink, FileText, Folder as FolderIcon, Link2, Loader2,
   Pencil, RotateCcw, Send, Sparkles, UserRound,
 } from 'lucide-react'
 import type { Property } from '@/hooks/useSSEStream'
+import { useFichaFolders } from '@/hooks/useFichaFolders'
 import { AGENTES, agenteByEmail, enrichFicha, fichaUrl, marcarEnviadas } from '@/lib/ficha'
 import { PropertyFicha, fmtPrice } from '@/components/ficha/PropertyFicha'
 import { FichaEditor } from '@/components/ficha/FichaEditor'
 import { AgenteSelector } from '@/components/ficha/AgenteSelector'
+import { CarpetaChips, MoverACarpeta, type CarpetaFiltro } from '@/components/ficha/FichaFolders'
 import { SelectionBar } from '@/components/properties/SelectionBar'
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
@@ -103,6 +105,7 @@ function FichaRow({
   p,
   defaultOpen,
   selected,
+  folderName,
   onSelect,
   onSaved,
   onEnviada,
@@ -110,6 +113,8 @@ function FichaRow({
   p: Property
   defaultOpen: boolean
   selected: boolean
+  /** Nombre de la carpeta donde vive la ficha; sólo se muestra viendo todas. */
+  folderName?: string | null
   onSelect: (checked: boolean) => void
   onSaved: (updated: Property) => void
   onEnviada: (id: string, enviada: boolean) => void
@@ -159,7 +164,7 @@ function FichaRow({
           checked={selected}
           onChange={(e) => onSelect(e.target.checked)}
           disabled={!p.id}
-          title={p.id ? 'Seleccionar para eliminar' : 'Esta ficha todavía no está guardada'}
+          title={p.id ? 'Seleccionar' : 'Esta ficha todavía no está guardada'}
           className="size-4 shrink-0 accent-foreground disabled:opacity-30"
         />
         <FileText className="size-4 shrink-0 text-muted-foreground" />
@@ -172,6 +177,15 @@ function FichaRow({
             {p.direccion ? ` · ${p.direccion}` : ''}
           </p>
         </div>
+        {folderName && (
+          <span
+            title={`Carpeta: ${folderName}`}
+            className="hidden max-w-32 shrink-0 items-center gap-1 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[11px] text-muted-foreground sm:flex"
+          >
+            <FolderIcon className="size-3 shrink-0" />
+            <span className="truncate">{folderName}</span>
+          </span>
+        )}
         <span className="hidden shrink-0 items-center gap-1 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[11px] text-muted-foreground sm:flex">
           <UserRound className="size-3" />
           {agente.nombre}
@@ -296,6 +310,11 @@ export default function FichaPropioPage() {
   const [statsLoading, setStatsLoading] = useState(true)
   const [estado, setEstado] = useState<Estado>('todas')
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  // Carpetas: la agrupación PRIMARIA (por cliente, por búsqueda…). El estado
+  // enviada/pendiente se filtra adentro de la carpeta elegida.
+  const { folders, create: crearCarpeta, remove: borrarCarpeta, assign: moverACarpeta } = useFichaFolders()
+  const [carpeta, setCarpeta] = useState<CarpetaFiltro>('todas')
+  const folderName = (id?: string | null) => folders.find((f) => f.id === id)?.name ?? null
 
   // Se llama al montar y después de cada generación: así los contadores se
   // actualizan solos, sin que el usuario tenga que refrescar.
@@ -328,13 +347,25 @@ export default function FichaPropioPage() {
     refreshStats()
   }, [refreshStats])
 
-  const counts: Record<Estado, number> = {
-    pendientes: items.filter((p) => !esEnviada(p)).length,
-    enviadas: items.filter(esEnviada).length,
+  const enCarpeta = (p: Property) =>
+    carpeta === 'todas' ? true : carpeta === 'sin' ? !p.ficha_folder_id : p.ficha_folder_id === carpeta
+  const deCarpeta = items.filter(enCarpeta)
+
+  const carpetaCounts: Record<string, number> = {
     todas: items.length,
+    sin: items.filter((p) => !p.ficha_folder_id).length,
+  }
+  for (const f of folders) carpetaCounts[f.id] = items.filter((p) => p.ficha_folder_id === f.id).length
+
+  const counts: Record<Estado, number> = {
+    pendientes: deCarpeta.filter((p) => !esEnviada(p)).length,
+    enviadas: deCarpeta.filter(esEnviada).length,
+    todas: deCarpeta.length,
   }
   const visibles =
-    estado === 'todas' ? items : items.filter((p) => (estado === 'enviadas' ? esEnviada(p) : !esEnviada(p)))
+    estado === 'todas'
+      ? deCarpeta
+      : deCarpeta.filter((p) => (estado === 'enviadas' ? esEnviada(p) : !esEnviada(p)))
 
   // Sólo se puede borrar lo que está guardado Y a la vista: si el usuario
   // cambia de solapa, lo que dejó marcado en la otra no se lleva puesto.
@@ -347,6 +378,28 @@ export default function FichaPropioPage() {
       else next.delete(id)
       return next
     })
+
+  // Sólo se mueve lo que el backend confirmó; el resto queda donde estaba.
+  const moverSeleccion = async (ids: string[], folderId: string | null) => {
+    const moved = await moverACarpeta(ids, folderId)
+    if (moved.length === 0) return moved
+    const movedSet = new Set(moved)
+    setItems((prev) =>
+      prev.map((it) => (it.id && movedSet.has(it.id) ? { ...it, ficha_folder_id: folderId } : it)),
+    )
+    setSelected(new Set())
+    return moved
+  }
+
+  // Al borrar una carpeta el backend deja sus fichas sin carpeta (FK set
+  // null); reflejamos lo mismo acá para no volver a pedir la lista.
+  const borrarCarpetaYSoltar = async (id: string) => {
+    const ok = await borrarCarpeta(id)
+    if (ok) {
+      setItems((prev) => prev.map((it) => (it.ficha_folder_id === id ? { ...it, ficha_folder_id: null } : it)))
+    }
+    return ok
+  }
 
   const marcarLocal = (id: string, enviada: boolean) =>
     setItems((prev) =>
@@ -452,6 +505,18 @@ export default function FichaPropioPage() {
 
         {/* Fichas generadas */}
         <div>
+          {!loading && (items.length > 0 || folders.length > 0) && (
+            <div className="mb-3">
+              <CarpetaChips
+                folders={folders}
+                value={carpeta}
+                onChange={setCarpeta}
+                counts={carpetaCounts}
+                onCreate={crearCarpeta}
+                onDelete={borrarCarpetaYSoltar}
+              />
+            </div>
+          )}
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               {loading
@@ -474,9 +539,13 @@ export default function FichaPropioPage() {
             <div className="flex flex-col items-center gap-2 rounded-2xl border border-dashed border-border py-10 text-center">
               <FileText className="size-8 text-muted-foreground/40" />
               <p className="text-sm text-muted-foreground">
-                {estado === 'enviadas'
-                  ? 'Todavía no enviaste ninguna ficha.'
-                  : 'No queda ninguna ficha pendiente de enviar.'}
+                {deCarpeta.length === 0
+                  ? carpeta === 'sin'
+                    ? 'Todas las fichas están en alguna carpeta.'
+                    : 'Esta carpeta está vacía. Seleccioná fichas y usá «Mover a carpeta».'
+                  : estado === 'enviadas'
+                    ? 'Todavía no enviaste ninguna ficha.'
+                    : 'No queda ninguna ficha pendiente de enviar.'}
               </p>
             </div>
           ) : (
@@ -487,6 +556,7 @@ export default function FichaPropioPage() {
                   p={p}
                   defaultOpen={!!p.id && newIds.has(p.id)}
                   selected={!!p.id && selected.has(p.id)}
+                  folderName={carpeta === 'todas' ? folderName(p.ficha_folder_id) : null}
                   onSelect={(checked) => p.id && toggleSelect(p.id, checked)}
                   onSaved={(updated) =>
                     setItems((prev) => prev.map((it) => (it.id === updated.id ? updated : it)))
@@ -514,7 +584,14 @@ export default function FichaPropioPage() {
               // volver a pedirlo o queda mostrando fichas que ya no existen.
               refreshStats()
             }}
-          />
+          >
+            <MoverACarpeta
+              folders={folders}
+              ids={selectedIds}
+              onAssign={moverSeleccion}
+              onCreate={crearCarpeta}
+            />
+          </SelectionBar>
         </div>
       )}
     </div>

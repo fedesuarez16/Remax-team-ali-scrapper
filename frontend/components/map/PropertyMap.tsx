@@ -18,6 +18,7 @@ import { operacionLabel, sortVentaFirst } from '@/lib/operacion'
 import { EMPTY_FILTER, matchesFilter, type Filter } from '@/lib/propertyFilters'
 import { AgencySelector } from '@/components/chat/AgencySelector'
 import { ProgressBubble } from '@/components/chat/ProgressBubble'
+import { PropertyPhoto } from '@/components/property/PropertyPhoto'
 import { SourceSelector } from '@/components/chat/SourceSelector'
 import { SaveSearchPanel } from '@/components/map/SaveSearchPanel'
 import { SavedZonesPanel } from '@/components/map/SavedZonesPanel'
@@ -284,13 +285,12 @@ export default function PropertyMap({
         >
           <Popup>
             <div className="w-48">
-              {p.imagenes?.[0] && (
-                <img
-                  src={p.imagenes[0]}
-                  alt={p.titulo ?? p.direccion}
-                  className="mb-2 h-24 w-full rounded-md object-cover"
-                />
-              )}
+              <PropertyPhoto
+                src={p.imagenes?.[0]}
+                alt={p.titulo ?? p.direccion}
+                imgClassName="mb-2 h-24 w-full rounded-md object-cover"
+                boxClassName="mb-2 h-24 w-full rounded-md"
+              />
               {operacionLabel(p) && (
                 <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                   {operacionLabel(p)}
@@ -355,13 +355,12 @@ export default function PropertyMap({
           >
             <Popup>
               <div className="w-48">
-                {p.imagenes?.[0] && (
-                  <img
-                    src={p.imagenes[0]}
-                    alt={p.titulo ?? p.direccion}
-                    className="mb-2 h-24 w-full rounded-md object-cover"
-                  />
-                )}
+                <PropertyPhoto
+                  src={p.imagenes?.[0]}
+                  alt={p.titulo ?? p.direccion}
+                  imgClassName="mb-2 h-24 w-full rounded-md object-cover"
+                  boxClassName="mb-2 h-24 w-full rounded-md"
+                />
                 {operacionLabel(p) && (
                   <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                     {operacionLabel(p)}

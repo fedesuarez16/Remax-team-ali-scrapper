@@ -17,13 +17,37 @@ router = APIRouter()
 
 # Strong refs to in-flight graph tasks — asyncio only keeps weak references, so
 # without this a run can be garbage-collected mid-stream.
-_graph_tasks: set[asyncio.Task[None]] = set()
+#
+# Va por job_id y no en un `set` porque `POST /{job_id}/cancel` necesita frenar
+# UNA búsqueda: sobre un set sin llaves, parar una y parar todas eran la misma
+# operación. De proceso, igual que `_website_progress` en los nodos — con más
+# de un worker, un cancel puede llegarle al que no tiene la tarea, y ahí no hay
+# nada que frenar (ver `_cancel_graph_task`).
+_graph_tasks: dict[str, asyncio.Task[None]] = {}
 
 
-def _spawn_graph_task(coro: Any) -> None:
+def _spawn_graph_task(job_id: str, coro: Any) -> None:
     task = asyncio.ensure_future(coro)
-    _graph_tasks.add(task)
-    task.add_done_callback(_graph_tasks.discard)
+    _graph_tasks[job_id] = task
+    # `pop` con default: un resume registra una tarea nueva bajo el mismo job,
+    # y el callback de la vieja no debe borrar la que está corriendo.
+    task.add_done_callback(
+        lambda t: _graph_tasks.pop(job_id, None) if _graph_tasks.get(job_id) is t else None
+    )
+
+
+async def _cancel_graph_task(job_id: str) -> bool:
+    """Frena la búsqueda de este job. False si no hay ninguna corriendo acá.
+
+    Que no esté no es un error: la búsqueda ya terminó, o vive en otro worker.
+    En los dos casos no hay nada que frenar y el estado que el usuario pidió ya
+    es el actual — el endpoint contesta 200 igual.
+    """
+    task = _graph_tasks.get(job_id)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    return True
 
 
 class SourceSelection(BaseModel):
@@ -183,20 +207,35 @@ async def _run_graph_into_queue(
     sb: Any,
     job_id: str,
     cost_ledger: dict[str, dict[str, Any]] | None = None,
+    llm_ledger: dict[str, float] | None = None,
 ) -> None:
     """Run astream_events in a standalone task so client disconnects don't cancel it.
 
     `cost_ledger` is owned by the caller: this task SPENDS (every Apify run
     started under it books itself into the dict), while the SSE generator READS
     it to close the job row. Same object, two tasks — which is why the ledger is
-    passed in rather than created here."""
+    passed in rather than created here.
+
+    `llm_ledger` es el equivalente para los tokens de Anthropic. A diferencia
+    del de Apify no lo lee nadie afuera: existe para que `llm_budget_exhausted`
+    tenga contra qué comparar. Se instala acá — y no más adentro — porque tiene
+    que cubrir TODAS las llamadas de la búsqueda, no las de un nodo."""
     from app.services.apify import use_cost_ledger
+    from app.services.llm_costs import use_llm_ledger
 
     try:
-        with use_cost_ledger(cost_ledger if cost_ledger is not None else {}):
+        with use_cost_ledger(cost_ledger if cost_ledger is not None else {}), \
+                use_llm_ledger(llm_ledger if llm_ledger is not None else {}):
             async for ev in graph.astream_events(inputs, config, version='v2'):
                 await queue.put(('event', ev))
         await queue.put(('done', None))
+    except asyncio.CancelledError:
+        # `POST /{job_id}/cancel`. Va explícito porque `CancelledError` hereda
+        # de `BaseException`: el `except Exception` de abajo NO la atrapa, y sin
+        # avisar por la cola el generador SSE se queda mandando keepalives para
+        # siempre contra una tarea que ya no existe.
+        await queue.put(('cancelled', None))
+        raise
     except Exception as exc:
         import logging
         logging.getLogger(__name__).exception('graph run failed for job %s', job_id)
@@ -264,6 +303,19 @@ async def _stream_graph_events(
                 continue
             if kind == 'done':
                 break
+            if kind == 'cancelled':
+                # Sale por `done`, no por `error`: una búsqueda detenida a
+                # propósito no falló, y el cliente ya sabe cerrar un `done` y
+                # traer las propiedades. `cancelled` distingue el copy sin
+                # duplicar el camino.
+                await _write_job_terminal(sb, job_id, 'cancelled', 0, cost_ledger)
+                seq += 1
+                payload_out = _stamp_cost({
+                    'event': 'done', 'job_id': job_id, 'cancelled': True,
+                    'message': 'Búsqueda detenida. Te dejo lo que encontré hasta acá.',
+                }, cost_ledger)
+                yield f'id: {seq}\nevent: done\ndata: {json.dumps(payload_out)}\n\n'
+                break
             if kind == 'error':
                 raise payload
             ev = payload
@@ -298,7 +350,10 @@ async def stream_scraping(job_id: str, query: str, request: Request) -> Streamin
 
     queue: asyncio.Queue[Any] = asyncio.Queue()
     cost_ledger: dict[str, dict[str, Any]] = {}
-    _spawn_graph_task(_run_graph_into_queue(graph, inputs, config, queue, sb, job_id, cost_ledger))
+    _spawn_graph_task(
+        job_id,
+        _run_graph_into_queue(graph, inputs, config, queue, sb, job_id, cost_ledger, {}),
+    )
 
     return StreamingResponse(
         _stream_graph_events(queue, sb, job_id, cost_ledger),
@@ -323,6 +378,30 @@ async def _seed_cost_ledger(sb: Any, job_id: str) -> dict[str, dict[str, Any]]:
     return dict(booked) if isinstance(booked, dict) else {}
 
 
+async def _seed_llm_ledger(sb: Any, job_id: str) -> dict[str, float]:
+    """Lo que esta búsqueda ya gastó en tokens, de `llm_usage`.
+
+    La fase cara (el fan-out de inmobiliarias) corre bajo `/resume`, que es un
+    request SEPARADO. Con un contador en cero ahí, el tope pasaría a ser "un
+    dólar por request" en vez de "un dólar por búsqueda" — y cada resume
+    renovaría el presupuesto.
+
+    Best-effort: una tabla ilegible arranca en cero, que es el comportamiento
+    de antes de este tope.
+    """
+    if sb is None:
+        return {}
+    try:
+        res = await sb.table('llm_usage').select('scope,cost_usd').eq('job_id', job_id).execute()
+    except Exception:
+        return {}
+    ledger: dict[str, float] = {}
+    for row in (res.data or []):
+        scope = row.get('scope') or 'desconocido'
+        ledger[scope] = round(ledger.get(scope, 0.0) + float(row.get('cost_usd') or 0.0), 8)
+    return ledger
+
+
 @router.post('/{job_id}/resume')
 async def resume_scraping(job_id: str, body: ResumeScrapingRequest, request: Request) -> StreamingResponse:
     from langgraph.types import Command
@@ -333,21 +412,44 @@ async def resume_scraping(job_id: str, body: ResumeScrapingRequest, request: Req
 
     queue: asyncio.Queue[Any] = asyncio.Queue()
     cost_ledger = await _seed_cost_ledger(sb, job_id)
+    llm_ledger = await _seed_llm_ledger(sb, job_id)
     _spawn_graph_task(
+        job_id,
         _run_graph_into_queue(
             graph,
             Command(resume={
                 'agency_ids': body.selected_agency_ids,
                 'manual_source_ids': body.selected_manual_source_ids,
             }),
-            config, queue, sb, job_id, cost_ledger,
-        )
+            config, queue, sb, job_id, cost_ledger, llm_ledger,
+        ),
     )
 
     return StreamingResponse(
         _stream_graph_events(queue, sb, job_id, cost_ledger),
         media_type='text/event-stream', headers=_sse_headers(),
     )
+
+
+@router.post('/{job_id}/cancel')
+async def cancel_scraping(job_id: str, request: Request) -> dict[str, Any]:
+    """Frena la búsqueda y deja lo ya guardado donde está.
+
+    No borra ni revierte nada: las propiedades se persisten a medida que se
+    extraen, así que detener conserva todo lo que llegó a la base. El cliente
+    sigue leyendo su stream — el `done` con `cancelled: true` sale por ahí, no
+    por esta respuesta.
+
+    `stopped=False` significa que no había nada corriendo en ESTE worker (ya
+    terminó, o vive en otro): no es un error, el estado pedido ya es el actual.
+    """
+    stopped = await _cancel_graph_task(job_id)
+    if not stopped:
+        # El stream que la estaba siguiendo puede haber muerto con su worker,
+        # y entonces nadie va a cerrar la fila. Cerrarla acá deja el historial
+        # consistente en vez de un job colgado en `running` para siempre.
+        await _write_job_terminal(request.app.state.supabase, job_id, 'cancelled')
+    return {'job_id': job_id, 'stopped': stopped}
 
 
 def _classify_properties(
@@ -381,6 +483,43 @@ def _classify_properties(
 
     counts = {'inside': inside, 'outside': outside, 'ungeocoded': ungeocoded, 'total': len(tagged)}
     return tagged, counts
+
+
+# Ancho de la banda de coincidencia, sobre `match_score` (0-100). Un punto de
+# diferencia no debería decidir cuál de las dos ve primero el operador; tener
+# fotos sí. Bandas más anchas hacen pesar más la foto, más angostas menos.
+_BANDA_COINCIDENCIA = 10
+
+
+def _photo_aware_sort(properties: list[dict[str, Any]]) -> None:
+    """Ordena in-place: criterios, banda de coincidencia, y recién ahí fotos.
+
+    Una propiedad sin foto es casi invendible en la primera pasada — el
+    operador la saltea. Pero poner la foto POR ENCIMA de la coincidencia sería
+    peor: un 40% con fotos le ganaría a un 95% sin fotos y el usuario dejaría
+    de ver lo que pidió. Por eso la foto desempata DENTRO de la banda.
+
+    El `sort` de Python es estable, así que dentro de cada grupo sobrevive el
+    orden exacto que dejó `rank_properties`.
+    """
+    def clave(p: dict[str, Any]) -> tuple[bool, int, bool, float]:
+        score = p.get('match_score')
+        exacto = float(score) if isinstance(score, (int, float)) else -1.0
+        banda = int(exacto // _BANDA_COINCIDENCIA) if exacto >= 0 else -1
+        return (
+            # Regla previa, intacta: lo que no cumple criterios va al final.
+            # Filas sin la marca (links viejos) cuentan como que cumplen.
+            p.get('matches_criteria', True) is False,
+            -banda,
+            not (p.get('imagenes') or []),
+            # El score exacto cierra el orden. Va acá y no se delega al orden de
+            # entrada para que la función no dependa de que el llamador ya haya
+            # ordenado: esa precondición es invisible y se rompe sola el día que
+            # alguien mueva la llamada.
+            -exacto,
+        )
+
+    properties.sort(key=clave)
 
 
 @router.get('/{job_id}/properties')
@@ -443,9 +582,7 @@ async def get_job_properties(job_id: str, request: Request) -> dict[str, Any]:
         except Exception as exc:
             log.warning('match ranking failed (%s) — returning unranked properties', exc)
 
-    # Criteria-matching props always lead; stable sort keeps rank order within
-    # each group. Rows without the flag (legacy links) count as matching.
-    properties.sort(key=lambda p: p.get('matches_criteria', True) is False)
+    _photo_aware_sort(properties)
 
     properties, counts = _classify_properties(properties, polygon)
     return {'properties': properties, 'polygon': polygon, 'counts': counts}
