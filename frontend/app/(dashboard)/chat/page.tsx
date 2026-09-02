@@ -188,6 +188,7 @@ function ChatPage() {
                   <AgencySelector
                     agencies={m.agencies}
                     manualSources={m.manualSources}
+                    usdPorSitio={m.usdPorSitio}
                     message={m.message}
                     onConfirm={(ids, manualIds) => resumeScraping(m.jobId, ids, manualIds)}
                     disabled={isStreaming}

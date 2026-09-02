@@ -45,6 +45,9 @@ class _FakeSupabase:
     def gte(self, *_a: Any, **_kw: Any) -> '_FakeSupabase':
         return self
 
+    def limit(self, *_a: Any, **_kw: Any) -> '_FakeSupabase':
+        return self
+
     async def execute(self) -> Any:
         class _Res:
             data = self._rows
@@ -83,14 +86,19 @@ async def test_una_fila_sin_direccion_tampoco_sobrevive_a_la_lectura() -> None:
     assert await _read_cached_agencies(sb, 'la plata', 'La Plata') == []
 
 
-async def test_sin_zona_la_lectura_no_filtra() -> None:
-    """El `zona_norm` de la query ya acotó la fila; sin una zona legible que
-    exigir, la guarda no tiene criterio y no debe inventarse uno."""
+async def test_sin_zona_no_se_devuelve_nada() -> None:
+    """Antes acá se devolvía TODO, y el razonamiento era correcto para el
+    código de entonces: el `.eq('zona_norm')` de la query ya había acotado las
+    filas, así que sin zona legible no había nada más que exigir.
+
+    Ese `.eq` se fue (ver test_agencies_selected_by_address): filtraba por la
+    zona que DESCUBRIÓ la agencia en vez de por dónde está, y perdía el 95% de
+    las del casco. Ahora la query trae todas las agencias frescas y la
+    dirección decide. Sin zona no hay criterio — y devolver las 1000 de la base
+    sería mucho peor que devolver ninguna."""
     sb = _FakeSupabase(_SUCIO)
 
-    agencies = await _read_cached_agencies(sb, 'la plata', '')
-
-    assert len(agencies) == len(_SUCIO)
+    assert await _read_cached_agencies(sb, 'la plata', '') == []
 
 
 async def test_el_cache_filtrado_a_cero_no_se_sirve_como_caché_lleno() -> None:

@@ -7,7 +7,7 @@ from pydantic import BaseModel, BeforeValidator, Field
 
 Fuente = Literal[
     'zonaprop', 'mercadolibre', 'googlemaps', 'instagram', 'argenprop', 'remax',
-    'inmobusqueda', 'mudafy', 'manual',
+    'inmobusqueda', 'mudafy', 'century21', 'manual',
 ]
 TipoOperacion = Literal['venta', 'alquiler', 'alquiler_temp']
 TipoPropiedad = Literal['departamento', 'casa', 'ph', 'local', 'oficina', 'terreno', 'otro']

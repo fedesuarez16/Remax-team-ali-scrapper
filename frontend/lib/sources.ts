@@ -12,6 +12,7 @@ export type PortalId =
   | 'remax'
   | 'inmobusqueda'
   | 'mudafy'
+  | 'century21'
 
 export const PORTALES: { id: PortalId; label: string }[] = [
   { id: 'zonaprop', label: 'Zonaprop' },
@@ -20,6 +21,7 @@ export const PORTALES: { id: PortalId; label: string }[] = [
   { id: 'remax', label: 'RE/MAX' },
   { id: 'inmobusqueda', label: 'InmoBusqueda' },
   { id: 'mudafy', label: 'Mudafy' },
+  { id: 'century21', label: 'CENTURY 21' },
 ]
 
 export type SourceSelection = {
@@ -29,6 +31,10 @@ export type SourceSelection = {
   buscar_inmobiliarias: boolean
   /** null = todas las zonas. Otherwise only that zona's curated inmobiliarias. */
   zona_inmobiliarias: string | null
+  /** Buscar SÓLO en las inmobiliarias cargadas a mano en /sources, sin salir a
+   * descubrir con Google Maps. El descubrimiento trae cientos que nadie
+   * eligió; el registro curado lo cargó alguien que las conoce. */
+  solo_fuentes_cargadas: boolean
 }
 
 /** Search everything — what every caller did before the selector existed. */
@@ -37,6 +43,7 @@ export const DEFAULT_SELECTION: SourceSelection = {
   portales: [],
   buscar_inmobiliarias: true,
   zona_inmobiliarias: null,
+  solo_fuentes_cargadas: false,
 }
 
 /** The backend rejects a selection with no track enabled (400), so the UI

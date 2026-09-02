@@ -76,6 +76,9 @@ async def test_start_without_source_selection_persists_search_everything_default
         'portales': [],
         'buscar_inmobiliarias': True,
         'zona_inmobiliarias': None,
+        # Descubrir con Google Maps sigue prendido por defecto: apagarlo es una
+        # decisión del operador, no algo que le pase por no elegir nada.
+        'solo_fuentes_cargadas': False,
     }
 
 

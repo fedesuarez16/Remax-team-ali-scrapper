@@ -15,6 +15,7 @@ const FUENTE_LABEL: Record<string, string> = {
   mercadolibre: 'MercadoLibre',
   argenprop: 'Argenprop',
   remax: 'RE/MAX',
+  century21: 'CENTURY 21',
   googlemaps: 'Google Maps',
 }
 

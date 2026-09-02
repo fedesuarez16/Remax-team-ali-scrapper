@@ -66,6 +66,12 @@ class SourceSelection(BaseModel):
     # None/blank = todas las zonas. Otherwise only the inmobiliarias we
     # manually classified into this zona are consulted.
     zona_inmobiliarias: str | None = None
+    # Buscar SÓLO en las inmobiliarias cargadas a mano en /sources, sin salir a
+    # descubrir con Google Maps. El descubrimiento es lo que trae cientos de
+    # inmobiliarias que nadie eligió; el registro curado lo cargó alguien que
+    # las conoce. Flag propio y no un efecto secundario de `zona_inmobiliarias`:
+    # así se puede pedir "sólo las cargadas" en cualquier zona.
+    solo_fuentes_cargadas: bool = False
 
 
 class StartScrapingRequest(BaseModel):
@@ -115,6 +121,7 @@ def _validated_selection(selection: SourceSelection) -> dict[str, Any]:
         'portales': selection.portales,
         'buscar_inmobiliarias': selection.buscar_inmobiliarias,
         'zona_inmobiliarias': zona or None,
+        'solo_fuentes_cargadas': selection.solo_fuentes_cargadas,
     }
 
 
@@ -573,6 +580,17 @@ async def get_job_properties(job_id: str, request: Request) -> dict[str, Any]:
         log.warning('scraping_job_id lookup failed (%s) — serving linked rows only', exc)
 
     properties = list(by_id.values())
+
+    # `by_id` sólo saca la MISMA fila contada dos veces (por link y por
+    # `scraping_job_id`). La misma propiedad publicada por dos inmobiliarias
+    # son dos filas distintas con dos ids distintos, y hasta acá pasaban las
+    # dos. Se colapsa al servir y no sólo al guardar porque la lista también
+    # arrastra filas de corridas anteriores rescatadas por `scraping_job_id`.
+    from app.services.dedup import collapse_duplicates
+    antes = len(properties)
+    properties = collapse_duplicates(properties)
+    if antes != len(properties):
+        log.info('dedup de resultados: %d -> %d filas', antes, len(properties))
 
     # Rank by relevance to the original query so the best matches surface first.
     if query_raw and properties:

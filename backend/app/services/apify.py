@@ -22,7 +22,7 @@ ProgressCb = Callable[[str, str, int], Awaitable[None]]
 
 logger = logging.getLogger(__name__)
 
-PORTAL_SOURCES = ('zonaprop', 'mercadolibre', 'argenprop', 'remax', 'inmobusqueda', 'mudafy')   # phase-1 portal scrapers
+PORTAL_SOURCES = ('zonaprop', 'mercadolibre', 'argenprop', 'remax', 'inmobusqueda', 'mudafy', 'century21')   # phase-1 portal scrapers
 SOURCES = (*PORTAL_SOURCES, 'googlemaps', 'instagram')
 
 # ── Actor IDs ─────────────────────────────────────────────────────────────────
@@ -3096,11 +3096,453 @@ async def _scrape_remax_api(
     return results
 
 
+# ── CENTURY 21 vía su propia API pública (sin Apify) ──────────────────────────
+#
+# C21 es una franquicia y cada oficina tiene dirección propia, así que el track
+# de Google Maps la levantaba como inmobiliaria y le mandaba el crawler
+# genérico — oficina por oficina, sin filtro de zona, para terminar leyendo el
+# mismo inventario que el portal nacional publica entero. Acá deja de ser N
+# inmobiliarias y pasa a ser UN portal. La baja del otro track vive en
+# `agency_is_portal_brand`.
+#
+# century21.com.ar es una SPA: el HTML de `/v/resultados/...` no trae un solo
+# `/propiedad/`. Pero la MISMA URL con `?json=true` devuelve el JSON que la SPA
+# consume — público, sin auth y sin WAF (curl pelado responde 200). Mismo
+# camino que RE/MAX, y por eso el diseño se le parece.
+_C21_BASE = 'https://century21.com.ar'
+# Techo del portal, NO un knob de costo: `/pagina_15` responde y `/pagina_16`
+# contesta "Parámetro pagina incorrecto" (medido en vivo). 15 × 100 = 1500
+# avisos por consulta; para ir más hondo hay que angostar la consulta
+# (`/moneda_usd/precio-desde_N/precio-hasta_M` está soportado y verificado).
+_C21_MAX_PAGE = 15
+_C21_PAGE_SIZE = 100      # avisos por página; fijo, el portal no lo expone como filtro
+# Autocompletado de ubicación (lo que llama el propio buscador del sitio) +
+# caché del slug resuelto, igual que `_REMAX_LOCATION_CACHE`.
+_C21_LOCATION_CACHE: dict[str, str | None] = {}
+
+# `filtros[].validValues` del propio portal → nuestro `TipoPropiedad`. El
+# portal declara 24 tipos; los que no tienen equivalente caen en 'otro'.
+_C21_TYPE_TO_TIPO: dict[str, str] = {
+    'casa': 'casa', 'casa_duplex': 'casa', 'quinta': 'casa', 'cabana': 'casa',
+    'departamento': 'departamento', 'penthouse': 'departamento', 'loft': 'departamento',
+    'ph': 'ph',
+    'terreno': 'terreno', 'campo': 'terreno',
+    'local': 'local', 'fondo_de_comercio': 'local',
+    'oficinas': 'oficina',
+}
+# El camino inverso, para el tramo `/tipo_...` de la URL. Un tipo nuestro puede
+# pedir varios del portal: el separador `-o-` es el que el propio portal
+# declara en `filtros[id=tipo].separator`.
+_C21_TIPO_TO_URL: dict[str, tuple[str, ...]] = {
+    'departamento': ('departamento', 'penthouse', 'loft'),
+    'casa': ('casa', 'casa-duplex', 'quinta', 'cabana'),
+    'ph': ('ph',),
+    'local': ('local', 'fondo-de-comercio'),
+    'oficina': ('oficinas',),
+    'terreno': ('terreno', 'campo'),
+}
+
+
+def _c21_headers() -> dict[str, str]:
+    """C21 filtra por User-Agent y `PropSearchBot/1.0` NO pasa: la respuesta es
+    el texto `Blocked Bot`, con status 200. Ese 200 es lo que la vuelve
+    peligrosa — `raise_for_status()` la deja pasar, revienta recién en
+    `.json()`, y el `except` de más abajo la convierte en `[]`: una búsqueda
+    entera sin una sola propiedad y sin un motivo visible. Es exactamente el
+    modo de falla que ya documentó el track de sitios de inmobiliarias.
+    """
+    return {'User-Agent': _BROWSER_UA, 'Accept-Language': 'es-AR,es;q=0.9'}
+
+
+def _c21_search_url(
+    filters: ScrapingFilters, location: str, page: int = 1,
+) -> str:
+    """URL de resultados de C21. Los filtros son tramos `clave_valor` del path.
+
+    El tramo de operación usa `alquiler`, NO `renta`: el id interno del filtro
+    es `renta` pero la URL sólo acepta el traducido — `/operacion_renta`
+    responde "Parámetro operacion opcionesInvalidas" (medido). `alquiler_temp`
+    no tiene tramo propio en el portal y entra por `alquiler`.
+
+    El tramo `/tipo_` se OMITE cuando no hay tipos pedidos: un valor vacío o
+    fuera del vocabulario hace fallar la request entera, mientras que su
+    ausencia devuelve todos los tipos, que es justo lo que "sin filtro"
+    significa.
+    """
+    segments: list[str] = []
+
+    tipos: list[str] = []
+    for tipo in filters.tipos_propiedad or []:
+        for slug in _C21_TIPO_TO_URL.get(tipo, ()):
+            if slug not in tipos:
+                tipos.append(slug)
+    if tipos:
+        segments.append('tipo_' + '-o-'.join(tipos))
+
+    if filters.tipo_operacion:
+        op = 'alquiler' if filters.tipo_operacion.startswith('alquiler') else 'venta'
+        segments.append(f'operacion_{op}')
+
+    path = f'{_C21_BASE}/v/resultados/' + '/'.join(segments) + location.rstrip('/')
+    if page > 1:
+        path += f'/pagina_{page}'
+    return f'{path}?json=true'
+
+
+async def _c21_resolve_location(zona: str) -> str | None:
+    """Texto libre → el tramo de path de ubicación, vía el autocompletado.
+
+    `GET /v/busqueda?q={texto}` devuelve `direcciones[]` y el `slug` de cada
+    entrada YA ES el tramo que consume el buscador:
+
+        MUNICIPIO → /en-pais_argentina/en-estado_gba-sur/en-municipio_gba-sur-la-plata
+        COLONIA   → …/en-municipio_gba-sur-la-plata/en-colonia_city-bell
+        COLONIA2  → …/en-colonia_melchor-romero/en-division_lomas-de-city-bell
+
+    Que el barrio (COLONIA) y hasta el barrio CERRADO (COLONIA2) tengan slug
+    propio es lo que vuelve a C21 servible acá sin adivinar nada.
+
+    Un candidato tiene que contener TODAS las partes de la zona pedida en su
+    label Y su primer componente tiene que ser IGUAL a la cabeza de la
+    consulta — misma regla exacta que el resolver de RE/MAX, y por el mismo
+    motivo: "Lomas de City Bell" contiene "City Bell", es más profundo, y es
+    otro lugar (un barrio cerrado adentro de Melchor Romero). Entre los que
+    pasan gana el MÁS PROFUNDO, que es el más específico.
+
+    Sin match devuelve None y el scraper no pide nada. Sin tramo de ubicación
+    el portal sirve el inventario nacional entero (21.064 avisos, medido) y el
+    techo de 15 páginas lo convierte en una muestra sin relación con lo
+    pedido; devolver None deja que la cadena de `zona_candidates` pruebe la
+    zona más ancha, que es la degradación honesta.
+    """
+    query_parts = [p.strip() for p in zona.split(',') if p.strip()]
+    if not query_parts:
+        return None
+    cache_key = _slugify(zona)
+    if cache_key in _C21_LOCATION_CACHE:
+        return _C21_LOCATION_CACHE[cache_key]
+
+    location: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=8, headers=_c21_headers()) as client:
+            resp = await client.get(
+                f'{_C21_BASE}/v/busqueda', params={'q': query_parts[0]},
+            )
+            resp.raise_for_status()
+            direcciones = (resp.json() or {}).get('direcciones') or []
+        wanted = [_slugify(p) for p in query_parts]
+        best_rank: tuple[int, int] | None = None
+        for idx, entry in enumerate(direcciones):
+            label = str(entry.get('label') or '')
+            slug = str(entry.get('slug') or '')
+            if not slug or not all(part in _slugify(label) for part in wanted):
+                continue
+            # La profundidad se lee del SLUG, que es donde el portal la
+            # escribe: un tramo por nivel (pais/estado/municipio/colonia/
+            # division).
+            depth = len([s for s in slug.split('/') if s])
+            exact_head = _slugify(label.split(',')[0]) == wanted[0]
+            rank = (1, depth) if exact_head else (0, -idx)
+            if best_rank is None or rank > best_rank:
+                best_rank = rank
+                location = slug
+    except Exception:
+        return None  # falla transitoria — no cachear, reintentar en la próxima
+
+    _C21_LOCATION_CACHE[cache_key] = location
+    return location
+
+
+def _c21_photo_urls(item: Mapping[str, Any]) -> list[str]:
+    fotos = item.get('fotos')
+    if not isinstance(fotos, Mapping):
+        return []
+    urls = fotos.get('propiedadThumbnail') or []
+    return [str(u) for u in urls if isinstance(u, str) and u.startswith('http')]
+
+
+def _norm_century21(item: Mapping[str, Any], zona: str) -> RawProperty | None:
+    """Un `results[]` del JSON → `RawProperty`.
+
+    El portal deja al anunciante ocultar precio y calle, y su propia ficha lo
+    respeta. Un aviso con `ocultarPrecioInternet` se descarta entero (sin
+    precio no sirve para nada aguas abajo, igual que en RE/MAX); una calle
+    oculta sólo degrada la dirección al barrio.
+    """
+    if item.get('ocultarPrecioInternet'):
+        return None
+    try:
+        precio = float(item.get('precio') or 0)
+    except (TypeError, ValueError):
+        return None
+    if not precio:
+        return None
+
+    partes = [
+        str(item.get(k) or '').strip()
+        for k in (('colonia', 'municipio') if item.get('ocultarCalleInternet')
+                  else ('calle', 'colonia', 'municipio'))
+    ]
+    # Un barrio que se llama igual que el partido ("La Plata, La Plata") sólo
+    # ensucia la dirección; el orden se preserva y el duplicado se cae.
+    vistos: list[str] = []
+    for parte in partes:
+        if parte and parte not in vistos:
+            vistos.append(parte)
+    direccion = ', '.join(vistos) or zona
+
+    url = str(item.get('urlCorrectaPropiedad') or '')
+    op = str(item.get('tipoOperacion') or 'venta')
+
+    return RawProperty(
+        fuente='century21',
+        titulo=str(item.get('encabezado') or '') or None,
+        direccion=direccion,
+        precio=precio,
+        moneda=str(item.get('moneda') or 'USD'),  # type: ignore[arg-type]
+        tipo_operacion='alquiler' if op in ('renta', 'alquiler') else 'venta',  # type: ignore[arg-type]
+        tipo_propiedad=_C21_TYPE_TO_TIPO.get(  # type: ignore[arg-type]
+            str(item.get('tipoPropiedad') or ''), 'otro',
+        ),
+        ambientes=item.get('recamaras'),
+        banos=item.get('banos'),
+        cocheras=item.get('estacionamientos'),
+        m2_total=item.get('m2T') or None,
+        m2_cubiertos=item.get('m2C') or None,
+        amenities=[],
+        imagenes=_c21_photo_urls(item),
+        url_origen=f'{_C21_BASE}{url}' if url.startswith('/') else (url or None),
+    )
+
+
+_C21_FICHA_RE = re.compile(r'century21\.com\.ar/propiedad/', re.I)
+
+
+async def century21_gallery_from_url(url: str) -> list[str]:
+    """Galería completa de una ficha de C21, por la misma API pública.
+
+    El listado sirve sólo 10 miniaturas en `fotos.propiedadThumbnail` aunque
+    `fotos.totalFotos` diga 22 — el resto vive en la FICHA. Y la ficha es la
+    misma SPA que el listado: `?json=true` sobre su propia URL devuelve
+    `fotos[]` completo, cada foto con su `large` (1200×800) ya armado.
+
+    Mismo patrón que `remax_gallery_from_url`: cuando el portal tiene API, se
+    le pregunta a la API en vez de pelearse con el DOM.
+
+    Devuelve `[]` ante cualquier fallo — la galería es un extra y no puede
+    tumbar un import que ya tiene los datos de la propiedad.
+    """
+    if not _C21_FICHA_RE.search(url or ''):
+        return []
+    try:
+        async with httpx.AsyncClient(
+            timeout=20, follow_redirects=True, headers=_c21_headers(),
+        ) as client:
+            resp = await client.get(f'{url.split("?")[0]}?json=true')
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        return []
+    if not isinstance(data, Mapping):
+        return []
+    urls: list[str] = []
+    for foto in data.get('fotos') or []:
+        large = str((foto or {}).get('large') or '').strip()
+        if large.startswith('http'):
+            urls.append(large)
+    return urls[:_MAX_GALLERY]
+
+
+def _century21_matches_zona(item: Mapping[str, Any], filters: ScrapingFilters) -> bool:
+    """¿Este aviso ESTÁ en la zona que se pidió?
+
+    El filtro `en-municipio_`/`en-colonia_` es server-side y confiable, así que
+    esta guarda parece redundante — y no lo es: `scrape_source` ensancha la
+    zona por la cadena de `zona_candidates` cuando el barrio no resuelve, y
+    ahí la respuesta vuelve con el partido entero adentro. La guarda contesta
+    la pregunta que se HIZO (`zona_pedida`), no la que se terminó consultando.
+
+    El aviso trae los niveles en campos separados (`colonia` el barrio,
+    `municipio` el partido), así que una zona compuesta puede exigirse
+    completa contra el conjunto — que es lo que mantiene afuera a los
+    homónimos.
+    """
+    phrase_parts = [
+        parts for parts in
+        ([_slugify(p) for p in z.split(',') if _slugify(p)] for z in _guard_phrases(filters))
+        if parts
+    ]
+    if not phrase_parts:
+        return True
+    haystack = _slugify(' '.join(
+        str(item.get(k) or '') for k in ('colonia', 'municipio', 'estado')
+    ))
+    return any(all(part in haystack for part in parts) for parts in phrase_parts)
+
+
+async def _scrape_century21(
+    filters: ScrapingFilters, on_progress: ProgressCb,
+) -> list[RawProperty]:
+    from app.core.config import settings
+
+    await on_progress('century21', 'running', 0)
+
+    loc_zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
+    location = await _c21_resolve_location(loc_zona)
+    if location is None:
+        # Sin ubicación no hay búsqueda: ver `_c21_resolve_location`.
+        await on_progress('century21', 'done', 0)
+        return []
+
+    max_pages = settings.CENTURY21_MAX_PAGES
+    max_pages = _C21_MAX_PAGE if max_pages <= 0 else min(max_pages, _C21_MAX_PAGE)
+
+    results: list[RawProperty] = []
+    seen: set[str] = set()
+    leidos = 0
+    async with httpx.AsyncClient(
+        timeout=30, follow_redirects=True, headers=_c21_headers(),
+    ) as client:
+        for page in range(1, max_pages + 1):
+            try:
+                resp = await client.get(_c21_search_url(filters, location, page))
+                resp.raise_for_status()
+                body = resp.json()
+            except Exception:
+                # Fuera del techo el portal contesta texto plano, no JSON;
+                # cualquier otra falla también corta acá.
+                break
+            items = (body or {}).get('results') or []
+            if not items:
+                break
+            leidos += len(items)
+
+            for item in items:
+                if not _century21_matches_zona(item, filters):
+                    continue
+                prop = _norm_century21(item, filters.zona or loc_zona)
+                if prop is None:
+                    continue
+                key = str(prop.url_origen or '')
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                results.append(prop)
+
+            await on_progress('century21', 'running', len(results))
+
+            # `totalHits` viene en la MISMA respuesta, así que agotar el
+            # resultset no cuesta una request de descarte: sin esto, una zona
+            # de 4 páginas justas gasta una quinta para que le contesten
+            # vacío. Formateado en es-AR ("5.138"), de ahí el limpiado.
+            total = _c21_total_hits(body)
+            if total is not None and leidos >= total:
+                break
+            if len(items) < _C21_PAGE_SIZE:
+                break
+
+    await on_progress('century21', 'done', len(results))
+    return results
+
+
+def _c21_total_hits(body: Mapping[str, Any] | None) -> int | None:
+    """`totalHits` llega como string con separador de miles ("5.138")."""
+    raw = (body or {}).get('totalHits')
+    if isinstance(raw, int):
+        return raw
+    if not isinstance(raw, str):
+        return None
+    digits = re.sub(r'\D', '', raw)
+    return int(digits) if digits else None
+
+
 def _extract_instagram_handle(website: str | None) -> str | None:
     if not website:
         return None
     m = re.search(r'instagram\.com/([A-Za-z0-9_.]+)', website)
     return m.group(1) if m else None
+
+
+# Cómo la gente nombra una zona hablando, y que ninguna dirección postal
+# contiene. Son descriptores relativos al partido, no localidades: "el casco"
+# de La Plata es un área, y las calles de adentro se escriben "C. 10 602,
+# La Plata" igual que las de afuera.
+_ZONAS_COLOQUIALES = frozenset({
+    'casco', 'casco urbano', 'casco historico', 'centro', 'microcentro',
+    'zona norte', 'zona sur', 'zona oeste', 'zona este', 'afueras',
+    'periferia', 'downtown', 'barrio', 'alrededores',
+})
+
+
+# ── El casco de La Plata ─────────────────────────────────────────────────────
+#
+# Una dirección postal prueba la LOCALIDAD, no el barrio — salvo acá. El casco
+# fundacional es un cuadrado de 38×38 manzanas delimitado por las Avenidas 32,
+# 122, 72 y 31 (es.wikipedia.org/wiki/La_Plata), y su grilla está numerada, así
+# que toda dirección de adentro nombra dos calles de ese rango.
+#
+# Es específico de La Plata a propósito: no hay regla general que sirva: es
+# esta ciudad la que tiene grilla numerada y perímetro documentado.
+_CASCO_EJE_A = set(range(32, 73))                       # 32 … 72
+_CASCO_EJE_B = set(range(1, 32)) | set(range(115, 123))  # 1 … 31, y 115 … 122
+_CASCO_DIAGONALES = {73, 74, 77, 78, 79, 80}
+_CASCO_CALLES = _CASCO_EJE_A | _CASCO_EJE_B | _CASCO_DIAGONALES
+
+# Las formas de nombrar el casco que activan el filtro fino. Subconjunto de
+# `_ZONAS_COLOQUIALES`: "zona norte" también es coloquial y NO significa esto.
+_CASCO_PEDIDO = frozenset({'casco', 'casco-urbano', 'casco-historico', 'centro', 'microcentro'})
+
+# Las otras localidades del partido de La Plata. Una dirección que nombra
+# cualquiera de estas NO es del casco, por más que sus números coincidan: City
+# Bell y Gonnet también tienen calles 14 y 19, así que los números solos no
+# alcanzan — pero la dirección dice de dónde es.
+_LOCALIDADES_NO_CASCO = (
+    'city-bell', 'gonnet', 'villa-elisa', 'tolosa', 'ringuelet', 'gorina',
+    'jose-hernandez', 'melchor-romero', 'los-hornos', 'san-carlos',
+    'villa-elvira', 'altos-de-san-lorenzo', 'arturo-segui', 'abasto',
+    'lisandro-olmos', 'etcheverry', 'el-peligro', 'angel-etcheverry',
+    'berisso', 'ensenada', 'villa-castells', 'las-quintas',
+)
+
+_CALLE_RE = re.compile(
+    r'(?:\b(?:calle|av\.?|avenida|diag\.?|diagonal|c\.)\s*)?\b(\d{1,4})\b',
+    re.IGNORECASE,
+)
+
+
+def es_casco_la_plata(direccion: str | None) -> bool:
+    """¿Esta dirección cae dentro del casco fundacional de La Plata?
+
+    Necesita DOS coordenadas de la grilla. Una dirección trae la calle y una
+    altura, y la altura codifica la transversal: `C. 49 857` es la 49 entre 8 y
+    9, así que `857 // 100 = 8` da la otra. Con las dos adentro del rango, la
+    dirección está en el casco.
+
+    Sin dos coordenadas devuelve False: afirmar que es casco sin evidencia
+    sería peor que no acotar, porque descartaría el resto del partido a ciegas.
+    """
+    if not (direccion or '').strip():
+        return False
+    slug = _slugify(direccion)
+
+    # El discriminador MÁS FUERTE, y el que primero se me pasó: la dirección
+    # nombra su localidad. City Bell y Gonnet también tienen calles 14 y 19, así
+    # que los números solos no alcanzan — "C. 14 709, B1896 City Bell" se lee
+    # igual que una del casco si sólo se miran los números. Pero lo dice.
+    if any(loc in slug for loc in _LOCALIDADES_NO_CASCO):
+        return False
+
+    coords: set[int] = set()
+    for bruto in _CALLE_RE.findall(direccion):
+        n = int(bruto)
+        if n in _CASCO_CALLES:
+            coords.add(n)
+        elif 100 <= n <= 9999 and (n // 100) in _CASCO_CALLES:
+            coords.add(n // 100)   # una altura: su centena es la transversal
+    # Dos coordenadas DISTINTAS: `C. 16 902` da 16 y 9. Una sola no ubica un
+    # punto en una grilla, y sin punto no se puede afirmar que esté adentro.
+    return len(coords) >= 2
 
 
 def agency_matches_zona(direccion: str | None, zona: str) -> bool:
@@ -3125,19 +3567,72 @@ def agency_matches_zona(direccion: str | None, zona: str) -> bool:
     Zona vacía devuelve True — no hay nada que exigir, igual que
     `_item_matches_zona` con un set vacío.
     """
+    coloquiales = {_slugify(c) for c in _ZONAS_COLOQUIALES}
     partes = [p for p in (_slugify(p) for p in zona.split(',')) if p]
-    if not partes:
+    # La parte MÁS ESPECÍFICA que una dirección pueda contener, y sólo esa.
+    #
+    # Exigirlas todas estaba mal por dos motivos distintos, los dos medidos
+    # sobre la base real (2026-09-02):
+    #
+    #  - "casco urbano, La Plata" descartaba 12 de 12 agencias del casco. Nadie
+    #    escribe "casco urbano" en un sobre: es un descriptor, no una localidad.
+    #  - "City Bell, La Plata" descartaba direcciones de City Bell, porque una
+    #    dirección de City Bell dice "B1896 City Bell, Buenos Aires" — nombra la
+    #    localidad y la PROVINCIA, no el partido.
+    #
+    # Con la localidad alcanza: es lo más angosto que la dirección prueba, y
+    # nombrarla ya implica el partido.
+    especifica = next((p for p in partes if p not in coloquiales), None)
+    if especifica is None:
         return True
     if not (direccion or '').strip():
         return False
-    haystack = _slugify(direccion or '')
-    return all(parte in haystack for parte in partes)
+    if especifica not in _slugify(direccion or ''):
+        return False
+    # El casco es un pedido MÁS ANGOSTO que el partido, y en La Plata la
+    # dirección alcanza para distinguirlo. Sin esto, pedir el casco devolvía
+    # las 550 inmobiliarias de todo el partido — medido sobre la base real.
+    pidio_casco = any(p in _CASCO_PEDIDO for p in partes)
+    if pidio_casco and especifica == 'la-plata':
+        return es_casco_la_plata(direccion)
+    return True
+
+
+# Marcas que YA son un portal del catálogo: cada local es una franquicia con
+# dirección propia, así que Google Maps las devuelve como inmobiliarias — pero
+# su inventario ya entra completo, con filtro de zona server-side, por el
+# scraper del portal. Dejarlas en el track de inmobiliarias es pagar un crawler
+# por oficina para releer lo mismo, contar la misma propiedad N veces (una por
+# oficina) e inflar el número de "inmobiliarias en la zona" con sucursales.
+#
+# Cada patrón se ancla en el nombre de marca, nunca en el número suelto: hay
+# inmobiliarias que se llaman "Calle 21" o "Grupo 21".
+_PORTAL_BRAND_NAME_RE = re.compile(r'\bcentury\s*-?\s*21\b|\bc21\b', re.I)
+_PORTAL_BRAND_HOSTS = ('century21.com.ar', 'century21.com', '21online.lat')
+
+
+def agency_is_portal_brand(nombre: str | None, sitio_web: str | None) -> bool:
+    """¿Esta "inmobiliaria" es en realidad una sucursal de un portal nuestro?
+
+    Mira el NOMBRE y el DOMINIO, al revés que `agency_matches_zona` — que mira
+    sólo la dirección, y con razón. La diferencia es qué se pregunta: la zona
+    es un hecho geográfico que el nombre miente todo el tiempo; la marca es un
+    hecho del nombre y del dominio, y no hay otro lugar donde leerla. El
+    dominio cubre al franquiciado que se anuncia con nombre de fantasía.
+    """
+    if nombre and _PORTAL_BRAND_NAME_RE.search(nombre):
+        return True
+    host = (sitio_web or '').lower()
+    return any(h in host for h in _PORTAL_BRAND_HOSTS)
 
 
 def _norm_googlemaps_agency(item: dict[str, Any], zona: str) -> Agency | None:
     import uuid
     name = item.get('title') or item.get('name', '')
     if not name:
+        return None
+    # Descartar ACÁ, antes de que se persista: ver `agency_is_portal_brand`.
+    if agency_is_portal_brand(name, item.get('website')):
         return None
     # Descartar ACÁ es lo que impide que entre a la base: todo lo que sobreviva
     # se persiste bajo `zona_norm` y vuelve del caché en cada búsqueda
@@ -3541,6 +4036,18 @@ async def fetch_page_html_via_actor(url: str) -> str | None:
         if html := page.get('html'):
             return str(html)
     return None
+
+
+# Cuenta de Apify sin crédito. Se prende con el primer `402 Payment Required` y
+# apaga el actor de sitios web por lo que queda del proceso — no tiene sentido
+# preguntarle 551 veces más a una cuenta que ya dijo que no. Reiniciar el server
+# (o recargar la cuenta) lo limpia.
+_apify_sin_credito = False
+
+
+def _es_sin_credito(exc: Exception) -> bool:
+    resp = getattr(exc, 'response', None)
+    return getattr(resp, 'status_code', None) == 402
 
 
 # ── Texto de una página de inmobiliaria, sin el chrome ───────────────────────
@@ -3974,6 +4481,8 @@ class ApifyService(BaseApifyService):
             return await _scrape_inmobusqueda(filters, on_progress)
         if source == 'mudafy':
             return await _scrape_mudafy(filters, on_progress)
+        if source == 'century21':
+            return await _scrape_century21(filters, on_progress)
         if source == 'zonaprop' and not settings.ZONAPROP_USE_APIFY:
             # Default path. `ZONAPROP_USE_APIFY=true` hands ZonaProp back to the
             # Apify actor below, which is left intact for exactly that reason.
@@ -4243,7 +4752,95 @@ class ApifyService(BaseApifyService):
         return agencies
 
     async def scrape_website(self, url: str, on_progress: ProgressCb) -> list[dict[str, str]]:
+        from app.core.config import settings
+        if settings.WEBSITE_USE_APIFY and not _apify_sin_credito:
+            pages = await self._scrape_website_apify(url, on_progress)
+            if pages:
+                return pages
+            # El actor no pudo con este sitio (sin crédito, caído, timeout).
+            # Volver por httpx es peor que Apify y muchísimo mejor que nada:
+            # con la cuenta sin crédito, devolver [] dejó una búsqueda entera
+            # en CERO inmobiliarias cuando el directo igual recupera un tercio.
         return await _scrape_website_direct(url, on_progress)
+
+    async def _scrape_website_apify(
+        self, url: str, on_progress: ProgressCb,
+    ) -> list[dict[str, str]]:
+        """Sitio de inmobiliaria por el Website Content Crawler, pidiendo HTML.
+
+        El motivo de volver a Apify: la mayoría de estos sitios es
+        JS-renderizada y a `httpx` le contestan un cascarón vacío — sin texto y
+        sin fotos. Apify pone el navegador.
+
+        El motivo de NO restaurar el input viejo (`c6ea5f0`): pedía
+        `htmlTransformer: 'readableText'` y mapeaba sólo `{url, text}`. Tiraba
+        el HTML antes de que nadie lo mirara, así que devolvía CERO imágenes —
+        habría empeorado el síntoma que motivó el cambio.
+
+        Acá el actor sólo aporta el navegador. La limpieza del chrome y la
+        cosecha de fotos siguen siendo `_clean_page_text` y
+        `_extract_images_from_html`, el mismo código que usa el camino directo:
+        una sola implementación para los dos caminos.
+        """
+        from app.core.config import settings
+
+        label = url.replace('https://', '').replace('http://', '').split('/')[0]
+        await on_progress(f'web:{label}', 'running', 0)
+
+        input_data: dict[str, Any] = {
+            'startUrls': [{'url': url}],
+            'maxCrawlDepth': 1,
+            'maxCrawlPages': settings.WEBSITE_APIFY_MAX_PAGES,
+            # Las dos claves que separan este camino del viejo: sin el HTML no
+            # hay fotos que extraer.
+            'saveHtml': True,
+            'htmlTransformer': 'none',
+            # `blockMedia` acelera el crawl a costa de no cargar las imágenes,
+            # que es justo lo que venimos a buscar.
+            'blockMedia': False,
+            'removeCookieWarnings': True,
+        }
+
+        try:
+            raw_items = await self._run_actor('website', _ACTORS['website'], input_data)
+        except Exception as exc:
+            # Un 402 no es problema DE ESTE SITIO: es la cuenta sin crédito, y
+            # los 551 intentos siguientes van a fallar igual. Reintentarlos son
+            # 551 requests inútiles y 551 líneas de log que tapan el motivo
+            # real — pasó exactamente así en producción. Se apaga el actor por
+            # lo que queda del proceso y se avisa UNA vez, fuerte.
+            if _es_sin_credito(exc):
+                global _apify_sin_credito
+                _apify_sin_credito = True
+                logger.error(
+                    'APIFY SIN CRÉDITO (402): el actor de sitios web queda '
+                    'apagado por lo que queda de este proceso y las '
+                    'inmobiliarias siguen por el scraper directo. '
+                    'Recargá la cuenta y reiniciá el server.',
+                )
+            else:
+                logger.warning('website actor falló para %s: %s', url, exc)
+            # `[]` acá NO es el resultado final: `scrape_website` lo lee como
+            # "probá por el camino directo".
+            return []
+
+        pages: list[dict[str, str]] = []
+        for item in raw_items:
+            html = item.get('html') or ''
+            if not html:
+                continue
+            page_url = item.get('url') or url
+            texto = _clean_page_text(html, page_url)
+            if not texto:
+                continue
+            pages.append({
+                'url': page_url,
+                'text': texto[:8000],
+                'images': _extract_images_from_html(html, page_url)[:20],  # type: ignore[dict-item]
+            })
+
+        await on_progress(f'web:{label}', 'done', len(pages))
+        return pages
 
     async def scrape_instagram_profile(self, handle: str, on_progress: ProgressCb) -> list[RawProperty]:
         await on_progress(f'instagram:{handle}', 'running', 0)

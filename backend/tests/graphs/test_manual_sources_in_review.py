@@ -74,7 +74,7 @@ def _state(agencies: list[Agency]) -> dict:
 
 
 def _patch_fetch(monkeypatch, rows: list[dict]) -> None:
-    async def _fake_fetch(sb, zona=None):
+    async def _fake_fetch(sb, zona=None, **_kw):
         return list(rows)
 
     monkeypatch.setattr(nodes, '_fetch_active_manual_sources', _fake_fetch)

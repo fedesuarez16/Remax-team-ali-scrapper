@@ -52,7 +52,7 @@ async def test_portales_only_never_consults_manual_sources() -> None:
 async def test_inmobiliarias_zona_is_passed_through_to_the_fetch(monkeypatch) -> None:
     captured: dict = {}
 
-    async def _fake_fetch(sb, zona=None):
+    async def _fake_fetch(sb, zona=None, **_kw):
         captured['zona'] = zona
         return [{'nombre': 'Inmobiliaria A', 'url': 'https://a.com'}]
 
@@ -75,7 +75,7 @@ async def test_inmobiliarias_zona_is_passed_through_to_the_fetch(monkeypatch) ->
 async def test_todas_las_zonas_passes_none(monkeypatch) -> None:
     captured: dict = {}
 
-    async def _fake_fetch(sb, zona=None):
+    async def _fake_fetch(sb, zona=None, **_kw):
         captured['zona'] = zona
         return []
 
@@ -94,7 +94,7 @@ async def test_missing_selection_still_fetches_all_manual_sources(monkeypatch) -
     """Legacy/omitted selection must behave exactly as before the feature."""
     captured: dict = {}
 
-    async def _fake_fetch(sb, zona=None):
+    async def _fake_fetch(sb, zona=None, **_kw):
         captured['zona'] = zona
         return [{'nombre': 'Inmobiliaria A', 'url': 'https://a.com'}]
 

@@ -58,6 +58,8 @@ export type Message =
        * Se muestran junto a las descubiertas para que el operador vea (y pueda
        * destildar) TODO lo que se va a scrapear, no solo lo de Google Maps. */
       manualSources: ReviewManualSource[]
+      /** USD estimados por inmobiliaria, del backend. `null` = backend viejo. */
+      usdPorSitio: number | null
       message: string; jobId: string
     }
 
@@ -173,6 +175,7 @@ export function useSSEStream() {
         // Un backend anterior a este campo no lo manda: `[]` deja la tarjeta
         // igual que antes en vez de romper el render.
         manualSources: d.manual_sources ?? [],
+        usdPorSitio: typeof d.usd_por_sitio === 'number' ? d.usd_por_sitio : null,
         message: d.message,
         jobId,
       }])

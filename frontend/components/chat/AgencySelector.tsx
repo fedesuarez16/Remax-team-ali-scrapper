@@ -29,6 +29,10 @@ type Props = {
    * (which only sent `agencies`) keeps rendering. */
   manualSources?: ReviewManualSource[]
   message: string
+  /** USD estimados por inmobiliaria (tokens + Apify si está encendido). Viene
+   * del backend porque depende de settings que el cliente no conoce. Ausente
+   * en un backend anterior a este campo: ahí no se muestra costo. */
+  usdPorSitio?: number | null
   onConfirm: (selectedIds: string[], selectedManualSourceIds: string[]) => void
   disabled?: boolean
 }
@@ -37,6 +41,7 @@ export function AgencySelector({
   agencies,
   manualSources = [],
   message,
+  usdPorSitio = null,
   onConfirm,
   disabled,
 }: Props) {
@@ -109,6 +114,21 @@ export function AgencySelector({
             <AgencyRow key={a.id} agency={a} checked={selected.has(a.id)}
               onChange={() => toggle(a.id)} disabled={disabled} />
           ))}
+        </div>
+      )}
+
+      {/* El costo, donde se toma la decisión.
+          El selector llega con TODAS tildadas: con 552 inmobiliarias en
+          pantalla, "Continuar" autorizaba una decena de dólares sin que nada
+          lo dijera. Destildar 500 es la palanca de ahorro más grande que hay —
+          diez veces cualquier optimización de prompt — pero el operador no
+          puede elegir lo que no ve. */}
+      {usdPorSitio != null && selectedCount > 0 && (
+        <div className="flex items-baseline justify-between rounded-xl bg-muted/50 px-3 py-2">
+          <span className="text-xs text-muted-foreground">Costo estimado</span>
+          <span className="text-sm font-semibold tabular-nums text-foreground">
+            ~USD {(usdPorSitio * selectedCount).toFixed(2)}
+          </span>
         </div>
       )}
 

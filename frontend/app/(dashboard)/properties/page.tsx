@@ -43,6 +43,52 @@ function PropertiesPage() {
 
   const enviadasCount = shown.filter((p) => p.enviada_at).length
 
+  // Lo que el backend marcó como fuera de criterio (otra zona, precio fuera de
+  // rango) baja a un desplegable cerrado. No se descarta: una dirección que el
+  // LLM leyó sin ciudad puede haber caído acá siendo de la zona, y perderla
+  // sería peor que mostrarla escondida.
+  //
+  // El índice original viaja con cada propiedad porque `keyFor(p, i)` lo usa
+  // para la selección: reindexar cada grupo desde cero haría que tildar una de
+  // arriba tildara otra de abajo.
+  const conIndice = shown.map((p, i) => ({ p, i }))
+  const coinciden = conIndice.filter(({ p }) => p.matches_criteria !== false)
+  const fuera = conIndice.filter(({ p }) => p.matches_criteria === false)
+
+  /** Una tarjeta del listado. Vive acá porque las dos secciones — las que
+   *  coinciden y el desplegable — muestran exactamente la misma tarjeta, y
+   *  duplicar el JSX garantizaba que una de las dos se quedara sin el
+   *  checkbox o sin el botón del mapa. */
+  const renderCard = (p: Property, i: number) => {
+    const key = keyFor(p, i)
+    const isSel = selected.has(key)
+    return (
+      <div
+        key={key}
+        className={cn(
+          'relative rounded-2xl transition',
+          isSel && 'ring-2 ring-foreground ring-offset-2 ring-offset-background'
+        )}
+      >
+        <SelectCheckbox selected={isSel} onToggle={() => toggle(key)} />
+        {p.id && p.lat != null && p.lng != null && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              router.push(`/map?focus=${encodeURIComponent(p.id!)}`)
+            }}
+            aria-label="Ver en el mapa"
+            title="Ver en el mapa"
+            className="absolute right-2 top-2 z-20 flex size-6 items-center justify-center rounded-md border border-border bg-background/90 text-foreground shadow-sm backdrop-blur-sm transition hover:border-foreground/40 hover:bg-muted"
+          >
+            <MapPin className="size-3.5" />
+          </button>
+        )}
+        <PropertyCard p={p} />
+      </div>
+    )
+  }
+
   const allSelected =
     shown.length > 0 && shown.every((p, i) => selected.has(keyFor(p, i)))
 
@@ -206,37 +252,29 @@ function PropertiesPage() {
             </div>
           </div>
         ) : (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {shown.map((p, i) => {
-              const key = keyFor(p, i)
-              const isSel = selected.has(key)
-              return (
-                <div
-                  key={key}
-                  className={cn(
-                    'relative rounded-2xl transition',
-                    isSel && 'ring-2 ring-foreground ring-offset-2 ring-offset-background'
-                  )}
-                >
-                  <SelectCheckbox selected={isSel} onToggle={() => toggle(key)} />
-                  {p.id && p.lat != null && p.lng != null && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        router.push(`/map?focus=${encodeURIComponent(p.id!)}`)
-                      }}
-                      aria-label="Ver en el mapa"
-                      title="Ver en el mapa"
-                      className="absolute right-2 top-2 z-20 flex size-6 items-center justify-center rounded-md border border-border bg-background/90 text-foreground shadow-sm backdrop-blur-sm transition hover:border-foreground/40 hover:bg-muted"
-                    >
-                      <MapPin className="size-3.5" />
-                    </button>
-                  )}
-                  <PropertyCard p={p} />
+          <>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {coinciden.map(({ p, i }) => renderCard(p, i))}
+            </div>
+
+            {/* Lo scrapeado que NO cumple los criterios (otra zona, precio fuera
+                de rango). Se guarda y se muestra porque una dirección mal leída
+                puede haberlo mandado acá por error — pero cerrado, para que no
+                compita con lo que el usuario realmente pidió. */}
+            {fuera.length > 0 && (
+              <details className="mt-6 rounded-2xl border border-border bg-card">
+                <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium text-foreground marker:text-muted-foreground">
+                  Otras {fuera.length} {fuera.length === 1 ? 'propiedad encontrada' : 'propiedades encontradas'} fuera de tus criterios
+                  <span className="ml-2 font-normal text-muted-foreground">
+                    (otra zona o precio fuera de rango)
+                  </span>
+                </summary>
+                <div className="grid grid-cols-1 gap-4 border-t border-border p-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {fuera.map(({ p, i }) => renderCard(p, i))}
                 </div>
-              )
-            })}
-          </div>
+              </details>
+            )}
+          </>
         )}
       </div>
 

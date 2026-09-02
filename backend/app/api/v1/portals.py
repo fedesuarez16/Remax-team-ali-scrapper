@@ -27,6 +27,7 @@ PORTAL_CATALOG: list[dict[str, str]] = [
     {'id': 'remax', 'label': 'RE/MAX'},
     {'id': 'inmobusqueda', 'label': 'InmoBusqueda'},
     {'id': 'mudafy', 'label': 'Mudafy'},
+    {'id': 'century21', 'label': 'CENTURY 21'},
 ]
 _PORTAL_IDS = {p['id'] for p in PORTAL_CATALOG}
 

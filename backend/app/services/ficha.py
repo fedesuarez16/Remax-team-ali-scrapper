@@ -355,7 +355,7 @@ async def _zonaprop_gallery(url_origen: str, allow_escalation: bool = True) -> l
 # Portales con parser propio, por host. La clave es un fragmento del dominio
 # porque MercadoLibre reparte los avisos entre subdominios por tipo de
 # propiedad (`casa.`, `departamento.`, `ph.`, `terreno.`, `articulo.`).
-_PORTAL_HOSTS = ('mercadolibre', 'zonaprop', 'remax')
+_PORTAL_HOSTS = ('mercadolibre', 'zonaprop', 'remax', 'century21')
 
 
 async def portal_gallery_from_url(url: str, allow_escalation: bool = True) -> list[str]:
@@ -379,6 +379,11 @@ async def portal_gallery_from_url(url: str, allow_escalation: bool = True) -> li
     if 'remax' in host:
         from app.services.apify import remax_gallery_from_url
         return await remax_gallery_from_url(url)
+    if 'century21' in host:
+        # El listado sirve 10 miniaturas aunque el aviso tenga 22 fotos; la
+        # ficha las trae todas por la misma API.
+        from app.services.apify import century21_gallery_from_url
+        return await century21_gallery_from_url(url)
     return []
 
 

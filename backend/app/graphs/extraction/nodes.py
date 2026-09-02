@@ -25,6 +25,7 @@ from app.services.apify import (
     get_apify_service,
     harvest_page_images,
 )
+from app.services.dedup import collapse_duplicates
 from app.services.llm_costs import (
     SCOPE_EXTRACT_INSTAGRAM,
     SCOPE_EXTRACT_WEBSITE,
@@ -237,7 +238,30 @@ def _read_selection(state: ScrapingState) -> dict[str, Any]:
         'portales': [str(p) for p in (sel.get('portales') or [])],
         'buscar_inmobiliarias': bool(sel.get('buscar_inmobiliarias', True)),
         'zona_inmobiliarias': zona or None,
+        'solo_fuentes_cargadas': bool(sel.get('solo_fuentes_cargadas', False)),
     }
+
+
+def _hay_que_descubrir_agencias(selection: dict[str, Any]) -> bool:
+    """¿Sale Google Maps a buscar inmobiliarias nuevas?
+
+    El descubrimiento es lo que llena la búsqueda de inmobiliarias que nadie
+    eligió — 390 en una zona — con todo lo que cuesta scrapearlas y
+    analizarlas. Se apaga en tres casos, y conviene que estén juntos y con
+    nombre:
+
+    - no se buscan inmobiliarias en absoluto;
+    - `solo_fuentes_cargadas`: el operador pidió su registro y nada más;
+    - hay una `zona_inmobiliarias` elegida, que ya significaba "consultá sólo
+      lo que clasifiqué en esa zona". Ese caso funcionaba de rebote, como
+      efecto secundario de un flag que hacía dos cosas — por eso no había forma
+      de pedir "sólo las cargadas, en cualquier zona".
+    """
+    if not selection['buscar_inmobiliarias']:
+        return False
+    if selection['solo_fuentes_cargadas']:
+        return False
+    return not selection['zona_inmobiliarias']
 
 
 def _env_allowed_sources() -> tuple[str, ...]:
@@ -249,7 +273,7 @@ def _env_allowed_sources() -> tuple[str, ...]:
         # which is the very situation that motivated moving it off the actor.
         # Back through the actor (`ZONAPROP_USE_APIFY`), it is an Apify source
         # again and stays out.
-        direct = ['mercadolibre', 'inmobusqueda', 'mudafy']
+        direct = ['mercadolibre', 'inmobusqueda', 'mudafy', 'century21']
         if not settings.ZONAPROP_USE_APIFY:
             direct.insert(0, 'zonaprop')
         return tuple(direct)
@@ -283,7 +307,7 @@ def route_after_parse(state: ScrapingState) -> str | list[Any]:
     # `review_agencies`, becomes the single inmobiliaria source. "Todas las
     # zonas" keeps discovery on: it's the broadest search, unchanged from
     # before the selector existed.
-    descubrir_agencias = buscar_inmobiliarias and not selection['zona_inmobiliarias']
+    descubrir_agencias = _hay_que_descubrir_agencias(selection)
 
     # Fan-out: one portal-scraper + agency-discovery branch per (unit × source)
     sends: list[Any] = []
@@ -511,10 +535,33 @@ def deduplicate_properties(state: ScrapingState) -> dict[str, Any]:
     return {'normalized_properties': unique}
 
 
+def _zonas_pedidas(f: ScrapingFilters) -> list[str]:
+    """Las zonas que el usuario pidió, por orden de precisión.
+
+    `zona_pedida` es lo que se preguntó y nunca se reescribe; `zona` se mueve
+    cuando la cadena de candidatos ensancha la URL de búsqueda. Filtrar por
+    `zona` dejaría que ensanchar la BÚSQUEDA ensanche también la RESPUESTA.
+    """
+    return [z for z in ([f.zona_pedida] + f.zonas + f.localidades + [f.zona]) if z]
+
+
 def _matches_filters(p: NormalizedProperty, f: ScrapingFilters | None) -> bool:
     """Search-result criteria. Missing data on a property never excludes it."""
     if f is None:
         return True
+    # La zona no se miraba acá, y los portales la filtran en el ORIGEN
+    # (`_item_matches_zona`) mientras que el track de inmobiliarias no la
+    # filtra en ningún lado. Resultado: una propiedad de Mar del Plata llegaba
+    # marcada como COINCIDENTE en una búsqueda del casco de La Plata y salía
+    # arriba de todo, mezclada con las buenas.
+    #
+    # Una dirección ilegible no excluye, igual que un precio ausente: sin dato
+    # no hay evidencia de que NO sea de la zona, y esto decide el ORDEN, no qué
+    # se descarta — lo que no coincide se sigue guardando y mostrando.
+    zonas = _zonas_pedidas(f)
+    if zonas and (p.direccion or '').strip():
+        if not any(agency_matches_zona(p.direccion, z) for z in zonas):
+            return False
     if p.precio is not None:
         if f.precio_min is not None and p.precio < f.precio_min:
             return False
@@ -600,6 +647,11 @@ def _prop_to_dict(p: NormalizedProperty, job_id: str | None) -> dict[str, Any]:
 
 
 _AGENCY_CACHE_MIN_ROWS = 1  # >=1 fresh row for the zona → serve from cache, skip Apify
+# La pertenencia a una zona la decide la DIRECCIÓN, y eso se evalúa en Python
+# (`agency_matches_zona`), no en SQL. Así que la lectura trae las agencias
+# frescas y filtra acá. El tope existe para que la consulta no crezca sin
+# límite a medida que la base se llena; con ~1000 agencias hoy, sobra.
+_AGENCY_CACHE_MAX_ROWS = 5000
 
 
 def _agency_row_to_model(row: dict[str, Any]) -> Agency:
@@ -649,7 +701,7 @@ async def _read_cached_agencies(sb: Any, zona_norm: str, zona: str = '') -> list
     Las filas no se borran, sólo dejan de contestar por una zona que no es la
     suya.
     """
-    if sb is None or not zona_norm:
+    if sb is None or not zona_norm or not (zona or '').strip():
         return []
     from datetime import datetime, timedelta, timezone
     cutoff = (datetime.now(timezone.utc)
@@ -657,8 +709,14 @@ async def _read_cached_agencies(sb: Any, zona_norm: str, zona: str = '') -> list
     res = await (
         sb.table('real_estate_agencies')
         .select('*')
-        .eq('zona_norm', zona_norm)
+        # SIN `.eq('zona_norm', ...)`, y es el corazón del arreglo. Ese campo
+        # guarda la zona que se BUSCÓ cuando la agencia se descubrió, no dónde
+        # está: `Barreira` tiene dirección en City Bell y quedó fichada bajo
+        # 'melchor romero' porque esa fue la búsqueda que la encontró. Filtrar
+        # con él convertía un accidente de descubrimiento en el criterio de
+        # pertenencia, y se llevaba puesto el 95% de las agencias del casco.
         .gte('scraped_at', cutoff)
+        .limit(_AGENCY_CACHE_MAX_ROWS)
         .execute()
     )
     return [
@@ -914,7 +972,9 @@ async def save_portal_properties(state: dict[str, Any], config: RunnableConfig) 
 
 # ── Phase 1 → Phase 2 bridge: agency review interrupt ─────────────────────────
 
-async def _fetch_active_manual_sources(sb: Any, zona: str | None = None) -> list[dict]:
+async def _fetch_active_manual_sources(
+    sb: Any, zona: str | None = None, *, incluir_sin_zona: bool = False,
+) -> list[dict]:
     """Manually-registered sources (backend/app/api/v1/manual_sources.py) —
     e.g. a RE/MAX office or small inmobiliaria not surfaced by the Google
     Maps 'inmobiliarias en {zona}' search.
@@ -927,14 +987,27 @@ async def _fetch_active_manual_sources(sb: Any, zona: str | None = None) -> list
     folded in this run."""
     if sb is None:
         return []
+    acotar_en_sql = bool(zona and zona.strip()) and not incluir_sin_zona
     try:
-        query = sb.table('manual_sources').select('id,nombre,url,zona').eq('activo', True)
-        if zona and zona.strip():
-            query = query.eq('zona_norm', _normalize_zona(zona))
+        query = (
+            sb.table('manual_sources')
+            .select('id,nombre,url,zona,zona_norm')
+            .eq('activo', True)
+        )
+        if acotar_en_sql:
+            query = query.eq('zona_norm', _normalize_zona(zona or ''))
         res = await query.execute()
-        return res.data or []
+        filas = res.data or []
     except Exception:
         return []
+    if acotar_en_sql or not (zona or '').strip():
+        return filas
+    # Camino permisivo: una fuente cargada SIN zona vale para toda búsqueda, no
+    # para ninguna. Medido sobre la base real, las 248 fuentes cargadas tienen
+    # `zona_norm` en NULL — acotarlas por la zona del prompt las borraba a
+    # todas y el registro curado quedaba vacío sin que nada lo dijera.
+    objetivo = _normalize_zona(zona or '')
+    return [f for f in filas if not (f.get('zona_norm') or '') or f.get('zona_norm') == objetivo]
 
 
 def _read_agency_selection(resumed: Any) -> tuple[list[str], list[str] | None]:
@@ -968,13 +1041,64 @@ def _review_message(agencies_count: int, manual_count: int) -> str:
     return f'{encontradas} Seleccioná las que querés incluir para buscar propiedades en sus sitios web.'
 
 
+# Lo que cuesta analizar UNA página con Haiku, medido sobre el prompt y el
+# texto reales: ~442 tokens de sistema + herramienta, ~1500 del texto de la
+# página (`text[:6000]`) y ~300 de salida. A USD 1/MTok de entrada y USD 5/MTok
+# de salida eso da ~USD 0.0034.
+_USD_LLM_POR_PAGINA = 0.0034
+# El Website Content Crawler es pay-per-usage: ~USD 0.5-5 por cada 1.000
+# páginas con navegador (apify.com/apify/website-content-crawler, 2026-09-02).
+# Se toma el medio del rango, que es lo honesto para una estimación.
+_USD_APIFY_POR_PAGINA = 0.002
+
+
+def _costo_estimado_por_sitio() -> float:
+    """USD aproximados de scrapear y analizar UNA inmobiliaria.
+
+    Existe para que el número esté donde se toma la decisión. El selector llega
+    con TODAS las inmobiliarias tildadas: con 552 en pantalla, "Continuar"
+    autoriza una decena de dólares sin que nada lo diga. Tildar 50 en vez de
+    552 es 10x — ninguna optimización de prompt compite con eso, pero el
+    operador no puede elegir lo que no ve.
+
+    Es una ESTIMACIÓN: sitios distintos traen páginas de tamaños distintos. El
+    orden de magnitud es lo que importa, y es lo que el test fija.
+    """
+    from app.core.config import settings
+    if settings.WEBSITE_USE_APIFY:
+        paginas = max(1, settings.WEBSITE_APIFY_MAX_PAGES)
+        return paginas * (_USD_LLM_POR_PAGINA + _USD_APIFY_POR_PAGINA)
+    # Camino directo: la home más las sub-páginas que se sigan. No cuesta
+    # Apify, sólo tokens.
+    paginas = 1 + max(0, settings.WEBSITE_MAX_SUBPAGES)
+    return paginas * _USD_LLM_POR_PAGINA
+
+
 async def review_agencies(state: ScrapingState, config: RunnableConfig) -> dict[str, Any]:
     agencies = state.get('agencies', [])
     sb = config['configurable'].get('supabase')
     selection = _read_selection(state)
     # Portales-only search: the inmobiliarias registry is never consulted.
+    # `zona_inmobiliarias` es un desplegable APARTE del prompt, y su default es
+    # "todas las zonas". Con eso vacío se traían las inmobiliarias curadas de
+    # TODA la base — 249 de zonas que el usuario nunca nombró, en una búsqueda
+    # del casco de La Plata. Nadie pidió eso: lo pidió un campo vacío.
+    #
+    # Vacío ahora significa "la zona que escribí en el prompt", que es lo que
+    # el operador cree que está pidiendo. Para buscar en todas las zonas se
+    # elige explícitamente en el selector.
+    filtros_zona = state.get('filters')
+    zona_registro = selection['zona_inmobiliarias'] or (
+        (filtros_zona.zona_pedida or filtros_zona.zona) if filtros_zona else None
+    )
+    # Estricto cuando el operador ELIGIÓ una zona en el selector ("sólo las que
+    # clasifiqué ahí"); permisivo cuando la zona sale del prompt, porque ahí
+    # nunca pidió esa exigencia y una fuente sin clasificar sigue siendo suya.
     manual_sources = (
-        await _fetch_active_manual_sources(sb, selection['zona_inmobiliarias'])
+        await _fetch_active_manual_sources(
+            sb, zona_registro,
+            incluir_sin_zona=not selection['zona_inmobiliarias'],
+        )
         if selection['buscar_inmobiliarias'] else []
     )
 
@@ -992,6 +1116,9 @@ async def review_agencies(state: ScrapingState, config: RunnableConfig) -> dict[
     # that nothing gets scraped without the operator seeing it first.
     await adispatch_custom_event('agencies_review', {
         'event': 'agencies_review',
+        # Por SITIO, no el total: el cliente lo multiplica por lo que haya
+        # tildado, así el número se actualiza mientras destilda sin volver acá.
+        'usd_por_sitio': _costo_estimado_por_sitio(),
         'agencies': [a.model_dump() for a in agencies],
         'manual_sources': manual_sources,
         'message': _review_message(len(agencies), len(manual_sources)),
@@ -1491,6 +1618,16 @@ async def save_website_properties(state: dict[str, Any], config: RunnableConfig)
     job_id = state.get('job_id')
     props: list[NormalizedProperty] = state.get('website_properties', [])
 
+    # Dos inmobiliarias publicando la misma propiedad son UNA propiedad. El
+    # dedup de portales no cubría este track: todas estas filas llevan
+    # `fuente='googlemaps'`, así que para su regla los 552 sitios eran UN
+    # catálogo (ver app.services.dedup).
+    #
+    # Se colapsa acá ADEMÁS de al servir, para que el `property_batch` que el
+    # cliente ve durante la corrida cuente lo mismo que la lista final: decir
+    # "300 encontradas" y después mostrar 180 se lee como resultados perdidos.
+    props = collapse_duplicates(props)
+
     # Save EVERYTHING scraped to the global catalog, regardless of criteria
     await _upsert_properties(sb, props, job_id)
 
@@ -1647,6 +1784,10 @@ async def save_instagram_properties(state: dict[str, Any], config: RunnableConfi
     sb = config['configurable'].get('supabase')
     job_id = state.get('job_id')
     props: list[NormalizedProperty] = state.get('instagram_properties', [])
+
+    # Mismo motivo que en el track de sitios web: dos perfiles que postean la
+    # misma propiedad son una sola, y este track tampoco pasaba por el dedup.
+    props = collapse_duplicates(props)
 
     # Save EVERYTHING scraped to the global catalog, regardless of criteria
     await _upsert_properties(sb, props, job_id)

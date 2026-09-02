@@ -21,12 +21,14 @@ export type Filter = {
   q: string
   /** '' = todas, 'true' = sólo enviadas, 'false' = sólo pendientes. */
   enviada: string
+  /** Gran La Plata locality slug — '' = todas. See `ZONAS`. */
+  zona: string
 }
 
 export const EMPTY_FILTER: Filter = {
   fuente: '', tipo_operacion: '', tipo_propiedad: '', moneda: '',
   precio_min: '', precio_max: '', ambientes_min: '', banos_min: '',
-  cocheras_min: '', m2_min: '', m2_max: '', q: '', enviada: '',
+  cocheras_min: '', m2_min: '', m2_max: '', q: '', enviada: '', zona: '',
 }
 
 export const ENVIADAS = [
@@ -43,6 +45,7 @@ export const FUENTES = [
   { value: 'remax', label: 'RE/MAX' },
   { value: 'inmobusqueda', label: 'InmoBusqueda' },
   { value: 'mudafy', label: 'Mudafy' },
+  { value: 'century21', label: 'CENTURY 21' },
   { value: 'googlemaps', label: 'Sitios web' },
 ]
 
@@ -61,6 +64,33 @@ export const TIPOS_PROPIEDAD = [
   { value: 'oficina', label: 'Oficina' },
   { value: 'terreno', label: 'Terreno' },
   { value: 'otro', label: 'Otro' },
+]
+
+// Zona catalogue — mirrors backend/app/services/zona.py::ZONA_TERMS. The
+// properties table has no locality column, so a zona is whatever locality the
+// address itself names.
+const ZONA_TERMS: Record<string, string[]> = {
+  la_plata: ['la plata'],
+  city_bell: ['city bell', 'citybell'],
+  gonnet: ['gonnet'],
+  villa_elisa: ['villa elisa'],
+  hudson: ['hudson'],
+}
+
+// "La Plata" is also the partido containing City Bell, Gonnet and Villa Elisa
+// ("City Bell, La Plata"), so it has to negate its siblings or it swallows
+// them. The reverse never applies: a City Bell address IS a City Bell listing.
+const ZONA_EXCLUDES: Record<string, string[]> = {
+  la_plata: ['city bell', 'citybell', 'gonnet', 'villa elisa', 'hudson'],
+}
+
+export const ZONAS = [
+  { value: '', label: 'Todas' },
+  { value: 'la_plata', label: 'La Plata' },
+  { value: 'city_bell', label: 'City Bell' },
+  { value: 'gonnet', label: 'Gonnet' },
+  { value: 'villa_elisa', label: 'Villa Elisa' },
+  { value: 'hudson', label: 'Hudson' },
 ]
 
 export const MONEDAS = [
@@ -114,8 +144,20 @@ const gte = (val: number | null | undefined, min: number | null): boolean =>
 const lte = (val: number | null | undefined, max: number | null): boolean =>
   max == null || (val != null && val <= max)
 
+// Mirrors the backend clause. It only reads `direccion` — `direccion_norm` is
+// derived from it (lowercase + accent-strip) and no zona term carries an
+// accent, so the lowercased raw address is an equivalent haystack.
+const matchesZona = (p: FilterableProperty, zona: string): boolean => {
+  const terms = ZONA_TERMS[zona]
+  if (!terms) return true
+  const hay = (p.direccion ?? '').toLowerCase()
+  if (!terms.some((t) => hay.includes(t))) return false
+  return !(ZONA_EXCLUDES[zona] ?? []).some((t) => hay.includes(t))
+}
+
 /** True when the property satisfies every active filter clause. */
 export function matchesFilter(p: FilterableProperty, f: Filter): boolean {
+  if (!matchesZona(p, f.zona)) return false
   if (!eqStr(p.fuente, f.fuente)) return false
   if (!eqStr(p.tipo_operacion, f.tipo_operacion)) return false
   if (!eqStr(p.tipo_propiedad, f.tipo_propiedad)) return false
@@ -218,6 +260,7 @@ export function FilterBar({
           placeholder="Buscar por ubicación o título..."
           className="w-56 rounded-lg border border-border bg-card px-2.5 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
         />
+        <FilterSelect label="Zona" value={filter.zona} options={ZONAS} onChange={set('zona')} />
         <FilterSelect label="Fuente" value={filter.fuente} options={FUENTES} onChange={set('fuente')} />
         <FilterSelect label="Operación" value={filter.tipo_operacion} options={OPERACIONES} onChange={set('tipo_operacion')} />
         <FilterSelect label="Tipo" value={filter.tipo_propiedad} options={TIPOS_PROPIEDAD} onChange={set('tipo_propiedad')} />

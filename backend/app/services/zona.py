@@ -136,3 +136,44 @@ def zona_candidates(zona: str) -> list[str]:
             break
         parts = parts[1:]
     return chain
+
+
+# --- Zona filter catalogue (Gran La Plata) ------------------------------------
+#
+# `properties` has no locality column — the baseline migration only stores
+# `direccion`/`direccion_norm` — so the locality named inside the address is the
+# only signal a "Zona" filter can stand on. Each entry lists the phrases that
+# identify its locality; portals spell City Bell both ways, hence two terms.
+ZONA_TERMS: dict[str, tuple[str, ...]] = {
+    'la_plata': ('la plata',),
+    'city_bell': ('city bell', 'citybell'),
+    'gonnet': ('gonnet',),
+    'villa_elisa': ('villa elisa',),
+    'hudson': ('hudson',),
+}
+
+# "La Plata" names BOTH a locality and the partido containing City Bell, Gonnet
+# and Villa Elisa, which portals publish as "City Bell, La Plata". Left
+# unqualified the La Plata option would swallow its own siblings, so it negates
+# them — a picker implies its options are mutually exclusive. The reverse is not
+# true: "City Bell, La Plata" IS a City Bell listing, so no other zona excludes.
+ZONA_EXCLUDES: dict[str, tuple[str, ...]] = {
+    'la_plata': tuple(
+        term
+        for slug, terms in ZONA_TERMS.items() if slug != 'la_plata'
+        for term in terms
+    ),
+}
+
+
+def zona_filter(slug: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """``(match_terms, exclude_terms)`` for a zona slug, or ``None`` if unknown.
+
+    Callers turn `match` into an OR of `ilike` clauses and `exclude` into
+    negated `ilike`s. Unknown slugs return ``None`` rather than an empty filter
+    so a typo surfaces instead of silently widening the result set.
+    """
+    terms = ZONA_TERMS.get(slug)
+    if terms is None:
+        return None
+    return terms, ZONA_EXCLUDES.get(slug, ())

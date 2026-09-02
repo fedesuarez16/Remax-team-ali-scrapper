@@ -16,6 +16,7 @@ from app.services.importer import import_property_from_url as _import_property
 from app.services.geocode import backfill_state as _backfill_state
 from app.services.geocode import run_backfill as _run_backfill
 from app.services.matcher import match_properties as _match_properties
+from app.services.zona import zona_filter as _zona_filter
 
 router = APIRouter()
 
@@ -38,6 +39,7 @@ async def list_properties(
     m2_max: float | None = None,
     q: str | None = None,
     enviada: bool | None = None,
+    zona: str | None = None,
 ) -> dict[str, Any]:
     """List properties from Supabase, most recent first, with pagination.
 
@@ -48,10 +50,17 @@ async def list_properties(
     ``enviada`` splits the list by the "ya se la mandé al cliente" mark
     (``enviada_at``): ``true`` keeps only the sent ones, ``false`` only the
     pending ones.
+    ``zona`` is a Gran La Plata locality slug (see
+    ``app.services.zona.ZONA_TERMS``); since the table has no locality column
+    it resolves to an ``ilike`` over ``direccion``/``direccion_norm``.
     """
     sb = request.app.state.supabase
     if sb is None:
         return {'properties': [], 'total': 0, 'message': 'Supabase no configurado'}
+
+    zona_spec = _zona_filter(zona) if zona else None
+    if zona and zona_spec is None:
+        return {'properties': [], 'total': 0, 'error': f'zona desconocida: {zona}'}
 
     try:
         query = (
@@ -92,6 +101,19 @@ async def list_properties(
                     f'direccion.ilike.*{term}*,'
                     f'direccion_norm.ilike.*{term}*'
                 )
+        if zona_spec is not None:
+            match, exclude = zona_spec
+            # PostgREST ANDs repeated top-level filters, so this `or` composes
+            # with the `q` one above instead of replacing it.
+            query = query.or_(','.join(
+                f'{column}.ilike.*{term}*'
+                for term in match
+                for column in ('direccion', 'direccion_norm')
+            ))
+            # `direccion_norm` is derived from `direccion`, so negating the raw
+            # column alone already covers both.
+            for term in exclude:
+                query = query.not_.ilike('direccion', f'*{term}*')
         result = await query.range(offset, offset + limit - 1).execute()
         return {'properties': result.data, 'total': result.count or 0}
     except Exception as e:

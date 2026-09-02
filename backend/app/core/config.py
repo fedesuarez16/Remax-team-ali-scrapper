@@ -44,6 +44,25 @@ class Settings(BaseSettings):
     # (`og:image` + `<img>`) y las fichas que quedan cortas las recupera
     # `harvest_page_images`, que rinde con presupuesto acotado.
     WEBSITE_RENDER_GALLERIES: bool = False
+    # Los sitios de INMOBILIARIAS por el Website Content Crawler de Apify en vez
+    # de httpx directo. Los portales NO se tocan: siguen por su camino directo.
+    #
+    # Por qué existe: la mayoría de estos sitios es JS-renderizada y a httpx le
+    # contesta un cascarón vacío — sin texto y sin fotos. Apify pone el
+    # navegador; la limpieza y las imágenes las seguimos haciendo nosotros
+    # sobre el HTML que devuelve (ver `_scrape_website_apify`).
+    #
+    # CUESTA: el actor es pay-per-usage (USD 0.25/CU; ~USD 0.5-5 por cada 1.000
+    # páginas con navegador). Un run POR SITIO — con 552 inmobiliarias y
+    # `WEBSITE_APIFY_MAX_PAGES` páginas cada uno, el gasto es de otro orden que
+    # el camino directo. `APIFY_MAX_USD_PER_SEARCH` lo corta: con el tope en 1
+    # USD sólo alcanza para las primeras inmobiliarias y el resto se rechaza.
+    WEBSITE_USE_APIFY: bool = False
+    # Medido sobre sitios reales de La Plata (2026-09-02): con 5 páginas por
+    # sitio, Dacal pasó de 28 caracteres a 14.970 y Keymex de 180 a 28.068 —
+    # 3 a 5 páginas útiles cada uno. Las 15 del camino viejo triplicaban el
+    # gasto sin traer nada que el LLM fuera a leer.
+    WEBSITE_APIFY_MAX_PAGES: int = 5     # páginas por sitio; PAGO por página
     # Cuántas fichas se visitan para traerles la galería. Estaba clavado en 30
     # dentro del nodo: una búsqueda que devuelve 300 propiedades le buscaba
     # fotos a 30 y las otras 270 salían sin una sola imagen — que es como se
@@ -95,6 +114,7 @@ class Settings(BaseSettings):
     MERCADOLIBRE_MAX_PAGES: int = 0      # páginas por búsqueda de MercadoLibre (48 tarjetas c/u, ~2 MB por página vía proxy residencial). 0 = sin tope.
     INMOBUSQUEDA_MAX_PAGES: int = 0      # pages per InmoBusqueda search (15 items each)
     MUDAFY_MAX_PAGES: int = 0            # pages per Mudafy search (25 items each)
+    CENTURY21_MAX_PAGES: int = 0         # 0 = hasta el techo del portal (`/pagina_16` rechaza; 15 × 100 avisos)
     # `0` = NO CAP on both actors below: the input key is OMITTED so the actor
     # runs to its own exhaustion. These are PAID per result — a positive value
     # re-caps the spend per zona/profile.

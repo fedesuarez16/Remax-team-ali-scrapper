@@ -86,8 +86,36 @@ export function SourceSelector({
         </div>
       )}
 
-      {/* Extra step: pick the zona whose curated inmobiliarias to consult. */}
+      {/* Sólo el registro curado, sin descubrir con Google Maps.
+          El descubrimiento es lo que trae cientos de inmobiliarias que nadie
+          eligió — y lo que se paga scrapeándolas y analizándolas. Antes esto
+          se conseguía de rebote eligiendo una zona; ahora se pide derecho. */}
       {value.buscar_inmobiliarias && (
+        <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-border bg-card p-3">
+          <input
+            type="checkbox"
+            checked={value.solo_fuentes_cargadas}
+            onChange={() =>
+              onChange({ ...value, solo_fuentes_cargadas: !value.solo_fuentes_cargadas })
+            }
+            disabled={disabled}
+            className="mt-0.5 size-4 shrink-0 accent-foreground"
+          />
+          <span className="space-y-0.5">
+            <span className="block text-xs font-medium text-foreground">
+              Solo mis inmobiliarias cargadas
+            </span>
+            <span className="block text-xs text-muted-foreground">
+              {value.solo_fuentes_cargadas
+                ? 'Se buscan únicamente las de la pestaña Fuentes. No se descubren nuevas con Google Maps.'
+                : 'Además de las cargadas, se descubren inmobiliarias nuevas en la zona (más cobertura, más costo).'}
+            </span>
+          </span>
+        </label>
+      )}
+
+      {/* Extra step: pick the zona whose curated inmobiliarias to consult. */}
+      {value.buscar_inmobiliarias && !value.solo_fuentes_cargadas && (
         <div className="space-y-1.5 rounded-xl border border-border bg-card p-3">
           <label className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
             <MapPin className="size-3.5" />
