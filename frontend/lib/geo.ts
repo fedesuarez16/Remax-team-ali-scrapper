@@ -1,3 +1,5 @@
+import type { Property } from '@/hooks/useSSEStream'
+
 /**
  * polygonCentroid — area-weighted centroid (shoelace formula) of a closed
  * polygon defined as [lat, lng] vertices. Treats lng as x, lat as y (planar
@@ -79,3 +81,27 @@ export function samplePolygon(vertices: [number, number][], cap = 8): [number, n
   }
   return [centroid, ...sampled]
 }
+
+/**
+ * estaUbicada — ¿esta propiedad tiene con qué ir al mapa?
+ *
+ * Vive ACÁ y no en `components/map/SeleccionMap.tsx`, donde nació, por una
+ * razón concreta de build: `SeleccionMapModal` carga ese componente con
+ * `dynamic(..., { ssr: false })` porque Leaflet toca `window` al evaluar el
+ * módulo — pero además importaba `estaUbicada` del MISMO archivo, con un
+ * import estático. Ese import anula al `dynamic`: el módulo entra igual al
+ * grafo de SSR, se lleva `react-leaflet` → `leaflet` puesto, y el prerender
+ * de `/properties` (que llega hasta acá vía `EnviarFichasBar`) explota con
+ * `ReferenceError: window is not defined`.
+ *
+ * El predicado no tiene nada de Leaflet: es dominio puro sobre `Property`.
+ * Separarlo es lo que deja que el `dynamic` haga su trabajo. Mismo criterio
+ * que `pointInPolygon` arriba.
+ *
+ * NO re-exportar desde un módulo que importe Leaflet: eso reabre el mismo
+ * agujero por la puerta de atrás.
+ */
+export type Ubicada = Property & { id: string; lat: number; lng: number }
+
+export const estaUbicada = (p: Property): p is Ubicada =>
+  !!p.id && typeof p.lat === 'number' && typeof p.lng === 'number'

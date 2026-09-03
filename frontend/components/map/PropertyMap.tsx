@@ -9,10 +9,10 @@ import {
   Polygon,
   Polyline,
   Popup,
-  TileLayer,
   useMap,
   useMapEvents,
 } from 'react-leaflet'
+import { BaseTiles } from '@/components/map/BaseTiles'
 import { pointInPolygon } from '@/lib/geo'
 import { operacionLabel, sortVentaFirst } from '@/lib/operacion'
 import { EMPTY_FILTER, matchesFilter, type Filter } from '@/lib/propertyFilters'
@@ -255,10 +255,7 @@ export default function PropertyMap({
       className="h-full w-full"
       scrollWheelZoom
     >
-      <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-        attribution="&copy; OpenStreetMap &copy; CARTO"
-      />
+      <BaseTiles />
       <DrawClickHandler
         enabled={drawState === 'drawing'}
         onAddVertex={(v) => setVertices((prev) => [...prev, v])}

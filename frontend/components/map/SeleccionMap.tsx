@@ -1,15 +1,16 @@
 'use client'
 import 'leaflet/dist/leaflet.css'
 import { useEffect, useMemo } from 'react'
-import { CircleMarker, MapContainer, Popup, TileLayer, useMap } from 'react-leaflet'
+import { CircleMarker, MapContainer, Popup, useMap } from 'react-leaflet'
+import { BaseTiles } from '@/components/map/BaseTiles'
 import type { Property } from '@/hooks/useSSEStream'
+import type { Ubicada } from '@/lib/geo'
 import { operacionLabel } from '@/lib/operacion'
 
-/** Propiedad con coordenadas garantizadas: la única que puede ir al mapa. */
-export type Ubicada = Property & { id: string; lat: number; lng: number }
-
-export const estaUbicada = (p: Property): p is Ubicada =>
-  !!p.id && typeof p.lat === 'number' && typeof p.lng === 'number'
+// `estaUbicada` / `Ubicada` viven en `@/lib/geo` y NO se re-exportan desde
+// acá: este módulo arrastra Leaflet, que toca `window` al evaluarse, y un
+// import de valor contra este archivo anula el `dynamic({ ssr: false })` del
+// modal — así reventaba el prerender de `/properties`. Ver la nota en geo.ts.
 
 const VENTA_STYLE = { color: '#15803d', fillColor: '#16a34a', fillOpacity: 0.9, weight: 1.5 }
 const ALQUILER_STYLE = { color: '#a16207', fillColor: '#eab308', fillOpacity: 0.95, weight: 1.5 }
@@ -52,10 +53,7 @@ export default function SeleccionMap({ propiedades }: { propiedades: Ubicada[] }
       className="h-full w-full"
       scrollWheelZoom
     >
-      <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-        attribution="&copy; OpenStreetMap &copy; CARTO"
-      />
+      <BaseTiles />
       <FitToSelection puntos={puntos} />
       {propiedades.map((p, i) => (
         <CircleMarker

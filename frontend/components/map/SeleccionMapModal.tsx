@@ -3,7 +3,10 @@ import { useEffect } from 'react'
 import dynamic from 'next/dynamic'
 import { Loader2, MapPin, MapPinOff, X } from 'lucide-react'
 import type { Property } from '@/hooks/useSSEStream'
-import { estaUbicada } from '@/components/map/SeleccionMap'
+// De `@/lib/geo`, NO de `SeleccionMap`: ese módulo arrastra Leaflet, que toca
+// `window` al evaluarse, y un import de valor contra él anula el `dynamic`
+// de abajo — el prerender de `/properties` reventaba justo por eso.
+import { estaUbicada } from '@/lib/geo'
 
 // Leaflet toca `window` al cargar el módulo — tiene que quedar client-only.
 const SeleccionMap = dynamic(() => import('@/components/map/SeleccionMap'), {
