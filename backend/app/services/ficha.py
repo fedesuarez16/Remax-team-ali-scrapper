@@ -399,26 +399,35 @@ async def _fetch_full_gallery(
       everything, even with a real app token), so this is the only route left.
     - googlemaps → url_origen is the agency-site ficha of a single property,
       so its harvested images belong to it unambiguously.
-    - argenprop/remax → generic Playwright harvest of the listing's own ficha
-      page (same reasoning as googlemaps: one property per URL).
+    - argenprop → generic Playwright harvest of the listing's own ficha page
+      (same reasoning as googlemaps: one property per URL).
     Instagram keeps the images captured at scrape time: re-harvesting pulls
     unrelated posts. Returns [] on any failure so the caller keeps the
     search-time images.
+
+    El despacho por HOST va ANTES del harvest genérico, y no después: RE/MAX
+    entraba por `fuente == 'remax'` al harvest genérico y nunca llegaba a su
+    parser, así que la ficha se regeneraba con 1 foto. remax.com.ar es una SPA
+    de Angular — el HTML trae sólo el `og:image` — mientras que su API pública
+    sirve el aviso entero (medido en vivo: `photos[19]` contra 1 del DOM).
     """
     fuente = (prop.get('fuente') or '').lower()
     url_origen = prop.get('url_origen') or ''
+    if fuente == 'instagram' or not url_origen.startswith('http'):
+        return []
     if fuente == 'zonaprop':
         return await _zonaprop_gallery(url_origen, allow_escalation)
     if fuente == 'mercadolibre':
         return await _mercadolibre_gallery(url_origen, allow_escalation)
-    if fuente in ('googlemaps', 'argenprop', 'remax') and url_origen.startswith('http'):
+    # `fuente` no identifica al portal (típicamente 'manual', que es como Ficha
+    # Propio guarda TODO lo que importa). La URL sí: se despacha por host.
+    portal = await portal_gallery_from_url(url_origen, allow_escalation)
+    if portal:
+        return portal
+    if fuente in ('googlemaps', 'argenprop', 'remax'):
         from app.services.apify import harvest_page_images
         galleries = await harvest_page_images([url_origen])
         return galleries.get(url_origen, [])
-    # `fuente` no identifica al portal (típicamente 'manual', que es como Ficha
-    # Propio guarda TODO lo que importa). La URL sí: se despacha por host.
-    if fuente not in ('instagram',) and url_origen.startswith('http'):
-        return await portal_gallery_from_url(url_origen, allow_escalation)
     return []
 
 

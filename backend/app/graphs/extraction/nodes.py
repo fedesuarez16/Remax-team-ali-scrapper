@@ -26,6 +26,7 @@ from app.services.apify import (
     harvest_page_images,
 )
 from app.services.dedup import collapse_duplicates
+from app.services.ficha import portal_gallery_from_url
 from app.services.llm_costs import (
     SCOPE_EXTRACT_INSTAGRAM,
     SCOPE_EXTRACT_WEBSITE,
@@ -1596,10 +1597,33 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
         # una sola foto. Ahora es un knob, y `0` significa sin tope.
         if settings.FICHA_IMAGE_HARVEST_MAX > 0:
             ficha_urls = ficha_urls[:settings.FICHA_IMAGE_HARVEST_MAX]
-        try:
-            galleries = await harvest_page_images(ficha_urls)
-        except Exception:
-            galleries = {}
+        # El parser propio del portal PRIMERO. `harvest_page_images` sólo junta
+        # los `<img>` del HTML, y para un portal con API eso es la peor fuente
+        # posible: RE/MAX es una SPA de Angular y su HTML trae UNA foto (el
+        # og:image) contra las 19 que devuelve su API. Para un host sin parser
+        # `portal_gallery_from_url` devuelve [] sin tocar la red, así que esto
+        # no cuesta nada en el caso común. Sin escalar: acá son cientos de
+        # fichas y el rung pago se reserva para la ficha que el usuario abre.
+        portal_sem = asyncio.Semaphore(5)
+
+        async def _portal(u: str) -> tuple[str, list[str]]:
+            async with portal_sem:
+                try:
+                    return u, await portal_gallery_from_url(u, allow_escalation=False)
+                except Exception:
+                    return u, []
+
+        galleries: dict[str, list[str]] = {
+            u: gal
+            for u, gal in await asyncio.gather(*(_portal(u) for u in ficha_urls))
+            if gal
+        }
+        rest = [u for u in ficha_urls if u not in galleries]
+        if rest:
+            try:
+                galleries.update(await harvest_page_images(rest))
+            except Exception:
+                pass
         for p in pending:
             gallery = galleries.get(p.url_origen or '')
             if gallery and len(gallery) > len(p.imagenes):
