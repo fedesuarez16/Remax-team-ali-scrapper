@@ -47,6 +47,7 @@ _ZP_RES_KEYS = (
     'resizeUrl1200x1200', 'url1200x1200',
     'resizeUrl720x532', 'url730x532', 'url360x266',
 )
+_ZP_IMAGE_SIZE = re.compile(r'/avisos/(?:resize/)?(?:\d+/)+(\d+)x(\d+)/[^/]+$')
 
 MODEL = 'claude-haiku-4-5-20251001'
 _client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=15.0, max_retries=0)
@@ -491,8 +492,8 @@ _GALERIA_SOSPECHOSA = 6
 def _gallery_looks_incomplete(prop: dict[str, Any]) -> bool:
     """True when a ficha never captured its real gallery.
 
-    The search feed stores only the thumbnail (0-1 photos) while a portal listing
-    holds 15-34. A ficha stuck on <=1 image got its gallery fetch swallowed by a
+    The search feed can store several thumbnails without the full gallery. A
+    ficha stuck on <=1 image got its gallery fetch swallowed by a
     transient portal failure (WAF challenge, timeout) at scrape time — worth one
     re-attempt. A healthy gallery reports False, so repeat ficha opens cost nothing.
 
@@ -516,6 +517,18 @@ def _gallery_looks_incomplete(prop: dict[str, Any]) -> bool:
     imagenes = prop.get('imagenes') or []
     if len(imagenes) <= 1:
         return True
+    # Feed galleries can have 8+ photos, all at 360x266. Counting them alone
+    # permanently hid missing photos and kept the blurry cover. The CDN path
+    # identifies a thumbnail without another request; the detail parser already
+    # returns 1200px versions. Check the actual host, not an arbitrary URL string.
+    if is_zonaprop_url(prop.get('url_origen') or '') or prop.get('fuente') == 'zonaprop':
+        for image in imagenes:
+            parsed = urlparse(image)
+            host = parsed.hostname or ''
+            if host == 'zonapropcdn.com' or host.endswith('.zonapropcdn.com'):
+                size = _ZP_IMAGE_SIZE.fullmatch(parsed.path)
+                if size and max(int(size[1]), int(size[2])) < 1200:
+                    return True
     host = urlparse(prop.get('url_origen') or '').netloc.lower()
     if not any(portal in host for portal in _PORTAL_HOSTS):
         return False
