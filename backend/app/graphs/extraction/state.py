@@ -16,6 +16,12 @@ class ScrapingState(TypedDict, total=False):
     # OUT of graph state (ADR-3) — it's dead state here, consumed authoritatively
     # by GET /{job_id}/properties instead.
     localidades: list[str]
+    # Gated communities picked from the `barrios_cerrados` catalogue, injected
+    # by stream_scraping the same way `localidades` is. Rows, not names: the
+    # `localidad` on each one is the containment that lets a country search
+    # degrade at all, and `aliases` is what keeps the degraded candidate from
+    # answering with the whole localidad. Absent/empty = an ordinary search.
+    barrios_cerrados: list[dict]
     # Where to scrape, picked by the user BEFORE the search ran (see
     # app.api.v1.scraping.SourceSelection). Persisted on the job row and
     # injected here by stream_scraping; read via nodes._read_selection, whose

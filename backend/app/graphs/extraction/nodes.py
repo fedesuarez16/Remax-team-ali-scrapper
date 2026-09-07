@@ -285,15 +285,47 @@ def _env_allowed_sources() -> tuple[str, ...]:
     return PORTAL_SOURCES
 
 
+def _barrio_cerrado_units(state: ScrapingState) -> list[tuple[str, tuple[str, ...]]]:
+    """Catalogue rows → `(zona compuesta, alias)` per gated community.
+
+    The composite zona is what gives `zona_candidates` a chain to walk —
+    "Grand Bell, City Bell, La Plata" degrades to the localidad, a bare
+    "Grand Bell" degrades to nothing — and the aliases are what stop that
+    degraded candidate from answering with the whole localidad.
+
+    A row with no usable name is skipped rather than fanned out: an empty zona
+    would send every portal at the nationwide listing, so one broken catalogue
+    row must not be able to poison the whole search.
+    """
+    from app.services.barrio_cerrado import barrio_aliases, barrio_zona
+
+    units: list[tuple[str, tuple[str, ...]]] = []
+    for row in state.get('barrios_cerrados') or []:
+        nombre = str(row.get('nombre') or '').strip()
+        aliases = barrio_aliases(nombre, row.get('aliases') or [])
+        if not aliases:
+            continue
+        units.append((barrio_zona(nombre, str(row.get('localidad') or '')), aliases))
+    return units
+
+
 def route_after_parse(state: ScrapingState) -> str | list[Any]:
     if state.get('clarification_needed'):
         return 'clarification'
     filters = state['filters']
     job_id = state.get('job_id')
     localidades = state.get('localidades') or []
+    # Gated communities picked from the catalogue (`barrios_cerrados` table).
+    # They OUTRANK both other unit kinds because they are strictly more
+    # specific: asking for Grand Bell and also sweeping all of City Bell hands
+    # back exactly the noise the catalogue exists to remove.
+    barrios = _barrio_cerrado_units(state)
     # Fan-out unit: localidad when present (polygon search — portal-known slug,
     # ADR-1), else per-barrio exactly as before (chat path / legacy callers).
-    fanout_units = localidades or filters.zonas or ([filters.zona] if filters.zona else [])
+    fanout_units = (
+        [] if barrios
+        else localidades or filters.zonas or ([filters.zona] if filters.zona else [])
+    )
 
     # The user's pre-search pick narrows what the deployment already allows —
     # env gates are a hard ceiling, the selection can only subtract from it.
@@ -312,6 +344,17 @@ def route_after_parse(state: ScrapingState) -> str | list[Any]:
 
     # Fan-out: one portal-scraper + agency-discovery branch per (unit × source)
     sends: list[Any] = []
+    for zona, aliases in barrios:
+        # `localidades` is cleared explicitly: every portal resolver reads it
+        # AHEAD of `zona`, so a leftover localidad would quietly re-widen the
+        # branch back to the thing the barrio was chosen instead of.
+        bfilters = filters.model_copy(update={
+            'zona': zona, 'localidades': [], 'barrio_aliases': list(aliases),
+        })
+        for src in sources:
+            sends.append(Send('run_portal_scraper', {'__source': src, 'filters': bfilters, 'job_id': job_id}))
+        if descubrir_agencias and not settings.SCRAPE_ZONAPROP_ONLY and not settings.APIFY_DISABLED:
+            sends.append(Send('discover_agencies', {'filters': bfilters, 'job_id': job_id}))
     for unit in fanout_units:
         if localidades:
             # localidad branch: zona=localidad (drives URL slug + ML q), keep the

@@ -83,6 +83,17 @@ class ScrapingFilters(BaseModel):
     # URL (a retrieval strategy); the zona guard filters on this instead, so
     # widening the query can never widen the answer.
     zona_pedida: str | None = None
+    # Phrases that identify a GATED COMMUNITY inside `zona`, from the
+    # `barrios_cerrados` catalogue (`barrio_cerrado.barrio_aliases`).
+    #
+    # Set only for a barrio-cerrado search, and it is what makes the candidate
+    # chain safe to walk for one. A country degrades "Grand Bell, City Bell,
+    # La Plata" → "City Bell, La Plata", and that second candidate is a real
+    # zona search: it returns every house in City Bell. `scrape_source` filters
+    # the RESULTS on these phrases, so degrading widens the QUERY without ever
+    # widening the answer — the same separation `zona_pedida` draws for the
+    # zona guard. Empty means "not a barrio search": nothing is filtered.
+    barrio_aliases: list[str] = []
     zonas: list[str] = []            # all zonas parsed from the query
     localidades: list[str] = []      # localidades (partido/ciudad) for polygon searches; empty on chat path
     tipo_operacion: TipoOperacion | None = None

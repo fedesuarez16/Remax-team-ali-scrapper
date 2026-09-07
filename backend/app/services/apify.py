@@ -230,6 +230,37 @@ def _slugify(value: str) -> str:
     return re.sub(r'-+', '-', slug)
 
 
+def _keep_barrio_cerrado(
+    results: list[RawProperty], aliases: list[str],
+) -> list[RawProperty]:
+    """Keep only the listings that NAME the gated community.
+
+    Runs on every candidate in the chain, including the exact one — a portal
+    that "resolved" a country can still serve its localidad (InmoBusqueda's
+    bare-slug trap drops the zona entirely and answers nationwide), and the
+    filter costs nothing when the results already belong to the barrio.
+
+    An empty alias list is the not-a-barrio-search case and keeps everything;
+    `barrio_cerrado.barrio_aliases` never emits an empty list for a real name,
+    so an empty one here means no barrio was requested.
+
+    The whole listing is the haystack because the portals put the barrio
+    wherever they like: in `direccion` on one, `descripcion` on another, only
+    the `titulo` on a third.
+    """
+    if not aliases:
+        return results
+    from app.services.barrio_cerrado import barrio_matches
+
+    return [
+        prop for prop in results
+        if barrio_matches(
+            ' '.join(filter(None, (prop.titulo, prop.direccion, prop.descripcion))),
+            aliases,
+        )
+    ]
+
+
 def _guard_phrases(filters: ScrapingFilters) -> set[str]:
     """Phrase-set for the ZonaProp redirect guard: the zonas actually REQUESTED,
     never their fallbacks. Map path (localidades present): barrios ∪
@@ -1583,6 +1614,22 @@ async def _inmobusqueda_resolve_zona_slug(zona: str) -> str | None:
             # page of its own — `propiedades-todo-el-partido-de-la-plata.html`
             # renders the zona-less nationwide page (verified live).
             if not int(entry.get('localidad_id') or 0):
+                continue
+            # A non-zero `barrio_id` is the SAME trap one level down: the entry
+            # is a barrio nested inside `localidad_id`, and the portal serves
+            # no `propiedades-{barrio}` page for it. Gated communities arrive
+            # in both shapes — "Haras del Sur" as a localidad (`barrio_id: 0`,
+            # real page) and "Grand Bell" as a barrio under City Bell
+            # (`barrio_id: 9`, no page) — so the id, not the kind of place, is
+            # what decides. Measured 2026-09-04 via the site's own anti-bot
+            # interstitial, which echoes the URL it was about to render:
+            #   /propiedades-haras-del-sur.html → ref=/propiedades-haras-del-sur.html
+            #   /propiedades-grand-bell.html    → ref=/propiedades.html
+            # That second `ref` is the zona being dropped: nationwide results
+            # dressed as a valid answer. Rejecting the barrio lets the zona
+            # candidate chain degrade to its localidad, where the barrio guard
+            # filters by name — narrow and honest beats wide and wrong.
+            if int(entry.get('barrio_id') or 0):
                 continue
             head = _slugify(name.split(',')[0])
             if head == wanted[0]:
@@ -4459,6 +4506,11 @@ class ApifyService(BaseApifyService):
             results = await self._scrape_source_once(
                 source, filters.model_copy(update=update), on_progress,
             )
+            results = _keep_barrio_cerrado(results, filters.barrio_aliases)
+            # Filtering to zero is NOT "we found results". Breaking here would
+            # end the walk on a candidate whose listings all belong to the
+            # barrio's neighbours, when the wider one still has the barrio's
+            # own — so the emptiness has to be read AFTER the barrio filter.
             if results:
                 break
         return results

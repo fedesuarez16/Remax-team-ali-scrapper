@@ -78,6 +78,11 @@ class StartScrapingRequest(BaseModel):
     query: str
     polygon: list[list[float]] | None = None
     localidades: list[str] = []
+    # Ids from the `barrios_cerrados` catalogue. Present = search THESE gated
+    # communities instead of the query's zona: they are strictly more specific,
+    # and sweeping the surrounding localidad as well hands back exactly the
+    # noise the catalogue exists to remove (see nodes.route_after_parse).
+    barrios_cerrados: list[str] = []
     source_selection: SourceSelection = SourceSelection()
 
 
@@ -135,6 +140,9 @@ async def start_scraping(body: StartScrapingRequest, request: Request) -> StartS
             await sb.table('scraping_jobs').insert({
                 'id': job_id, 'query_raw': body.query, 'estado': 'pending',
                 'polygon': body.polygon, 'localidades': body.localidades or None,
+                # NULL, not `[]`, so a job with no barrios reads identically to
+                # a legacy row — `_read_job_inputs` omits falsy keys.
+                'barrios_cerrados': body.barrios_cerrados or None,
                 'source_selection': source_selection,
             }).execute()
         except Exception as exc:
@@ -263,13 +271,16 @@ async def _read_job_inputs(sb: Any, job_id: str) -> dict[str, Any]:
     try:
         res = await (
             sb.table('scraping_jobs')
-            .select('localidades,polygon,source_selection')
+            .select('localidades,polygon,source_selection,barrios_cerrados')
             .eq('id', job_id)
             .execute()
         )
     except Exception:
-        # `source_selection` column not applied yet — retry without it so the
-        # polygon/localidades injection (already in production) keeps working.
+        # `source_selection`/`barrios_cerrados` column not applied yet — retry
+        # without them so the polygon/localidades injection (already in
+        # production) keeps working. A search that dies because a SELECT named
+        # an unapplied column is a worse regression than one that ignores a
+        # feature the deployment has not migrated to yet.
         try:
             res = await sb.table('scraping_jobs').select('localidades,polygon').eq('id', job_id).execute()
         except Exception:
@@ -277,7 +288,25 @@ async def _read_job_inputs(sb: Any, job_id: str) -> dict[str, Any]:
     if not res.data:
         return {}
     row = res.data[0]
-    return {k: row[k] for k in ('localidades', 'polygon', 'source_selection') if row.get(k)}
+    inputs = {
+        k: row[k] for k in ('localidades', 'polygon', 'source_selection') if row.get(k)
+    }
+
+    # Ids → catalogue ROWS. `route_after_parse` needs `nombre`/`localidad`/
+    # `aliases` to build a fan-out unit, and resolving them here rather than in
+    # the graph keeps routing a pure function of its inputs — same reason
+    # `localidades` arrives resolved. The extra SELECT is skipped entirely when
+    # no barrio was picked, which is every search on the chat path.
+    if barrio_ids := row.get('barrios_cerrados'):
+        try:
+            barrios = await (
+                sb.table('barrios_cerrados').select('*').in_('id', barrio_ids).execute()
+            )
+            if barrios.data:
+                inputs['barrios_cerrados'] = barrios.data
+        except Exception:
+            pass  # catalogue unavailable → an ordinary zona search, not a 500
+    return inputs
 
 
 async def _stream_graph_events(
