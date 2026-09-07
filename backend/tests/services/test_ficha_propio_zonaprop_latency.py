@@ -102,6 +102,7 @@ async def test_proxy_connection_failure_tries_direct_http_within_the_import_budg
     fetch = AsyncMock(side_effect=[httpx.ProxyError('403 Forbidden'), HTML])
     browser = AsyncMock(side_effect=AssertionError('Direct HTTP already read the gallery'))
     monkeypatch.setattr(importer, '_fetch_html_httpx', fetch)
+    monkeypatch.setattr(importer, 'check_apify_proxy_limit', AsyncMock())
     monkeypatch.setattr(importer, 'render_page_html', browser)
     assert await importer._fetch_html(URL) == HTML
     assert fetch.await_args_list[1].kwargs == {'use_proxy': False}

@@ -13,6 +13,7 @@ from anthropic import AsyncAnthropic
 
 from app.core.config import settings
 from app.services.llm_costs import SCOPE_FICHA_ENRICH, SCOPE_FICHA_PROPIO, record_llm_usage
+from app.services.proxy_access import ProxyAccessError, check_apify_proxy_limit
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +295,13 @@ async def _fetch_listing_html(
             if resp.status_code in (404, 410):
                 return True, None
             return False, resp.text if resp.status_code == 200 else None
+    except httpx.ProxyError:
+        # A CONNECT refusal is a proxy failure, not a ZonaProp HTTP response.
+        # Propagate confirmed quota errors so the ladder cannot start a browser
+        # or paid actor against the same exhausted account.
+        await check_apify_proxy_limit(settings.SCRAPER_PROXY_URL)
+        logger.warning('listing proxy connection failed for %s', url_origen)
+        return False, None
     except Exception as exc:
         logger.warning('listing fetch failed for %s: %s', url_origen, exc)
         return False, None
@@ -542,14 +550,17 @@ async def _enrich_gallery(prop: dict[str, Any], sb: Any) -> None:
     whole search feed). Mutates ``prop['imagenes']`` in place.
     """
     existing = prop.get('imagenes') or []
-    if is_zonaprop_url(prop.get('url_origen') or '') or prop.get('fuente') == 'zonaprop':
-        try:
+    try:
+        if is_zonaprop_url(prop.get('url_origen') or '') or prop.get('fuente') == 'zonaprop':
             async with asyncio.timeout(_ZONAPROP_GALLERY_TIMEOUT):
                 full = await _fetch_full_gallery(prop, allow_escalation=False)
-        except TimeoutError:
-            return  # Existing photos and the ficha remain usable.
-    else:
-        full = await _fetch_full_gallery(prop)
+        else:
+            full = await _fetch_full_gallery(prop)
+    except TimeoutError:
+        return  # Existing photos and the ficha remain usable.
+    except ProxyAccessError as exc:
+        logger.warning('gallery recovery unavailable for %s: %s', prop.get('id'), exc)
+        return
     if not full:
         return
     # A ficha stuck on the low-res feed thumbnail: the recovered gallery is the

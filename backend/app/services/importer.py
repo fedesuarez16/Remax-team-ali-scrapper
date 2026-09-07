@@ -32,6 +32,7 @@ from app.services.apify import (
 )
 from app.services.ficha import _parse_zonaprop_pictures, is_zonaprop_url, portal_gallery_from_url
 from app.services.llm_costs import SCOPE_FICHA_PROPIO, record_llm_usage
+from app.services.proxy_access import check_apify_proxy_limit
 from app.services.zona import normalize_address
 
 MODEL = 'claude-haiku-4-5-20251001'
@@ -210,6 +211,9 @@ async def _fetch_zonaprop_html(url: str) -> str:
             try:
                 return await _fetch_html_httpx(url)
             except httpx.ProxyError:
+                # An exhausted proxy account returns 403 before reaching the
+                # portal. Neither rotating IPs nor a browser can fix that.
+                await check_apify_proxy_limit(settings.SCRAPER_PROXY_URL)
                 # A broken proxy must not prevent reading a publicly accessible
                 # listing. Keep the direct attempt inside the same deadline.
                 try:

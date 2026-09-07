@@ -51,3 +51,26 @@ latencia mantienen los límites de espera y la ausencia de actores pagos.
 
 No requiere migraciones. Desplegar backend y frontend para aplicar el contrato
 `gallery_complete` al flujo de generación.
+
+## Un 403 del proxy no siempre es un bloqueo del portal
+
+Si httpx lanza `ProxyError: 403 Forbidden`, el túnel HTTPS fue rechazado antes
+de recibir una respuesta del aviso. El endpoint de estado de Apify,
+`http://proxy.apify.com/?format=json`, consultado por el mismo proxy, permite
+distinguir un límite de cuenta de un bloqueo del sitio.
+
+Se verificó este caso con el aviso `59871047`: la página pública contiene 50
+fotos, pero el proxy respondía `connected: false` y
+`connectionError: "Monthly usage hard limit exceeded"`. Cambiar el parser,
+rotar sesiones o repetir el navegador no resuelve un límite mensual agotado.
+
+`proxy_access.check_apify_proxy_limit` consulta ese estado sólo después de un
+`ProxyError`, con un máximo de dos segundos y sin exponer credenciales. Cuando
+se confirma ese motivo, la importación informa el límite de Apify y corta los
+intentos. La recuperación de galerías tampoco inicia navegador o actor contra
+esa cuenta bloqueada. Una consulta de estado inconclusa mantiene el tratamiento
+habitual del error, sin inventar una causa.
+
+Restablecer el acceso requiere resolver el límite de consumo de la cuenta de
+Apify. Los cambios de gasto requieren autorización del titular; no se modifican
+automáticamente desde la generación de fichas.
