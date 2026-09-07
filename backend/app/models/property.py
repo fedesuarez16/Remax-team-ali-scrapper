@@ -94,6 +94,25 @@ class ScrapingFilters(BaseModel):
     # widening the answer — the same separation `zona_pedida` draws for the
     # zona guard. Empty means "not a barrio search": nothing is filtered.
     barrio_aliases: list[str] = []
+    # `portal -> ref`: the handle a portal's own resolver would have returned
+    # for this gated community, taken from `barrio_cerrado_portal_refs` and
+    # carrying ONLY rows a human confirmed.
+    #
+    # It exists because the two degradation paths disagree. `zona_candidates`
+    # shortens the HEAD ("Grand Bell, City Bell, La Plata" → "City Bell, La
+    # Plata"), which loses the barrio; the probe shortens the TAIL, which keeps
+    # it. Argenprop files gated communities under the PARTIDO, so the search
+    # chain's first candidate never matched and every Argenprop country search
+    # walked the whole localidad and threw ~95% away by name — correct, but
+    # paying pages for listings it discards, with a paging ceiling that can cut
+    # real ones before the filter sees them.
+    #
+    # Confirmed-only is the safety rule, and it is not caution for its own
+    # sake: the alias filter CANNOT catch a wrong ref. A ref pointing at the
+    # "Los Ceibos" in Tigre returns listings that genuinely say "Los Ceibos",
+    # so they pass every downstream guard. Human confirmation is the only thing
+    # that separates the two, so it is what gates the override.
+    barrio_portal_refs: dict[str, str] = {}
     zonas: list[str] = []            # all zonas parsed from the query
     localidades: list[str] = []      # localidades (partido/ciudad) for polygon searches; empty on chat path
     tipo_operacion: TipoOperacion | None = None

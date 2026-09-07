@@ -302,8 +302,31 @@ async def _read_job_inputs(sb: Any, job_id: str) -> dict[str, Any]:
             barrios = await (
                 sb.table('barrios_cerrados').select('*').in_('id', barrio_ids).execute()
             )
-            if barrios.data:
-                inputs['barrios_cerrados'] = barrios.data
+            rows = barrios.data or []
+            if rows:
+                # Each barrio carries its own confirmed portal refs, because
+                # `route_after_parse` decides the resolver override off
+                # `portal_refs`. Without them the probe is decorative: the
+                # search walks the candidate chain and never uses the native
+                # page the probe already found.
+                #
+                # A failure here degrades to "no refs", never to "no barrio":
+                # losing the refs costs efficiency (the chain still finds the
+                # listings), losing the barrio costs the whole search.
+                por_barrio: dict[str, list[dict]] = {}
+                try:
+                    refs = await (
+                        sb.table('barrio_cerrado_portal_refs')
+                        .select('*').in_('barrio_id', barrio_ids).execute()
+                    )
+                    for ref in refs.data or []:
+                        por_barrio.setdefault(str(ref.get('barrio_id')), []).append(ref)
+                except Exception:
+                    pass
+                inputs['barrios_cerrados'] = [
+                    {**row, 'portal_refs': por_barrio.get(str(row.get('id')), [])}
+                    for row in rows
+                ]
         except Exception:
             pass  # catalogue unavailable → an ordinary zona search, not a 500
     return inputs

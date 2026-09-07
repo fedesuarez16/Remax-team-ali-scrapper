@@ -25,7 +25,6 @@ sabe: si esta zona ya se buscó alguna vez.
 """
 from typing import Any
 
-import pytest
 
 from app.graphs.extraction.nodes import _read_cached_agencies
 

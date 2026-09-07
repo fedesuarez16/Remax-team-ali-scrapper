@@ -184,10 +184,17 @@ class TestTheProbeIsHonestAboutFailure:
         for ref in await probe_barrio('Grand Bell', 'City Bell, La Plata'):
             assert ref.note
 
-    async def test_the_probed_zona_is_the_composite(self, monkeypatch):
-        """What gets sent to each resolver is "Grand Bell, City Bell, La Plata"
-        — the composite. Probing the bare name would hit the homonym problem
-        head-on: Argenprop's first "Los Ceibos" is in TIGRE."""
+    async def test_the_probe_walks_the_forms_most_qualified_first(self, monkeypatch):
+        """The composite goes first and the bare name last, always.
+
+        Both ends matter. Leading with the bare name walks straight into the
+        homonym problem — Argenprop's first "Los Ceibos" is in TIGRE. But
+        stopping AT the composite was the bug this cascade fixes: the portals
+        disagree about which level a gated community hangs off (Argenprop files
+        it under the partido, InmoBusqueda under the localidad), and both
+        resolvers demand every comma part appear in the label, so one query
+        shape can never satisfy both.
+        """
         visto: list[str] = []
 
         async def _spy(zona):
@@ -197,4 +204,37 @@ class TestTheProbeIsHonestAboutFailure:
         _stub(monkeypatch)
         monkeypatch.setattr(barrio_probe, '_argenprop_resolve_zona_slug', _spy)
         await probe_barrio('Los Ceibos', 'City Bell, La Plata')
+        assert visto == [
+            'Los Ceibos, City Bell, La Plata',
+            'Los Ceibos, La Plata',
+            'Los Ceibos',
+        ]
+
+    async def test_a_native_hit_stops_the_walk(self, monkeypatch):
+        """Each form is a live request. Once a portal has answered with the
+        barrio, asking it a vaguer question can only find something worse."""
+        visto: list[str] = []
+
+        async def _spy(zona):
+            visto.append(zona)
+            return 'los-ceibos-lp'
+
+        _stub(monkeypatch)
+        monkeypatch.setattr(barrio_probe, '_argenprop_resolve_zona_slug', _spy)
+        await probe_barrio('Los Ceibos', 'City Bell, La Plata')
         assert visto == ['Los Ceibos, City Bell, La Plata']
+
+    async def test_a_later_form_can_rescue_a_native_ref(self, monkeypatch):
+        """The measured Argenprop case: the three-part composite matches
+        nothing because the portal's label reads "Grand Bell, Partido de La
+        Plata" — no City Bell in it — while "Grand Bell, La Plata" resolves to
+        `CodigoBarrio=GRAND-BELL`. Before the cascade this portal was recorded
+        as `localidad` for a barrio it owns."""
+        async def _spy(zona):
+            return 'grand-bell' if zona == 'Grand Bell, La Plata' else None
+
+        _stub(monkeypatch)
+        monkeypatch.setattr(barrio_probe, '_argenprop_resolve_zona_slug', _spy)
+        refs = _by_portal(await probe_barrio('Grand Bell', 'City Bell, La Plata'))
+        assert refs['argenprop'].strategy == 'native'
+        assert refs['argenprop'].ref == 'grand-bell'

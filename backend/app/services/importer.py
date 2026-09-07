@@ -258,10 +258,11 @@ async def import_property_from_url(sb: Any, url: str) -> dict[str, Any]:
     # Se despacha por HOST y no por `fuente` porque acá `fuente` todavía no
     # existe — y cuando exista va a ser 'manual', que no dice de qué portal es.
     portal_gallery = await portal_gallery_from_url(url)
-    if len(portal_gallery) > len(images):
+    if portal_gallery:
+        # La galería identificada por el portal es la fuente de verdad, aunque
+        # tenga menos fotos que el HTML: éste puede incluir logos e íconos.
         images = portal_gallery
-
-    if len(images) < _MIN_GALLERY:
+    elif len(images) < _MIN_GALLERY:
         try:
             galleries = await harvest_page_images([url])
             gallery = galleries.get(url, [])

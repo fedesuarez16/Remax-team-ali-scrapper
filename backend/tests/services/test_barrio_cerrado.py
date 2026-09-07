@@ -197,3 +197,72 @@ class TestBarrioZona:
     def test_whitespace_around_the_parts_is_normalised(self) -> None:
         assert barrio_zona('  Grand Bell ', ' City Bell ,  La Plata ') == (
             'Grand Bell, City Bell, La Plata')
+
+
+class TestBarrioProbeForms:
+    """The shapes to ask a portal about ONE barrio, most specific first.
+
+    Not `zona_candidates`: that chain degrades the BARRIO AWAY ("Grand Bell,
+    City Bell, La Plata" → "City Bell, La Plata"), which is right for a search
+    and useless for a probe — a probe that resolves the localidad has learned
+    nothing about the barrio. These forms keep the barrio head and shorten the
+    TAIL instead.
+
+    Measured live (2026-09-07), and this is the bug that motivated it:
+    Argenprop files gated communities under the PARTIDO, labelling Grand Bell
+    "Grand Bell, Partido de La Plata" — no City Bell anywhere. Its resolver
+    requires every comma part of the query to appear in the label, so the
+    three-part composite matched nothing and the probe wrote down `localidad`
+    for a portal that has `CodigoBarrio=GRAND-BELL`.
+    """
+
+    def test_the_composite_comes_first(self) -> None:
+        from app.services.barrio_cerrado import barrio_probe_forms
+
+        assert barrio_probe_forms('Grand Bell', 'City Bell, La Plata')[0] == (
+            'Grand Bell, City Bell, La Plata')
+
+    def test_the_intermediate_localidad_is_dropped_next(self) -> None:
+        """"Grand Bell, La Plata" is the shape Argenprop actually stores."""
+        from app.services.barrio_cerrado import barrio_probe_forms
+
+        assert 'Grand Bell, La Plata' in barrio_probe_forms('Grand Bell', 'City Bell, La Plata')
+
+    def test_the_bare_barrio_is_the_last_resort(self) -> None:
+        from app.services.barrio_cerrado import barrio_probe_forms
+
+        assert barrio_probe_forms('Grand Bell', 'City Bell, La Plata')[-1] == 'Grand Bell'
+
+    def test_the_barrio_never_degrades_away(self) -> None:
+        """The whole difference from `zona_candidates`. A form without the
+        barrio would resolve the localidad and be recorded as the barrio's own
+        ref — "all of City Bell", filed as a precise Grand Bell search."""
+        from app.services.barrio_cerrado import barrio_probe_forms
+
+        formas = barrio_probe_forms('Grand Bell', 'City Bell, La Plata')
+        assert all(f.startswith('Grand Bell') for f in formas)
+
+    def test_the_kind_is_stripped(self) -> None:
+        from app.services.barrio_cerrado import barrio_probe_forms
+
+        assert barrio_probe_forms('Club de Campo Los Ceibos', 'City Bell, La Plata')[-1] == (
+            'Los Ceibos')
+
+    def test_a_one_part_localidad_gives_two_forms(self) -> None:
+        from app.services.barrio_cerrado import barrio_probe_forms
+
+        assert barrio_probe_forms('Haras del Sur', 'La Plata') == [
+            'Haras del Sur, La Plata', 'Haras del Sur']
+
+    def test_no_localidad_gives_just_the_barrio(self) -> None:
+        from app.services.barrio_cerrado import barrio_probe_forms
+
+        assert barrio_probe_forms('Grand Bell', '') == ['Grand Bell']
+
+    def test_forms_are_deduped(self) -> None:
+        """A localidad that IS its partido ("La Plata, La Plata") must not
+        produce the same query twice — each form costs a live request."""
+        from app.services.barrio_cerrado import barrio_probe_forms
+
+        formas = barrio_probe_forms('Grand Bell', 'La Plata, La Plata')
+        assert len(formas) == len(set(formas))

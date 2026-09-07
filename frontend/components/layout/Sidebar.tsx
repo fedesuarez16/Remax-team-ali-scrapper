@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { BarChart3, Building2, Database, FileText, Folder, Globe, MapPin, Plus, Search, Sparkles } from 'lucide-react'
+import { BarChart3, Building2, Database, Fence, FileText, Folder, Globe, MapPin, Plus, Search, Sparkles } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import SearchHistoryList from '@/components/layout/SearchHistoryList'
 
@@ -110,6 +110,17 @@ export default function Sidebar() {
         >
           <Globe className="size-4" />
           Fuentes
+        </Link>
+        <Link
+          href="/barrios"
+          className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition ${
+            pathname?.startsWith('/barrios')
+              ? 'bg-muted text-foreground'
+              : 'text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+          }`}
+        >
+          <Fence className="size-4" />
+          Barrios cerrados
         </Link>
         <Link
           href="/ficha-propio"

@@ -156,3 +156,63 @@ class TestLaColumnaPuedeNoExistirTodavia:
         inputs = await _read_job_inputs(sb, 'job-1')
         assert inputs['localidades'] == ['City Bell']
         assert 'barrios_cerrados' not in inputs
+
+
+class TestLasRefsViajanConLasFilas:
+    async def test_las_refs_del_catalogo_se_adjuntan_a_cada_barrio(self, sb):
+        """`route_after_parse` decide el override leyendo `portal_refs` de la
+        fila. Si el stream trae el barrio sin sus refs, el probe vuelve a ser
+        decorativo: la búsqueda camina la cadena de candidatos igual."""
+        from app.api.v1.scraping import _read_job_inputs
+
+        sb.rows['scraping_jobs'] = [{
+            'id': 'job-1', 'localidades': None, 'polygon': None,
+            'source_selection': None, 'barrios_cerrados': ['b1'],
+        }]
+        sb.rows['barrios_cerrados'] = [
+            {'id': 'b1', 'nombre': 'Grand Bell', 'localidad': 'City Bell, La Plata',
+             'aliases': [], 'activo': True},
+        ]
+        sb.rows['barrio_cerrado_portal_refs'] = [
+            {'barrio_id': 'b1', 'portal': 'argenprop', 'strategy': 'native',
+             'ref': 'grand-bell', 'confirmed': True},
+            {'barrio_id': 'b2', 'portal': 'remax', 'strategy': 'native',
+             'ref': 'in::::::9999:', 'confirmed': True},
+        ]
+        inputs = await _read_job_inputs(sb, 'job-1')
+        refs = inputs['barrios_cerrados'][0]['portal_refs']
+        assert [r['portal'] for r in refs] == ['argenprop']
+
+    async def test_un_barrio_sin_refs_trae_la_lista_vacia(self, sb):
+        """`route_after_parse` lee `.get('portal_refs') or []`, pero una clave
+        siempre presente evita que un barrio sin probar se distinga de uno que
+        falló al leerse."""
+        from app.api.v1.scraping import _read_job_inputs
+
+        sb.rows['scraping_jobs'] = [{
+            'id': 'job-1', 'localidades': None, 'polygon': None,
+            'source_selection': None, 'barrios_cerrados': ['b1'],
+        }]
+        sb.rows['barrios_cerrados'] = [
+            {'id': 'b1', 'nombre': 'Grand Bell', 'localidad': 'La Plata',
+             'aliases': [], 'activo': True},
+        ]
+        inputs = await _read_job_inputs(sb, 'job-1')
+        assert inputs['barrios_cerrados'][0]['portal_refs'] == []
+
+    async def test_si_las_refs_no_se_pueden_leer_el_barrio_igual_viaja(self, sb):
+        """Perder las refs cuesta eficiencia (se camina la cadena); perder el
+        barrio cuesta la búsqueda entera. Degradá lo barato."""
+        from app.api.v1.scraping import _read_job_inputs
+
+        sb.columnas_faltantes = {'__refs__'}
+        sb.rows['scraping_jobs'] = [{
+            'id': 'job-1', 'localidades': None, 'polygon': None,
+            'source_selection': None, 'barrios_cerrados': ['b1'],
+        }]
+        sb.rows['barrios_cerrados'] = [
+            {'id': 'b1', 'nombre': 'Grand Bell', 'localidad': 'La Plata',
+             'aliases': [], 'activo': True},
+        ]
+        inputs = await _read_job_inputs(sb, 'job-1')
+        assert inputs['barrios_cerrados'][0]['nombre'] == 'Grand Bell'

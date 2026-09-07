@@ -285,7 +285,30 @@ def _env_allowed_sources() -> tuple[str, ...]:
     return PORTAL_SOURCES
 
 
-def _barrio_cerrado_units(state: ScrapingState) -> list[tuple[str, tuple[str, ...]]]:
+def _confirmed_portal_refs(row: dict) -> dict[str, str]:
+    """`portal -> ref` for the rows a human confirmed, and only those.
+
+    Two filters, both load-bearing. `strategy == 'native'` because a
+    `localidad` row means "this portal has no page for the barrio" — its `ref`
+    is null, and confirming it does not conjure a handle. And `confirmed`
+    because the alias filter downstream CANNOT catch a wrong ref: one pointing
+    at the "Los Ceibos" in Tigre returns listings that genuinely say "Los
+    Ceibos", so they pass every guard we have. A person looking at the portal's
+    own label is the only check that separates them.
+    """
+    refs: dict[str, str] = {}
+    for ref in row.get('portal_refs') or []:
+        if not ref.get('confirmed') or ref.get('strategy') != 'native':
+            continue
+        handle = str(ref.get('ref') or '').strip()
+        if handle:
+            refs[str(ref.get('portal'))] = handle
+    return refs
+
+
+def _barrio_cerrado_units(
+    state: ScrapingState,
+) -> list[tuple[str, tuple[str, ...], dict[str, str]]]:
     """Catalogue rows → `(zona compuesta, alias)` per gated community.
 
     The composite zona is what gives `zona_candidates` a chain to walk —
@@ -299,13 +322,17 @@ def _barrio_cerrado_units(state: ScrapingState) -> list[tuple[str, tuple[str, ..
     """
     from app.services.barrio_cerrado import barrio_aliases, barrio_zona
 
-    units: list[tuple[str, tuple[str, ...]]] = []
+    units: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
     for row in state.get('barrios_cerrados') or []:
         nombre = str(row.get('nombre') or '').strip()
         aliases = barrio_aliases(nombre, row.get('aliases') or [])
         if not aliases:
             continue
-        units.append((barrio_zona(nombre, str(row.get('localidad') or '')), aliases))
+        units.append((
+            barrio_zona(nombre, str(row.get('localidad') or '')),
+            aliases,
+            _confirmed_portal_refs(row),
+        ))
     return units
 
 
@@ -344,12 +371,13 @@ def route_after_parse(state: ScrapingState) -> str | list[Any]:
 
     # Fan-out: one portal-scraper + agency-discovery branch per (unit × source)
     sends: list[Any] = []
-    for zona, aliases in barrios:
+    for zona, aliases, portal_refs in barrios:
         # `localidades` is cleared explicitly: every portal resolver reads it
         # AHEAD of `zona`, so a leftover localidad would quietly re-widen the
         # branch back to the thing the barrio was chosen instead of.
         bfilters = filters.model_copy(update={
             'zona': zona, 'localidades': [], 'barrio_aliases': list(aliases),
+            'barrio_portal_refs': portal_refs,
         })
         for src in sources:
             sends.append(Send('run_portal_scraper', {'__source': src, 'filters': bfilters, 'job_id': job_id}))

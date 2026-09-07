@@ -187,3 +187,42 @@ def barrio_zona(nombre: str, localidad: str) -> str:
     """
     parts = [' '.join(p.split()) for p in (strip_kind_prefix(nombre), *localidad.split(','))]
     return ', '.join(p for p in parts if p)
+
+
+def barrio_probe_forms(nombre: str, localidad: str) -> list[str]:
+    """The shapes to ask a portal about ONE barrio, most specific first.
+
+    Deliberately NOT `zona_candidates`. That chain degrades the BARRIO AWAY
+    ("Grand Bell, City Bell, La Plata" → "City Bell, La Plata"), which is the
+    right move for a SEARCH — a wider page still contains the barrio's
+    listings, and the alias guard filters them. It is the wrong move for a
+    PROBE: a probe that resolves the localidad has learned nothing about the
+    barrio, and writing that id down as the barrio's ref would file "all of
+    City Bell" as a precise Grand Bell search. So these forms keep the barrio
+    head and shorten the TAIL.
+
+    Why the middle form exists, measured live 2026-09-07: Argenprop files
+    gated communities under the PARTIDO, labelling Grand Bell "Grand Bell,
+    Partido de La Plata" — no City Bell anywhere. Its resolver requires every
+    comma part of the query to appear in the label, so the three-part composite
+    matched nothing and the probe recorded `localidad` for a portal that has
+    `CodigoBarrio=GRAND-BELL`. Dropping the intermediate localidad asks the
+    portal in the shape it actually stores.
+
+    The bare name is last: it is the most likely to hit a homonym (Argenprop
+    serves a "Los Ceibos" in five different partidos), so it only runs once the
+    qualified forms have failed.
+    """
+    identity = strip_kind_prefix(nombre).strip()
+    if not identity:
+        return []
+
+    partes = [' '.join(p.split()) for p in localidad.split(',')]
+    partes = [p for p in partes if p]
+
+    formas: list[str] = []
+    for tail in (partes, partes[-1:], []):
+        forma = ', '.join([identity, *tail])
+        if forma not in formas:
+            formas.append(forma)
+    return formas

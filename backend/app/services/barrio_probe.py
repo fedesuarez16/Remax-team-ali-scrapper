@@ -43,7 +43,7 @@ from app.services.apify import (
     _remax_resolve_location,
     _slugify,
 )
-from app.services.barrio_cerrado import barrio_zona, strip_kind_prefix
+from app.services.barrio_cerrado import barrio_probe_forms, strip_kind_prefix
 
 Strategy = Literal['native', 'localidad']
 
@@ -185,7 +185,35 @@ _PROBES = {
 }
 
 
-async def _probe_one(portal: str, zona: str, identity: str, localidad_slug: str) -> PortalRef:
+async def _probe_first_hit(
+    probe: Any, formas: list[str], identity: str, localidad_slug: str,
+) -> dict:
+    """Run a portal's probe over the barrio's query forms, keeping the first
+    `native` answer.
+
+    The cascade is not politeness, it is a measured requirement: the portals
+    disagree about which ADMINISTRATIVE LEVEL a gated community hangs off.
+    Argenprop files Grand Bell under the partido ("Grand Bell, Partido de La
+    Plata"), InmoBusqueda under the localidad ("Grand Bell, City Bell, Pdo. de
+    La Plata"). Both resolvers require every comma part of the query to appear
+    in the label, so one single query shape is guaranteed to miss one of them
+    — and it did: the three-part composite made Argenprop report `localidad`
+    for a barrio it has as `CodigoBarrio=GRAND-BELL`.
+
+    A `localidad` answer is never returned early; the last form's answer is,
+    so the note the operator reads describes the narrowest attempt.
+    """
+    answer = _localidad('sin intentos')
+    for forma in formas:
+        answer = await probe(forma, identity, localidad_slug)
+        if answer['strategy'] == 'native':
+            return answer
+    return answer
+
+
+async def _probe_one(
+    portal: str, formas: list[str], identity: str, localidad_slug: str,
+) -> PortalRef:
     if portal in _NO_NATIVE_SUPPORT:
         answer = _localidad(
             f'{portal} no publica páginas de barrio cerrado (medido: 404 en '
@@ -203,7 +231,7 @@ async def _probe_one(portal: str, zona: str, identity: str, localidad_slug: str)
     else:
         probe = _PROBES[portal]
         try:
-            answer = await probe(zona, identity, localidad_slug)
+            answer = await _probe_first_hit(probe, formas, identity, localidad_slug)
         except Exception as e:  # noqa: BLE001 — a portal outage is not a verdict
             # An error is NOT "this barrio does not exist here". Writing that
             # down would freeze a transient failure into the catalogue, so the
@@ -239,11 +267,11 @@ async def probe_barrio(nombre: str, localidad: str) -> list[PortalRef]:
     homonyms, and Argenprop's first hit for a bare "Los Ceibos" is in Tigre.
     """
     identity = strip_kind_prefix(nombre)
-    zona = barrio_zona(nombre, localidad)
+    formas = barrio_probe_forms(nombre, localidad)
     localidad_slug = _slugify(localidad.split(',')[0])
 
     return list(await asyncio.gather(*(
-        _probe_one(portal, zona, identity, localidad_slug)
+        _probe_one(portal, formas, identity, localidad_slug)
         for portal in PORTAL_SOURCES
     )))
 

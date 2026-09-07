@@ -230,6 +230,39 @@ def _slugify(value: str) -> str:
     return re.sub(r'-+', '-', slug)
 
 
+def _barrio_portal_ref(filters: ScrapingFilters, portal: str) -> str | None:
+    """This portal's confirmed handle for the gated community, if any.
+
+    A blank value is NOT an override: a `localidad` row stores `ref: null`, and
+    reading that as "filter on the empty string" would send the portal at its
+    nationwide listing — the exact failure mode every resolver in this module
+    is written to avoid.
+    """
+    return (filters.barrio_portal_refs or {}).get(portal) or None
+
+
+async def _resolve_argenprop_zona(filters: ScrapingFilters, zona: str) -> str | None:
+    """Argenprop's zona slug: the confirmed barrio ref, else the autocomplete.
+
+    One wrapper per portal rather than a check inlined at each call site — the
+    scrapers are long, and a resolution rule that lives in four places drifts
+    in four directions.
+    """
+    return _barrio_portal_ref(filters, 'argenprop') or await _argenprop_resolve_zona_slug(zona)
+
+
+async def _resolve_inmobusqueda_zona(filters: ScrapingFilters, zona: str) -> str | None:
+    return _barrio_portal_ref(filters, 'inmobusqueda') or await _inmobusqueda_resolve_zona_slug(zona)
+
+
+async def _resolve_remax_location(filters: ScrapingFilters, zona: str) -> str | None:
+    return _barrio_portal_ref(filters, 'remax') or await _remax_resolve_location(zona)
+
+
+async def _resolve_c21_location(filters: ScrapingFilters, zona: str) -> str | None:
+    return _barrio_portal_ref(filters, 'century21') or await _c21_resolve_location(zona)
+
+
 def _keep_barrio_cerrado(
     results: list[RawProperty], aliases: list[str],
 ) -> list[RawProperty]:
@@ -1849,7 +1882,7 @@ async def _scrape_inmobusqueda(
 
     # Fan-out unit: localidad on the map path, zona on the chat path.
     zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
-    zona_slug = await _inmobusqueda_resolve_zona_slug(zona)
+    zona_slug = await _resolve_inmobusqueda_zona(filters, zona)
     if not zona_slug:
         # No confident slug → the portal would serve the whole country. Report
         # zero rather than flooding the search with unrelated listings.
@@ -3084,7 +3117,7 @@ async def _scrape_remax_api(
     # Server-side location filter — the fan-out unit (localidad on the map
     # path, zona on the chat path) is what the user actually asked for.
     loc_zona = filters.localidades[0] if filters.localidades else zona
-    location = await _remax_resolve_location(loc_zona)
+    location = await _resolve_remax_location(filters, loc_zona)
 
     await on_progress('remax', 'running', 0)
 
@@ -3435,7 +3468,7 @@ async def _scrape_century21(
     await on_progress('century21', 'running', 0)
 
     loc_zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
-    location = await _c21_resolve_location(loc_zona)
+    location = await _resolve_c21_location(filters, loc_zona)
     if location is None:
         # Sin ubicación no hay búsqueda: ver `_c21_resolve_location`.
         await on_progress('century21', 'done', 0)
@@ -4752,7 +4785,7 @@ class ApifyService(BaseApifyService):
         # API — the fan-out unit (localidad on the map path, zona on the chat
         # path) is what the user actually asked for.
         zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
-        zona_slug = await _argenprop_resolve_zona_slug(zona)
+        zona_slug = await _resolve_argenprop_zona(filters, zona)
         urls = _argenprop_search_urls(filters, settings.ARGENPROP_MAX_PAGES, zona_slug=zona_slug)
         input_data = {
             'startUrls': [{'url': u} for u in urls],

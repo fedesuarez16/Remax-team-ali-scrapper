@@ -16,7 +16,6 @@ fuente que el operador cargó sin zona vale para toda búsqueda, no para ninguna
 """
 from typing import Any
 
-import pytest
 
 from app.graphs.extraction.nodes import _fetch_active_manual_sources, _read_selection
 

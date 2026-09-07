@@ -129,3 +129,66 @@ class TestSinBarriosNadaCambia:
         sends = route_after_parse(_state(
             barrios_cerrados=[{'id': 'x', 'nombre': '  ', 'localidad': 'La Plata'}]))
         assert [f.zona for f in _branches(sends)] == ['City Bell, La Plata']
+
+
+class TestLasRefsConfirmadasViajanALaRama:
+    """El puente entre el probe y la búsqueda.
+
+    Sin esto el probe es diagnóstico: descubre que Argenprop tiene
+    `CodigoBarrio=GRAND-BELL` y la búsqueda igual camina todo City Bell,
+    porque `zona_candidates` degrada la CABEZA y pierde el barrio.
+    """
+
+    def test_una_ref_confirmada_llega_a_la_rama(self):
+        sends = route_after_parse(_state(barrios_cerrados=[{
+            **_GRAND_BELL,
+            'portal_refs': [
+                {'portal': 'argenprop', 'strategy': 'native',
+                 'ref': 'grand-bell', 'confirmed': True},
+            ],
+        }]))
+        assert _branches(sends)[0].barrio_portal_refs == {'argenprop': 'grand-bell'}
+
+    def test_una_ref_SIN_confirmar_no_viaja(self):
+        """Es la regla de seguridad entera. El filtro de alias no puede
+        atrapar una ref equivocada: una que apunte al "Los Ceibos" de TIGRE
+        devuelve avisos que dicen "Los Ceibos" de verdad, así que pasan todos
+        los guards. Confirmar es lo único que los separa."""
+        sends = route_after_parse(_state(barrios_cerrados=[{
+            **_GRAND_BELL,
+            'portal_refs': [
+                {'portal': 'argenprop', 'strategy': 'native',
+                 'ref': 'grand-bell', 'confirmed': False},
+            ],
+        }]))
+        assert _branches(sends)[0].barrio_portal_refs == {}
+
+    def test_una_fila_localidad_confirmada_tampoco_viaja(self):
+        """`localidad` significa "el portal no tiene página para esto". Su
+        `ref` es null y confirmarla no la convierte en un handle."""
+        sends = route_after_parse(_state(barrios_cerrados=[{
+            **_GRAND_BELL,
+            'portal_refs': [
+                {'portal': 'mudafy', 'strategy': 'localidad',
+                 'ref': None, 'confirmed': True},
+            ],
+        }]))
+        assert _branches(sends)[0].barrio_portal_refs == {}
+
+    def test_cada_barrio_lleva_solo_sus_propias_refs(self):
+        """Dos barrios en la misma búsqueda son dos ramas independientes;
+        cruzar sus refs mandaría una a buscar la otra."""
+        sends = route_after_parse(_state(barrios_cerrados=[
+            {**_GRAND_BELL, 'portal_refs': [
+                {'portal': 'argenprop', 'strategy': 'native',
+                 'ref': 'grand-bell', 'confirmed': True}]},
+            {**_LOS_CEIBOS, 'portal_refs': [
+                {'portal': 'argenprop', 'strategy': 'native',
+                 'ref': 'los-ceibos-lp', 'confirmed': True}]},
+        ]))
+        assert [f.barrio_portal_refs for f in _branches(sends)] == [
+            {'argenprop': 'grand-bell'}, {'argenprop': 'los-ceibos-lp'}]
+
+    def test_un_barrio_sin_probar_no_lleva_refs(self):
+        sends = route_after_parse(_state(barrios_cerrados=[_GRAND_BELL]))
+        assert _branches(sends)[0].barrio_portal_refs == {}

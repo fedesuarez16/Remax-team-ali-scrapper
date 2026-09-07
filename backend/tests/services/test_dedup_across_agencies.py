@@ -23,7 +23,6 @@ mostrar.
 """
 from typing import Any
 
-import pytest
 
 from app.services.dedup import catalogo_de, collapse_duplicates
 

@@ -5,7 +5,7 @@ import logging
 import re
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -352,10 +352,52 @@ async def _zonaprop_gallery(url_origen: str, allow_escalation: bool = True) -> l
     )
 
 
+_ALVIRA_HOSTS = ('alvirapropiedades.com.ar', 'www.alvirapropiedades.com.ar')
+
+
+async def _alvira_gallery(url_origen: str, allow_escalation: bool = True) -> list[str]:
+    """Alvira's gallery is an HTML fragment fetched by listarFotos() via AJAX.
+
+    The initial ficha only contains og:image and social icons. The fragment's
+    anchor hrefs are the originals; its img srcs are x100 thumbnails. Only take
+    original photos from this listing's directory on the InmoBusqueda photo CDN.
+    """
+    from bs4 import BeautifulSoup  # type: ignore[import-untyped]
+
+    parsed = urlparse(url_origen)
+    listing = re.fullmatch(r'/ficha/(\d+)/?', parsed.path)
+    if parsed.hostname not in _ALVIRA_HOSTS or not listing:
+        return []
+    listing_id = listing.group(1)
+    endpoint = urljoin(url_origen, f'/fichalistarfotos?e=0&pid={listing_id}')
+
+    def _parse(html: str) -> list[str]:
+        soup = BeautifulSoup(html, 'html.parser')
+        images: list[str] = []
+        seen: set[str] = set()
+        for link in soup.select('a[href]'):
+            url = urljoin(endpoint, str(link.get('href') or '').strip())
+            photo = urlparse(url)
+            if photo.scheme not in ('http', 'https'):
+                continue
+            if not re.fullmatch(r'fotos\d+\.inmobusqueda\.com', photo.hostname or ''):
+                continue
+            if not re.fullmatch(
+                rf'/\d+/{listing_id}/[^/]+\.(?:jpg|jpeg|png|webp)', photo.path, re.I,
+            ):
+                continue
+            if url not in seen:
+                seen.add(url)
+                images.append(url)
+        return images
+
+    return await _gallery_via_ladder(endpoint, _parse, allow_escalation=allow_escalation)
+
+
 # Portales con parser propio, por host. La clave es un fragmento del dominio
 # porque MercadoLibre reparte los avisos entre subdominios por tipo de
 # propiedad (`casa.`, `departamento.`, `ph.`, `terreno.`, `articulo.`).
-_PORTAL_HOSTS = ('mercadolibre', 'zonaprop', 'remax', 'century21')
+_PORTAL_HOSTS = ('mercadolibre', 'zonaprop', 'remax', 'century21', *_ALVIRA_HOSTS)
 
 
 async def portal_gallery_from_url(url: str, allow_escalation: bool = True) -> list[str]:
@@ -372,6 +414,8 @@ async def portal_gallery_from_url(url: str, allow_escalation: bool = True) -> li
     host = urlparse(url or '').netloc.lower()
     if not host:
         return []
+    if host in _ALVIRA_HOSTS:
+        return await _alvira_gallery(url, allow_escalation)
     if 'mercadolibre' in host:
         return await _mercadolibre_gallery(url, allow_escalation)
     if 'zonaprop' in host:
