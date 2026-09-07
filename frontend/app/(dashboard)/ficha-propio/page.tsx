@@ -16,7 +16,7 @@ import { SelectionBar } from '@/components/properties/SelectionBar'
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
 type ImportResult =
-  | { url: string; status: 'ok'; created: boolean; property: Property }
+  | { url: string; status: 'ok'; created: boolean; gallery_complete?: boolean; property: Property }
   | { url: string; status: 'error'; error: string }
 
 type Stats = { total_fichas: number; gasto_usd: number; llamadas: number }
@@ -441,7 +441,7 @@ export default function FichaPropioPage() {
       const ok = results.filter((r): r is Extract<ImportResult, { status: 'ok' }> => r.status === 'ok')
       // Enriquecer descripción → amenities/destacados, igual que el flujo de fichas
       const enriched = await Promise.all(ok.map((r) => enrichFicha(r.property, {
-        refreshGallery: !r.created,
+        refreshGallery: !r.created && !r.gallery_complete,
       })))
 
       setItems((prev) => {

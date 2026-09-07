@@ -1,50 +1,53 @@
 # Generación de Ficha Propio desde ZonaProp
 
-El flujo de `/ficha-propio` importa una URL y luego llama a `/properties/{id}/enrich`
-para preparar el texto. La importación descargaba el aviso sin el proxy configurado,
-volvía a descargarlo para leer las fotos y el enriquecimiento podía repetir la
-recuperación. Los bloqueos podían alcanzar el actor de Apify, cuyo polling admite
-300 segundos.
+`POST /api/v1/properties/import` verifica la galería del aviso de ZonaProp en
+cada generación explícita. Esto incluye las URLs que ya existen en `properties`
+por una búsqueda anterior. Se conserva el mismo ID y los datos editados; se
+actualiza `imagenes` con la galería obtenida del aviso.
 
-La corrección utiliza el proxy también en la primera descarga. El parser de
-ZonaProp extrae la galería del mismo HTML que se usa para leer el texto. Una
-importación nueva llama al enriquecimiento con `refresh_gallery=false`, porque
-acaba de resolver las fotos; las propiedades ya guardadas conservan la recuperación.
+El parser lee todas las fotos de `pictures` y elige la mayor resolución disponible.
+ZonaProp no usa el límite genérico de 40 fotos. El mismo HTML sirve para extraer
+el texto cuando la propiedad es nueva: no se vuelve a descargar para las imágenes.
+Si no se puede leer la galería nativa o guardar su actualización, la importación
+devuelve un error por URL. No devuelve una ficha parcial con estado `ok`.
 
-Para ZonaProp, la lectura inicial tiene un presupuesto de 15 segundos, incluyendo
-un posible intento con navegador y proxy. Ese flujo interactivo no inicia un
-actor de Apify. Recuperar fotos de una ficha existente permite solo HTTP y hasta
-tres segundos, conservando las imágenes disponibles si no responde. Las llamadas
-a Anthropic de importación y enriquecimiento tienen timeout de 15 segundos y
-no agregan reintentos automáticos del SDK.
+La respuesta incluye `gallery_complete: true` cuando la importación verificó las
+fotos. El frontend llama entonces al enriquecimiento de texto con
+`refresh_gallery=false`, evitando otra recuperación incluso para una fila existente.
 
-La medición del 7 de septiembre de 2026 del aviso `58532575` obtuvo texto y 20
-fotos en 3,06 segundos. Es una medición de la lectura del portal, no del tiempo
-total con IA y base de datos. No se modificó la base durante esa prueba.
+## Tiempos y recuperación
 
-La regresión está cubierta en `backend/tests/services/test_ficha_propio_zonaprop_latency.py`:
-una sola descarga, galería completa, proxy en HTTP y navegador, cancelación por
-deadline, ausencia de actores y omisión de la segunda recuperación de fotos.
-Esta corrección no necesita migraciones.
+La lectura de ZonaProp tiene un presupuesto total de 15 segundos. Usa el proxy
+configurado y, si la conexión con ese proxy falla, permite un intento HTTP directo
+dentro del mismo presupuesto. Un bloqueo puede pasar a navegador con proxy. Este
+flujo interactivo no inicia actores de Apify, cuyo polling puede alcanzar 300 segundos.
+Las llamadas de IA tienen timeout de 15 segundos y no suman reintentos del SDK.
 
-## Fichas guardadas con miniaturas de ZonaProp
+La recuperación opcional de `/enrich` conserva su límite de tres segundos para
+ZonaProp. Detecta tanto pocas imágenes como fotos de baja resolución del CDN,
+pero la generación de `/ficha-propio` ya no depende de esa recuperación opcional.
+Abrir una ficha pública con una galería sana reutiliza las fotos guardadas. Volver
+a generar explícitamente desde la URL consulta el aviso para incluir fotos agregadas.
 
-El aviso `58514344` permitió verificar otro caso: la fila existente, creada el
-8 de julio de 2026, tenía ocho fotos del feed a 360 × 266 y ya estaba marcada
-como enriquecida. Pegar la URL reutilizaba esa fila. La recuperación sólo miraba
-si había seis fotos o menos, así que no volvía a consultar la galería.
+## Casos verificados el 7 de septiembre de 2026
 
-El HTML del aviso contiene las 19 fotos en `pictures`. El parser existente
-obtiene sus URLs `resizeUrl1200x1200`; la primera imagen descargada mide realmente
-1200 × 900, conservando su proporción. No es necesario ampliar miniaturas ni
-agregar otra descarga a las importaciones nuevas.
+- `58532575`: lectura del texto y 20 fotos en 3,06 segundos, sin IA ni base.
+- `58514344`: la fila tenía ocho miniaturas de 360 × 266; el HTML contiene 19 fotos.
+  La primera versión grande descargada mide 1200 × 900.
+- `58742865`: la fila del buscador tenía ocho fotos de 720 × 532. El HTML contiene
+  23. La detección de miniaturas era correcta, pero una recuperación fallida seguía
+  permitiendo presentar la galería vieja como terminada. Con el import corregido,
+  el primer intento falló y devolvió un error; el reintento por la ruta FastAPI
+  local, con red y Supabase reales, devolvió y guardó las 23 fotos en 1,75 segundos.
+  Esa medición reutilizó el texto existente y no hizo llamadas a IA. Se verificó
+  también el enriquecimiento posterior y la persistencia; sólo cambió `imagenes`.
 
-La recuperación ahora detecta también los tamaños inferiores a 1200 píxeles en
-las rutas de fotos del CDN de ZonaProp, aunque la fila tenga ocho o más imágenes.
-Al generar nuevamente una ficha existente o abrir su enlace público, recupera y
-guarda la galería de mayor resolución. Las visitas siguientes reutilizan esas
-fotos. Se mantienen los límites de tiempo de los pedidos interactivos.
+## Validación
 
-`backend/tests/services/test_zonaprop_cached_gallery.py` cubre la reutilización
-de una fila con ocho miniaturas, su recuperación a 19 fotos grandes y la ausencia
-de descargas adicionales al volver a generar o abrir la ficha. No requiere migración.
+`backend/tests/api/test_zonaprop_import_gallery.py` prueba el endpoint completo
+con filas nuevas y existentes, galerías de 23 y 47 fotos, recuperación que excede
+el presupuesto opcional y fallos que deben impedir un falso éxito. Los tests de
+latencia mantienen los límites de espera y la ausencia de actores pagos.
+
+No requiere migraciones. Desplegar backend y frontend para aplicar el contrato
+`gallery_complete` al flujo de generación.

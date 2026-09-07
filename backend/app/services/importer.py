@@ -6,8 +6,8 @@ property with an LLM, harvest its photo gallery and persist it to the
 `properties` catalog with ``fuente='manual'`` so the app can serve a branded,
 shareable ficha at ``/p/{id}`` replacing the portal link.
 
-Idempotent per URL: a property already imported (matched by ``url_origen``)
-is returned as-is without re-fetching or re-extracting.
+Idempotent per URL: existing metadata is reused. ZonaProp's gallery is verified
+on every explicit import, including properties previously found by the search.
 """
 from __future__ import annotations
 
@@ -161,13 +161,17 @@ def _looks_blocked(html: str) -> bool:
     return len(_visible_text(html)) < _MIN_VISIBLE_TEXT
 
 
-async def _fetch_html_httpx(url: str) -> str:
+async def _fetch_html_httpx(url: str, *, use_proxy: bool = True) -> str:
     """Tier 1. Levanta ``PortalBlocked`` si el portal nos rechaza a nosotros;
     cualquier otro error HTTP (404, 500) propaga tal cual."""
     async with httpx.AsyncClient(
         headers=_BROWSER_HEADERS, timeout=8 if is_zonaprop_url(url) else 20,
         follow_redirects=True,
-        proxy=_proxy_with_session(settings.SCRAPER_PROXY_URL, _next_proxy_session('ficha')),
+        proxy=(
+            _proxy_with_session(settings.SCRAPER_PROXY_URL, _next_proxy_session('ficha'))
+            if use_proxy else None
+        ),
+        trust_env=use_proxy,
     ) as client:
         resp = await client.get(url)
     if _is_blocked_status(resp.status_code):
@@ -205,6 +209,13 @@ async def _fetch_zonaprop_html(url: str) -> str:
         async with asyncio.timeout(_ZONAPROP_FETCH_TIMEOUT):
             try:
                 return await _fetch_html_httpx(url)
+            except httpx.ProxyError:
+                # A broken proxy must not prevent reading a publicly accessible
+                # listing. Keep the direct attempt inside the same deadline.
+                try:
+                    return await _fetch_html_httpx(url, use_proxy=False)
+                except (PortalBlocked, httpx.TransportError):
+                    pass
             except (PortalBlocked, httpx.TimeoutException):
                 pass
             html = await render_page_html(url, proxy=_playwright_proxy(settings.SCRAPER_PROXY_URL))
@@ -225,8 +236,14 @@ async def _fetch_page(url: str) -> tuple[str, list[str]]:
     # el directorio del og:image son de otra (bloques de "similares", widgets).
     # ZonaProp's full gallery is embedded in this SAME document. A second GET
     # can hit a challenge even though we already have every photo locally.
-    images = _parse_zonaprop_pictures(html) if is_zonaprop_url(url) else []
-    if not images:
+    if is_zonaprop_url(url):
+        images = _parse_zonaprop_pictures(html)
+        if not images:
+            raise RuntimeError(
+                'No se pudo obtener la galería completa de ZonaProp. '
+                'Reintentá generar la ficha.'
+            )
+    else:
         images = _extract_images_from_html(html, url, anchor_to_og=True)
     return _visible_text(html)[:8000], images
 
@@ -273,7 +290,21 @@ async def import_property_from_url(sb: Any, url: str) -> dict[str, Any]:
         sb.table('properties').select('*').eq('url_origen', url).limit(1).execute()
     )
     if existing.data:
-        return {'property': existing.data[0], 'created': False}
+        cached = existing.data[0]
+        if not is_zonaprop_url(url):
+            return {'property': cached, 'created': False}
+        # Generating a ficha must resolve the full gallery here. The optional
+        # three-second enrichment pass can time out and silently keep the feed's
+        # eight images, even when it correctly detects that they are incomplete.
+        _, images = await _fetch_page(url)
+        if images != (cached.get('imagenes') or []):
+            saved = await sb.table('properties').update(
+                {'imagenes': images}
+            ).eq('id', cached['id']).execute()
+            if not saved.data or saved.data[0].get('imagenes') != images:
+                raise RuntimeError('No se pudo guardar la galería completa de la ficha')
+            cached = saved.data[0]
+        return {'property': cached, 'created': False, 'gallery_complete': True}
 
     text, images = await _fetch_page(url)
     if len(text) < 100:
@@ -330,7 +361,7 @@ async def import_property_from_url(sb: Any, url: str) -> dict[str, Any]:
         m2_total=data.get('m2'),
         antiguedad=data.get('antiguedad'),
         amenities=data.get('amenities') or [],
-        imagenes=images[:_MAX_IMAGENES],
+        imagenes=images if is_zonaprop_url(url) else images[:_MAX_IMAGENES],
         fuente='manual',
         url_origen=url,
         confianza_extraccion=min(1.0, filled / 6),
@@ -338,4 +369,7 @@ async def import_property_from_url(sb: Any, url: str) -> dict[str, Any]:
     res = await sb.table('properties').insert(prop.model_dump()).execute()
     if not res.data:
         raise RuntimeError('No se pudo guardar la propiedad')
-    return {'property': res.data[0], 'created': True}
+    return {
+        'property': res.data[0], 'created': True,
+        'gallery_complete': is_zonaprop_url(url),
+    }

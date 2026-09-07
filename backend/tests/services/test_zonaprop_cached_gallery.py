@@ -96,28 +96,31 @@ def test_unrelated_image_hosts_are_not_treated_as_zonaprop_thumbnails(host):
 
 
 @pytest.mark.parametrize('source', ['manual', 'zonaprop'])
-async def test_reusing_a_cached_import_recovers_all_19_large_photos_once(monkeypatch, source):
+async def test_import_verifies_gallery_before_optional_enrichment(monkeypatch, source):
     db = Database(cached_property(source))
-    fetch = AsyncMock(return_value=(False, HTML))
-    monkeypatch.setattr(ficha, '_fetch_listing_html', fetch)
+    fetch = AsyncMock(return_value=HTML)
+    monkeypatch.setattr(importer, '_fetch_html', fetch)
     redundant = AsyncMock(side_effect=AssertionError('Cached import must not run extraction'))
-    monkeypatch.setattr(importer, '_fetch_page', redundant)
     monkeypatch.setattr(importer, '_extract_llm', redundant)
+    monkeypatch.setattr(ficha, '_fetch_listing_html', redundant)
 
     result = await importer.import_property_from_url(db, URL)
     assert result['created'] is False
-    enriched = await ficha.enrich_ficha(result['property'], db)
+    assert result['gallery_complete'] is True
+    assert result['property']['imagenes'] == FULL
+    enriched = await ficha.enrich_ficha(result['property'], db, refresh_gallery=False)
     assert enriched['imagenes'] == FULL
     assert len(db.updates) == 1
     assert db.row['imagenes'] == FULL
     assert not any('/360x266/' in image for image in enriched['imagenes'])
-    fetch.assert_awaited_once_with(URL, None)
+    fetch.assert_awaited_once_with(URL)
     redundant.assert_not_called()
 
-    # Next generation reuses the repaired row without a second download.
+    # Explicit generation checks for added portal photos but does not rewrite
+    # an unchanged gallery. Ordinary public opens remain cached (test below).
     repeated = await importer.import_property_from_url(db, URL)
     await ficha.enrich_ficha(repeated['property'], db)
-    assert fetch.await_count == 1
+    assert fetch.await_count == 2
     assert len(db.updates) == 1
 
 

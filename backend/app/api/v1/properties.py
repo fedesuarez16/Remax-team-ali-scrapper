@@ -282,6 +282,7 @@ async def import_properties(request: Request, body: dict) -> dict[str, Any]:
             results.append({
                 'url': u, 'status': 'ok',
                 'created': r['created'], 'property': prop,
+                'gallery_complete': r.get('gallery_complete', False),
             })
         except Exception as e:
             results.append({'url': u, 'status': 'error', 'error': str(e)})

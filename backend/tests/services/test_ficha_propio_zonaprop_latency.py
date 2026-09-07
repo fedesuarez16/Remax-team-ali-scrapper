@@ -98,6 +98,30 @@ async def test_initial_fetch_uses_the_configured_proxy(monkeypatch):
     assert seen['timeout'] == 8
 
 
+async def test_proxy_connection_failure_tries_direct_http_within_the_import_budget(monkeypatch):
+    fetch = AsyncMock(side_effect=[httpx.ProxyError('403 Forbidden'), HTML])
+    browser = AsyncMock(side_effect=AssertionError('Direct HTTP already read the gallery'))
+    monkeypatch.setattr(importer, '_fetch_html_httpx', fetch)
+    monkeypatch.setattr(importer, 'render_page_html', browser)
+    assert await importer._fetch_html(URL) == HTML
+    assert fetch.await_args_list[1].kwargs == {'use_proxy': False}
+    browser.assert_not_called()
+
+
+async def test_direct_fallback_does_not_reuse_the_broken_environment_proxy(monkeypatch):
+    seen = {}
+    original = httpx.AsyncClient
+
+    def client(**kwargs):
+        seen.update(kwargs)
+        return original(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=HTML)))
+
+    monkeypatch.setattr(importer.httpx, 'AsyncClient', client)
+    assert await importer._fetch_html_httpx(URL, use_proxy=False) == HTML
+    assert seen['proxy'] is None
+    assert seen['trust_env'] is False
+
+
 async def test_blocked_zonaprop_uses_the_proxy_in_the_browser_too(monkeypatch):
     monkeypatch.setattr(settings, 'SCRAPER_PROXY_URL', 'http://proxy.example:8000')
     monkeypatch.setattr(importer, '_fetch_html_httpx', AsyncMock(side_effect=importer.PortalBlocked))
