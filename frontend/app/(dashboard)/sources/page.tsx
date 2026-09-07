@@ -326,6 +326,11 @@ export default function SourcesPage() {
                       <>
                         <p className="flex items-center gap-2 truncate text-sm font-medium text-foreground">
                           {s.nombre}
+                          {s.scrapeSource && (
+                            <span className="shrink-0 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-normal text-emerald-700 dark:text-emerald-400">
+                              Búsqueda integrada
+                            </span>
+                          )}
                           {s.zona ? (
                             <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
                               <MapPin className="size-3" />

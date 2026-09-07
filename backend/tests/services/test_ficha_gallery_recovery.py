@@ -29,7 +29,8 @@ def test_gallery_looks_incomplete_only_for_zero_or_one_image() -> None:
 async def test_enriched_ficha_stuck_on_thumbnail_recovers_gallery(monkeypatch) -> None:
     full = [f'https://cdn/{i}.jpg' for i in range(19)]
 
-    async def fake_fetch(prop):
+    async def fake_fetch(prop, allow_escalation=True):
+        assert allow_escalation is False
         return full
 
     monkeypatch.setattr(ficha, '_fetch_full_gallery', fake_fetch)

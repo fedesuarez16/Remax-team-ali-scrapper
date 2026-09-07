@@ -51,7 +51,7 @@ export function EnviarFichasBar({ seleccionadas, ids, onClear, onDeleted, onEnvi
     setError(null)
     try {
       // Parse each description with the LLM (amenities + destacados) before building the ficha.
-      const enriched = await Promise.all(seleccionadas.map(enrichFicha))
+      const enriched = await Promise.all(seleccionadas.map((p) => enrichFicha(p)))
 
       // Sellar el perfil elegido ANTES de mandar nada: la ficha pública lee el
       // agente de la base, así que si esto falla la ficha saldría con el

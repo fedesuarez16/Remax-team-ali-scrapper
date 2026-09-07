@@ -12,7 +12,7 @@ def matches_source_filters(prop: RawProperty, filters: ScrapingFilters) -> bool:
     if filters.tipos_propiedad and prop.tipo_propiedad not in filters.tipos_propiedad:
         return False
     zonas = [filters.zona_pedida] if filters.zona_pedida else (
-        filters.localidades or filters.zonas or [filters.zona]
+        filters.localidades or filters.zonas or [filters.zona or '']
     )
     if any(zonas) and not any(
         agency_matches_zona(prop.direccion, zona) for zona in zonas if zona

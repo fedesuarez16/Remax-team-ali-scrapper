@@ -16,6 +16,9 @@ const FUENTE_LABEL: Record<string, string> = {
   argenprop: 'Argenprop',
   remax: 'RE/MAX',
   century21: 'CENTURY 21',
+  inmobusqueda: 'InmoBúsqueda',
+  mauroperri: 'Mauro Perri',
+  urquiza: 'Urquiza Propiedades',
   googlemaps: 'Google Maps',
 }
 

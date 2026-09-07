@@ -7,10 +7,13 @@ const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
  * distributing amenities + destacados into structured fields. Idempotent and cached
  * server-side. On any failure returns the original property untouched.
  */
-export async function enrichFicha(p: Property): Promise<Property> {
+export async function enrichFicha(
+  p: Property, options: { refreshGallery?: boolean } = {},
+): Promise<Property> {
   if (!p.id) return p
   try {
-    const res = await fetch(`${API}/api/v1/properties/${encodeURIComponent(p.id)}/enrich`, {
+    const query = options.refreshGallery === false ? '?refresh_gallery=false' : ''
+    const res = await fetch(`${API}/api/v1/properties/${encodeURIComponent(p.id)}/enrich${query}`, {
       method: 'POST',
     })
     if (!res.ok) return p

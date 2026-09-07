@@ -8,6 +8,7 @@ export type ManualSource = {
   nombre: string
   url: string
   activo: boolean
+  scrapeSource: string | null
   /** The zona WE classified this source into. null = no zona bucket. */
   zona: string | null
   date: string
@@ -26,6 +27,7 @@ type ManualSourceRow = {
   nombre: string
   url: string
   activo: boolean
+  scrape_source?: string | null
   zona?: string | null
   created_at: string
 }
@@ -36,6 +38,7 @@ function mapRow(row: ManualSourceRow): ManualSource {
     nombre: row.nombre,
     url: row.url,
     activo: row.activo,
+    scrapeSource: row.scrape_source ?? null,
     zona: row.zona ?? null,
     date: row.created_at,
   }

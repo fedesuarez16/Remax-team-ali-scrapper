@@ -440,7 +440,9 @@ export default function FichaPropioPage() {
 
       const ok = results.filter((r): r is Extract<ImportResult, { status: 'ok' }> => r.status === 'ok')
       // Enriquecer descripción → amenities/destacados, igual que el flujo de fichas
-      const enriched = await Promise.all(ok.map((r) => enrichFicha(r.property)))
+      const enriched = await Promise.all(ok.map((r) => enrichFicha(r.property, {
+        refreshGallery: !r.created,
+      })))
 
       setItems((prev) => {
         const known = new Set(prev.map((p) => p.id))

@@ -26,6 +26,7 @@ from app.services.apify import (
     harvest_page_images,
 )
 from app.services.dedup import collapse_duplicates
+from app.services.source_registry import SEARCH_SOURCES, source_for_url
 from app.services.ficha import portal_gallery_from_url
 from app.services.llm_costs import (
     SCOPE_EXTRACT_INSTAGRAM,
@@ -621,6 +622,15 @@ def _matches_filters(p: NormalizedProperty, f: ScrapingFilters | None) -> bool:
     """Search-result criteria. Missing data on a property never excludes it."""
     if f is None:
         return True
+    if f.tipo_operacion and p.tipo_operacion != f.tipo_operacion:
+        return False
+    if f.tipos_propiedad and p.tipo_propiedad not in f.tipos_propiedad:
+        return False
+    if p.m2_total is not None:
+        if f.m2_min is not None and p.m2_total < f.m2_min:
+            return False
+        if f.m2_max is not None and p.m2_total > f.m2_max:
+            return False
     # La zona no se miraba acá, y los portales la filtran en el ORIGEN
     # (`_item_matches_zona`) mientras que el track de inmobiliarias no la
     # filtra en ningún lado. Resultado: una propiedad de Mar del Plata llegaba
@@ -1221,6 +1231,18 @@ def route_after_review(state: ScrapingState) -> str | list[Any]:
     # the user confirmed gets scraped. The old default of 10 was a self-imposed
     # ceiling that dropped the rest with no error and no event.
     cap = settings.MAX_WEBSITE_URLS
+    registered_sent: set[str] = set()
+
+    def website_send(nombre: str, url: str) -> bool:
+        source = source_for_url(url)
+        payload: dict[str, Any] = {'nombre': nombre, 'url': url, 'job_id': job_id}
+        if source:
+            if source.id in registered_sent:
+                return False
+            registered_sent.add(source.id)
+            payload['source_filters'] = _registered_search_units(state)
+        sends.append(Send('run_website_scraper', payload))
+        return True
 
     # Manually-registered sources reach the SAME website-scraping pipeline as
     # agency websites and share the cap — but they go FIRST. Someone filed these
@@ -1232,13 +1254,11 @@ def route_after_review(state: ScrapingState) -> str | list[Any]:
     for src in manual_sources:
         if cap and websites_sent >= cap:
             break
-        sends.append(Send('run_website_scraper', {'nombre': src['nombre'], 'url': src['url'], 'job_id': job_id}))
-        websites_sent += 1
+        websites_sent += int(website_send(src['nombre'], src['url']))
 
     for a in selected_agencies:
         if a.sitio_web and (not cap or websites_sent < cap):
-            sends.append(Send('run_website_scraper', {'nombre': a.nombre, 'url': a.sitio_web, 'job_id': job_id}))
-            websites_sent += 1
+            websites_sent += int(website_send(a.nombre, a.sitio_web))
         # Instagram is a separate actor with its own budget — the website cap
         # never gated it, so a full cap must not silence it either.
         if a.instagram_handle and not settings.SCRAPE_GOOGLEMAPS_ONLY:
@@ -1267,12 +1287,31 @@ def route_after_review(state: ScrapingState) -> str | list[Any]:
 
 # ── Phase 2: Website scraping + LLM extraction ───────────────────────────────
 
+def _registered_search_units(state: ScrapingState) -> list[ScrapingFilters]:
+    filters = state.get('filters')
+    if filters is None:
+        return []
+    barrios = _barrio_cerrado_units(state)
+    if barrios:
+        return [filters.model_copy(update={
+            'zona': zona, 'zona_pedida': zona, 'zonas': [zona], 'localidades': [],
+            'barrio_aliases': list(aliases), 'barrio_portal_refs': refs,
+        }) for zona, aliases, refs in barrios]
+    zonas = state.get('localidades') or filters.localidades or filters.zonas or [filters.zona or '']
+    return [filters.model_copy(update={
+        'zona': zona, 'zona_pedida': zona, 'zonas': [zona] if zona else [],
+        'localidades': [],
+    }) for zona in dict.fromkeys(zonas)]
+
+
 async def run_website_scraper(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     url: str = state['url']
     nombre: str = state.get('nombre', url)
     job_id: str | None = state.get('job_id')
     service = get_apify_service()
     label = url.replace('https://', '').replace('http://', '').split('/')[0]
+    registered = source_for_url(url)
+    output: dict[str, Any]
 
     # Con agregado, una fila por sitio son 520 eventos y 520 re-renders de una
     # lista de 260 ítems en el cliente. Los per-sitio quedan sólo para el caso
@@ -1280,6 +1319,13 @@ async def run_website_scraper(state: dict[str, Any], config: RunnableConfig) -> 
     aggregated = _website_progress_total(job_id) > 0
 
     async def on_progress(src: str, status: str, count: int) -> None:
+        if registered:
+            await adispatch_custom_event('progress', {
+                'event': 'progress', 'source': registered.id, 'status': status, 'count': count,
+                'message': f'{registered.name}: {count} propiedades' if status != 'error'
+                else f'{registered.name}: no se pudieron leer todos los resultados',
+            }, config=config)
+            return
         if aggregated:
             return
         await adispatch_custom_event('progress', {
@@ -1306,7 +1352,20 @@ async def run_website_scraper(state: dict[str, Any], config: RunnableConfig) -> 
     try:
         # Los N `Send` ya existen todos; el semáforo decide cuántos corren.
         async with _get_website_semaphore():
-            pages = await service.scrape_website(url, on_progress)
+            if registered:
+                units = state.get('source_filters')
+                if not units:
+                    raise ValueError('Faltan los filtros para buscar en la fuente configurada.')
+                properties = []
+                for filters in units:
+                    properties.extend(await service.scrape_source(
+                        registered.id, filters, on_progress,
+                    ))
+                unique = {p.url_origen: p for p in properties if p.url_origen}
+                output = {'registered_properties': list(unique.values())}
+            else:
+                pages = await service.scrape_website(url, on_progress)
+                output = {'website_pages': pages}
     except Exception as exc:
         await adispatch_custom_event('error', {
             'event': 'error', 'source': f'web:{label}',
@@ -1316,11 +1375,13 @@ async def run_website_scraper(state: dict[str, Any], config: RunnableConfig) -> 
         # barra se clava en 258/260 para siempre.
         if (counted := _bump_website_progress(job_id))[1]:
             await emit_total(*counted)
+        if registered:
+            await on_progress(registered.id, 'error', 0)
         return {'website_pages': [], 'errors': [f'{url}: {exc}']}
 
     if (counted := _bump_website_progress(job_id))[1]:
         await emit_total(*counted)
-    return {'website_pages': pages}
+    return output
 
 
 _WEBSITE_EXTRACT_TOOL = {
@@ -1649,15 +1710,21 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
     if total_pages:
         await emit('running', 0, 0, f'Analizando páginas 0/{total_pages}...')
 
+    structured = normalize_properties({
+        'collected_properties': state.get('registered_properties', []),
+    })['normalized_properties']
+    await persist(structured)
     batches = await asyncio.gather(*(extract(page) for page in pages))
-    results: list[NormalizedProperty] = [prop for batch in batches for prop in batch]
+    results: list[NormalizedProperty] = structured + [prop for batch in batches for prop in batch]
 
     # Fetch each property's real gallery from its detail page. Only fichas the LLM
     # linked explicitly qualify; the listing page itself would re-yield the mixed pool.
     # Also covers props stuck with a lone og:image from a scraped detail sub-page.
     scraped_urls = {p.get('url') for p in pages}
+    detailed_sources = {source.id for source in SEARCH_SOURCES if source.adapter == 'tokko'}
     pending = [p for p in results
-               if len(p.imagenes) < 4 and p.url_origen and p.url_origen not in scraped_urls]
+               if p.fuente not in detailed_sources and len(p.imagenes) < 4
+               and p.url_origen and p.url_origen not in scraped_urls]
     if pending:
         # `done == total`: las páginas ya están todas analizadas, esto es la
         # cola de fotos. Si mandáramos otro par de números la barra retrocedería.

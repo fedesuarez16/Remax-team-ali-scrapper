@@ -15,7 +15,9 @@ from typing import Any, Awaitable, Callable, Iterable, Iterator, Mapping
 
 import httpx
 
-from app.models.property import Agency, RawProperty, ScrapingFilters
+from app.models.property import (
+    Agency, Moneda, RawProperty, ScrapingFilters, TipoOperacion, TipoPropiedad,
+)
 from app.services.zona import zona_candidates
 
 ProgressCb = Callable[[str, str, int], Awaitable[None]]
@@ -1581,7 +1583,20 @@ _ML_PROP_TYPE: dict[str, str] = {
 _INMOBUSQUEDA_BASE = 'https://www.inmobusqueda.com.ar'
 _INMOBUSQUEDA_AUTOCOMPLETE_URL = f'{_INMOBUSQUEDA_BASE}/configubicacion/autocomplete.json.php'
 _INMOBUSQUEDA_SLUG_CACHE: dict[str, str | None] = {}
-_INMOBUSQUEDA_PAGE_SIZE = 15   # cards per `propiedades-...` page (20 on typed ones)
+
+
+class InmoBusquedaBlocked(RuntimeError):
+    """The portal served a verification page instead of search data."""
+
+
+def _check_inmobusqueda_access(response: Any) -> None:
+    text = getattr(response, 'text', '')
+    if not isinstance(text, str):
+        return
+    if re.search(r'<title>\s*No soy bot|nosoybot\.do\.php', text, re.I):
+        raise InmoBusquedaBlocked(
+            'InmoBúsqueda solicitó verificación antibot; no se pudo consultar su catálogo.'
+        )
 
 # Operation and property-type segments of the URL, read off the portal's own
 # search form. A type it doesn't model falls back to the untyped
@@ -1595,7 +1610,7 @@ _INMOBUSQUEDA_URL_TIPO: dict[str, str] = {
 }
 # Card label → our canonical type. The portal's catalog is far wider than ours
 # (Chacras, Tambos, Haras…); anything unlisted lands on 'otro'.
-_INMOBUSQUEDA_TIPO_LABELS: dict[str, str] = {
+_INMOBUSQUEDA_TIPO_LABELS: dict[str, TipoPropiedad] = {
     'departamento': 'departamento', 'monoambiente': 'departamento', 'piso': 'departamento',
     'duplex': 'departamento', 'triplex': 'departamento',
     'casa': 'casa', 'chalet': 'casa', 'casa quinta': 'casa', 'casa en country': 'casa',
@@ -1635,6 +1650,7 @@ async def _inmobusqueda_resolve_zona_slug(zona: str) -> str | None:
                 params={'partido': 1, 'valor': query_parts[0]},
             )
             resp.raise_for_status()
+            _check_inmobusqueda_access(resp)
             results = resp.json()
         wanted = [_slugify(p) for p in query_parts]
         fallback: str | None = None
@@ -1672,6 +1688,8 @@ async def _inmobusqueda_resolve_zona_slug(zona: str) -> str | None:
                 fallback = head
         if slug is None:
             slug = fallback
+    except InmoBusquedaBlocked:
+        raise
     except Exception:
         return None  # transient failure — don't cache, retry next search
 
@@ -1702,15 +1720,14 @@ def _inmobusqueda_search_urls(
         yield f'{_INMOBUSQUEDA_BASE}/{stem}-pagina-{n}.html'
 
 
-def _inmobusqueda_price(text: str) -> tuple[float | None, str]:
+def _inmobusqueda_price(text: str) -> tuple[float | None, Moneda]:
     """"U$S 145.000" → (145000.0, 'USD'); "$ 350.000" → (350000.0, 'ARS').
 
-    "Consultar" (a real listing with no public price) yields no price rather
-    than dropping the card — the pipeline already treats `precio=None` as
-    unknown and never filters it out.
+    "Consultar" yields an unknown price. The final search filter decides
+    whether that suffices for the user's requested criteria.
     """
     raw = text.strip()
-    moneda = 'ARS' if raw.startswith('$') else 'USD'
+    moneda: Moneda = 'ARS' if raw.startswith('$') else 'USD'
     digits = re.sub(r'[^\d]', '', raw.split(',')[0])
     return (float(digits) if digits else None), moneda
 
@@ -1720,8 +1737,7 @@ def _inmobusqueda_card_details(card: Any) -> dict[str, Any]:
 
     Chips are positional-free — each is identified by its own text, because a
     partial listing simply omits the ones it has no data for (and the row is
-    padded with empty divs). "N Dorm" feeds `ambientes`, the same mapping the
-    Argenprop parser makes.
+    padded with empty divs). Bedrooms and rooms remain separate.
     """
     out: dict[str, Any] = {}
     for chip in card.select('div.rdBox'):
@@ -1731,8 +1747,10 @@ def _inmobusqueda_card_details(card: Any) -> dict[str, Any]:
             continue
         if 'monoamb' in low:
             out['ambientes'] = 1
-        elif (m := re.match(r'(\d+)\s*(?:amb|dorm)', low)):
+        elif (m := re.match(r'(\d+)\s*amb', low)):
             out['ambientes'] = int(m.group(1))
+        elif (m := re.match(r'(\d+)\s*dorm', low)):
+            out['dormitorios'] = int(m.group(1))
         elif (m := re.match(r'([\d.,]+)\s*(?:mts|m2|m²)', low)):
             out['m2_total'] = float(m.group(1).replace(',', '.'))
         elif low.startswith('garage'):
@@ -1828,6 +1846,7 @@ def _parse_inmobusqueda_page(html: str, filters: ScrapingFilters) -> list[RawPro
         # Venta"); the typed one omits it entirely, so the search's own filter
         # is the fallback — it is what selected that URL in the first place.
         op_low = f'{heading} {localidad_text}'.lower()
+        tipo_operacion: TipoOperacion
         if 'temporario' in op_low:
             tipo_operacion = 'alquiler_temp'
         elif 'alquiler' in op_low:
@@ -1865,6 +1884,7 @@ def _parse_inmobusqueda_page(html: str, filters: ScrapingFilters) -> list[RawPro
             m2_total=detalles.get('m2_total'),
             imagenes=imagenes[:_MAX_GALLERY],
             url_origen=url,
+            raw={'dormitorios': detalles.get('dormitorios')},
         ))
     return results
 
@@ -1874,10 +1894,12 @@ async def _scrape_inmobusqueda(
 ) -> list[RawProperty]:
     """Sequential page walk over the portal's own paginated URLs.
 
-    Stops early on an empty page or a short one (the listing's last), so a
-    zona with 30 results costs two requests instead of the full page budget.
+    Stops on an empty or repeated unfiltered page. A short filtered result
+    does not prove that the portal has reached the end of its catalogue.
     """
     from app.core.config import settings
+    from app.services.source_filters import matches_source_filters
+    from bs4 import BeautifulSoup  # type: ignore[import-untyped]
     await on_progress('inmobusqueda', 'running', 0)
 
     # Fan-out unit: localidad on the map path, zona on the chat path.
@@ -1892,17 +1914,33 @@ async def _scrape_inmobusqueda(
     urls = _inmobusqueda_search_urls(filters, settings.INMOBUSQUEDA_MAX_PAGES, zona_slug)
     results: list[RawProperty] = []
     seen: set[str] = set()
+    seen_pages: set[tuple[str, ...]] = set()
+    failed = False
     async with httpx.AsyncClient(
         timeout=20, follow_redirects=True,
-        headers={'User-Agent': 'Mozilla/5.0 (compatible; PropSearchBot/1.0)'},
+        headers={'User-Agent': _BROWSER_UA},
+        proxy=_proxy_with_session(settings.SCRAPER_PROXY_URL, _next_proxy_session('inmobusqueda')),
     ) as client:
         for url in urls:
             try:
                 resp = await client.get(url)
                 resp.raise_for_status()
-            except Exception:
+            except httpx.HTTPError as exc:
+                if not results:
+                    raise RuntimeError('InmoBúsqueda: no se pudo leer el listado.') from exc
+                failed = True
                 break
 
+            _check_inmobusqueda_access(resp)
+
+            # Pagination is determined by the unfiltered page, never by the
+            # number of matches: page one can have zero matches and page two
+            # still contain the requested properties.
+            cards = BeautifulSoup(resp.text, 'html.parser').select('div.ResultadoCaja')
+            page_key = tuple(str(card.get('id') or card.get_text(' ', strip=True)) for card in cards)
+            if not cards or page_key in seen_pages:
+                break
+            seen_pages.add(page_key)
             page_props = _parse_inmobusqueda_page(resp.text, filters)
             new = 0
             for prop in page_props:
@@ -1911,14 +1949,15 @@ async def _scrape_inmobusqueda(
                     continue
                 if key:
                     seen.add(key)
-                results.append(prop)
+                if matches_source_filters(prop, filters):
+                    results.append(prop)
                 new += 1
 
-            if new == 0 or len(page_props) < _INMOBUSQUEDA_PAGE_SIZE:
+            if page_props and new == 0:
                 break
             await on_progress('inmobusqueda', 'running', len(results))
 
-    await on_progress('inmobusqueda', 'done', len(results))
+    await on_progress('inmobusqueda', 'error' if failed else 'done', len(results))
     return results
 
 
@@ -4555,6 +4594,13 @@ class ApifyService(BaseApifyService):
         on_progress: ProgressCb,
     ) -> list[RawProperty]:
         from app.core.config import settings
+
+        from app.services.source_registry import source_by_id
+        from app.services.tokko import scrape_tokko
+
+        registered = source_by_id(source)
+        if registered and registered.adapter == 'tokko':
+            return await scrape_tokko(registered, filters, on_progress)
 
         if source == 'mercadolibre':
             return await _scrape_mercadolibre(filters, on_progress)

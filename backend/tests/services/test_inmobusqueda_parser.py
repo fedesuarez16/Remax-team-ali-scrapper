@@ -1,6 +1,6 @@
-"""InmoBusqueda's search-results HTML is plain server-rendered PHP — no WAF,
-no Apify actor, no client-side hydration — so `_parse_inmobusqueda_page` reads
-the raw DOM straight from an httpx response.
+"""InmoBusqueda's search-results HTML is server-rendered PHP. When accessible,
+`_parse_inmobusqueda_page` reads the DOM directly; access challenges are checked
+by the caller before parsing.
 
 Both fixtures below are real pages captured live, and they exist as two
 fixtures for a reason found the hard way: THE SAME MARKUP CARRIES DIFFERENT
@@ -178,10 +178,11 @@ def test_typed_listing_falls_back_to_the_searched_operation():
     assert [p.tipo_operacion for p in _parse_typed()] == ['venta', 'venta']
 
 
-def test_dorm_chip_feeds_ambientes():
-    """The site writes "2 Dorm", not "2 amb" — same mapping Argenprop uses."""
+def test_dorm_chip_is_distinct_from_ambientes():
+    """A bedroom count does not establish the total number of rooms."""
     depto, ph = _parse_typed()
-    assert depto.ambientes == 2
+    assert depto.ambientes is None
+    assert depto.raw['dormitorios'] == 2
     assert ph.ambientes == 1          # "Monoamb"
 
 

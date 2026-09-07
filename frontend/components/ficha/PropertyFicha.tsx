@@ -6,6 +6,9 @@ const FUENTE_LABEL: Record<string, string> = {
   zonaprop: 'ZonaProp',
   mercadolibre: 'MercadoLibre',
   googlemaps: 'Sitios web',
+  mauroperri: 'Mauro Perri',
+  urquiza: 'Urquiza Propiedades',
+  inmobusqueda: 'InmoBúsqueda',
 }
 
 export function fmtPrice(p: Property) {

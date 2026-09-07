@@ -44,6 +44,7 @@ class ScrapingState(TypedDict, total=False):
     # Phase 2 — Website + Instagram scraping (set after interrupt resume)
     selected_agency_ids: list[str]
     website_pages: Annotated[list[dict], operator.add]
+    registered_properties: Annotated[list[RawProperty], operator.add]
     website_properties: list[NormalizedProperty]
     instagram_posts: Annotated[list[dict], operator.add]
     instagram_properties: list[NormalizedProperty]

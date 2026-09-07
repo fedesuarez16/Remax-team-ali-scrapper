@@ -572,7 +572,9 @@ async def update_property(property_id: str, request: Request, body: dict) -> dic
 
 
 @router.post('/{property_id}/enrich')
-async def enrich_property_ficha(property_id: str, request: Request) -> dict[str, Any]:
+async def enrich_property_ficha(
+    property_id: str, request: Request, refresh_gallery: bool = True,
+) -> dict[str, Any]:
     """Parse the property's description into amenities + destacados (LLM), cache, return.
 
     Called when a ficha is prepared. Idempotent — a previously enriched property is
@@ -587,7 +589,7 @@ async def enrich_property_ficha(property_id: str, request: Request) -> dict[str,
         return {'property': None, 'error': str(e)}
     if not res.data:
         raise HTTPException(status_code=404, detail='Property not found')
-    enriched = await _enrich_ficha(res.data[0], sb)
+    enriched = await _enrich_ficha(res.data[0], sb, refresh_gallery=refresh_gallery)
     return {'property': enriched}
 
 

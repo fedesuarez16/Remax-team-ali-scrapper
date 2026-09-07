@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     # minutos: son `1 + WEBSITE_MAX_SUBPAGES` requests por sitio.
     WEBSITE_HTTP_TIMEOUT: float = 20.0
     WEBSITE_MAX_SUBPAGES: int = 5
+    TOKKO_MAX_PAGES: int = 0  # 0 = walk the registered agency's entire filtered listing
     # Llamadas de extracción al LLM en paralelo. El bucle era SECUENCIAL: 1500
     # páginas × ~4 s = más de una hora con el stream abierto, que es lo que
     # terminaba muriendo. 8 en paralelo lo bajan a minutos.

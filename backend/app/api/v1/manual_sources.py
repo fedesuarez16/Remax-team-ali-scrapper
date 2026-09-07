@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Request
 
 from app.services.zona import normalize_zona
+from app.services.source_registry import source_for_url
 
 router = APIRouter()
 
@@ -66,7 +67,10 @@ async def list_manual_sources(request: Request, zona: str | None = None) -> dict
         if zona_norm:
             query = query.eq('zona_norm', zona_norm)
         res = await query.order('created_at', desc=True).execute()
-        sources = res.data or []
+        sources = [
+            {**row, 'scrape_source': source.id if (source := source_for_url(row['url'])) else None}
+            for row in (res.data or [])
+        ]
         return {'sources': sources, 'total': len(sources)}
     except Exception as e:
         return {'sources': [], 'total': 0, 'error': str(e)}

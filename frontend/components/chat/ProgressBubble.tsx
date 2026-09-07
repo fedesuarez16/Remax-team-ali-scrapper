@@ -6,6 +6,9 @@ const LABEL: Record<string, string> = {
   mercadolibre: 'MercadoLibre',
   googlemaps: 'Google Maps',
   inmobiliarias: 'Inmobiliarias',
+  mauroperri: 'Mauro Perri',
+  urquiza: 'Urquiza Propiedades',
+  inmobusqueda: 'InmoBúsqueda',
   extraccion: 'Analizando páginas',
 }
 

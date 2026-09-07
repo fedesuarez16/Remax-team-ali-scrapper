@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -48,7 +49,12 @@ _ZP_RES_KEYS = (
 )
 
 MODEL = 'claude-haiku-4-5-20251001'
-_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=15.0, max_retries=0)
+_ZONAPROP_GALLERY_TIMEOUT = 3.0
+
+
+def is_zonaprop_url(url: str) -> bool:
+    return urlparse(url).hostname in ('zonaprop.com.ar', 'www.zonaprop.com.ar')
 
 # Structured specs already shown as boxes on the ficha — the LLM must NOT
 # re-emit these as destacados, they come from dedicated columns.
@@ -523,7 +529,14 @@ async def _enrich_gallery(prop: dict[str, Any], sb: Any) -> None:
     whole search feed). Mutates ``prop['imagenes']`` in place.
     """
     existing = prop.get('imagenes') or []
-    full = await _fetch_full_gallery(prop)
+    if is_zonaprop_url(prop.get('url_origen') or '') or prop.get('fuente') == 'zonaprop':
+        try:
+            async with asyncio.timeout(_ZONAPROP_GALLERY_TIMEOUT):
+                full = await _fetch_full_gallery(prop, allow_escalation=False)
+        except TimeoutError:
+            return  # Existing photos and the ficha remain usable.
+    else:
+        full = await _fetch_full_gallery(prop)
     if not full:
         return
     # A ficha stuck on the low-res feed thumbnail: the recovered gallery is the
@@ -545,7 +558,9 @@ async def _enrich_gallery(prop: dict[str, Any], sb: Any) -> None:
             logger.warning('gallery persist failed for %s: %s', prop.get('id'), exc)
 
 
-async def enrich_ficha(prop: dict[str, Any], sb: Any) -> dict[str, Any]:
+async def enrich_ficha(
+    prop: dict[str, Any], sb: Any, *, refresh_gallery: bool = True,
+) -> dict[str, Any]:
     """Parse a property's free-text description into amenities + destacados via LLM.
 
     Idempotent: if already enriched, returns the property unchanged. Otherwise runs
@@ -560,7 +575,7 @@ async def enrich_ficha(prop: dict[str, Any], sb: Any) -> dict[str, Any]:
     # empty at scrape time would otherwise stay locked on the lone feed thumbnail
     # forever. Re-attempt whenever the stored gallery is still incomplete — a
     # healthy gallery skips the fetch, so repeat opens cost nothing.
-    if not prop.get('ficha_enriched') or _gallery_looks_incomplete(prop):
+    if refresh_gallery and (not prop.get('ficha_enriched') or _gallery_looks_incomplete(prop)):
         await _enrich_gallery(prop, sb)
 
     if prop.get('ficha_enriched'):

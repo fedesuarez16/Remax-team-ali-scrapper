@@ -11,6 +11,7 @@ is returned as-is without re-fetching or re-extracting.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -22,16 +23,23 @@ from app.core.config import settings
 from app.models.property import NormalizedProperty
 from app.services.apify import (
     _extract_images_from_html,
+    _next_proxy_session,
+    _playwright_proxy,
+    _proxy_with_session,
     fetch_page_html_via_actor,
     harvest_page_images,
     render_page_html,
 )
-from app.services.ficha import portal_gallery_from_url
+from app.services.ficha import _parse_zonaprop_pictures, is_zonaprop_url, portal_gallery_from_url
 from app.services.llm_costs import SCOPE_FICHA_PROPIO, record_llm_usage
 from app.services.zona import normalize_address
 
 MODEL = 'claude-haiku-4-5-20251001'
-_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=15.0, max_retries=0)
+
+# This is an interactive import. ZonaProp must not fall into the actor's
+# 300-second polling loop while the user waits for a single ficha.
+_ZONAPROP_FETCH_TIMEOUT = 15.0
 
 _FICHA_EXTRACT_TOOL = {
     'name': 'extract_property_ficha',
@@ -157,7 +165,9 @@ async def _fetch_html_httpx(url: str) -> str:
     """Tier 1. Levanta ``PortalBlocked`` si el portal nos rechaza a nosotros;
     cualquier otro error HTTP (404, 500) propaga tal cual."""
     async with httpx.AsyncClient(
-        headers=_BROWSER_HEADERS, timeout=20, follow_redirects=True,
+        headers=_BROWSER_HEADERS, timeout=8 if is_zonaprop_url(url) else 20,
+        follow_redirects=True,
+        proxy=_proxy_with_session(settings.SCRAPER_PROXY_URL, _next_proxy_session('ficha')),
     ) as client:
         resp = await client.get(url)
     if _is_blocked_status(resp.status_code):
@@ -171,6 +181,8 @@ async def _fetch_html_httpx(url: str) -> str:
 
 async def _fetch_html(url: str) -> str:
     """La ficha en HTML, escalando sólo lo necesario. Ver el bloque de arriba."""
+    if is_zonaprop_url(url):
+        return await _fetch_zonaprop_html(url)
     try:
         return await _fetch_html_httpx(url)
     except PortalBlocked:
@@ -187,12 +199,36 @@ async def _fetch_html(url: str) -> str:
     )
 
 
+async def _fetch_zonaprop_html(url: str) -> str:
+    """One proxied fetch and, only if blocked, one bounded browser attempt."""
+    try:
+        async with asyncio.timeout(_ZONAPROP_FETCH_TIMEOUT):
+            try:
+                return await _fetch_html_httpx(url)
+            except (PortalBlocked, httpx.TimeoutException):
+                pass
+            html = await render_page_html(url, proxy=_playwright_proxy(settings.SCRAPER_PROXY_URL))
+            if html and not _looks_blocked(html):
+                return html
+    except TimeoutError:
+        pass
+    raise PortalBlocked(
+        'ZonaProp no permitió leer el aviso dentro del tiempo de espera. '
+        'Reintentá en unos segundos.'
+    )
+
+
 async def _fetch_page(url: str) -> tuple[str, list[str]]:
     """Fetch the ficha and return (visible text, server-HTML gallery)."""
     html = await _fetch_html(url)
     # anchor_to_og: la ficha es UNA propiedad, así que las fotos que no comparten
     # el directorio del og:image son de otra (bloques de "similares", widgets).
-    return _visible_text(html)[:8000], _extract_images_from_html(html, url, anchor_to_og=True)
+    # ZonaProp's full gallery is embedded in this SAME document. A second GET
+    # can hit a challenge even though we already have every photo locally.
+    images = _parse_zonaprop_pictures(html) if is_zonaprop_url(url) else []
+    if not images:
+        images = _extract_images_from_html(html, url, anchor_to_og=True)
+    return _visible_text(html)[:8000], images
 
 
 async def _extract_llm(url: str, text: str) -> tuple[dict[str, Any] | None, Any]:
@@ -257,12 +293,14 @@ async def import_property_from_url(sb: Any, url: str) -> dict[str, Any]:
     # UA de escritorio y su parser pide el markup mobile, que las trae todas.
     # Se despacha por HOST y no por `fuente` porque acá `fuente` todavía no
     # existe — y cuando exista va a ser 'manual', que no dice de qué portal es.
-    portal_gallery = await portal_gallery_from_url(url)
+    # The ZonaProp parser already ran on the downloaded HTML in _fetch_page.
+    # Repeating the network ladder cannot improve that document's parsing.
+    portal_gallery = [] if is_zonaprop_url(url) else await portal_gallery_from_url(url)
     if portal_gallery:
         # La galería identificada por el portal es la fuente de verdad, aunque
         # tenga menos fotos que el HTML: éste puede incluir logos e íconos.
         images = portal_gallery
-    elif len(images) < _MIN_GALLERY:
+    elif len(images) < _MIN_GALLERY and not is_zonaprop_url(url):
         try:
             galleries = await harvest_page_images([url])
             gallery = galleries.get(url, [])

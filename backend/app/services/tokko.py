@@ -17,7 +17,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 from bs4 import BeautifulSoup  # type: ignore[import-untyped]
 
-from app.models.property import RawProperty, ScrapingFilters, TipoPropiedad
+from app.models.property import Moneda, RawProperty, ScrapingFilters, TipoOperacion, TipoPropiedad
 from app.services.source_filters import matches_source_filters
 from app.services.source_registry import SearchSource
 
@@ -30,6 +30,9 @@ _TYPES = {
 _LABEL_TYPES: dict[str, TipoPropiedad] = {
     'terreno': 'terreno', 'campo': 'terreno', 'departamento': 'departamento',
     'casa': 'casa', 'quinta': 'casa', 'oficina': 'oficina', 'local': 'local', 'ph': 'ph',
+}
+_LABEL_OPERATIONS: dict[str, TipoOperacion] = {
+    'venta': 'venta', 'alquiler': 'alquiler', 'alquiler temporario': 'alquiler_temp',
 }
 
 
@@ -123,16 +126,21 @@ def parse_listing(html: str, source: SearchSource) -> list[RawProperty]:
     results = []
     for card in cards:
         identity = _text(card, '.prop-desc-tipo-ub')
-        match = re.match(r'(.+?)\s+en\s+(Venta|Alquiler temporario|Alquiler)\s+en\s+(.+)',
+        match = re.match(r'(.+?)\s+en\s+(.+?)\s+en\s+(.+)',
                          identity, re.I)
         link = card.select_one('a[href^="/p/"]')
         if not match or not link:
             raise ValueError(f'{source.name}: cambió el formato de una tarjeta.')
         kind, operation, location = match.groups()
+        # Unscoped listings can say "Venta / Alquiler" but display only the
+        # first operation's price. Never attach that sale price to a rental.
+        operation = ' '.join(operation.split('/')[0].lower().split())
+        if operation not in _LABEL_OPERATIONS:
+            raise ValueError(f'{source.name}: no se reconoció la operación publicada.')
         price_box = card.select_one('.prop-valor-nro')
         price_text = ' '.join(str(t) for t in price_box.find_all(string=True, recursive=False)) \
             if price_box else ''
-        currency = 'USD' if re.search(r'USD|U\$S|US\$', price_text, re.I) else 'ARS'
+        currency: Moneda = 'USD' if re.search(r'USD|U\$S|US\$', price_text, re.I) else 'ARS'
         image = card.select_one('img.dest-img')
         photo = str(image.get('src') or '') if image else ''
         street = _text(card, '.prop-desc-dir')
@@ -140,8 +148,7 @@ def parse_listing(html: str, source: SearchSource) -> list[RawProperty]:
             fuente=source.id, titulo=f'{identity} — {street}',
             direccion=f'{street}, {location}' if street else location,
             tipo_propiedad=_LABEL_TYPES.get(_plain(kind), 'otro'),
-            tipo_operacion={'venta': 'venta', 'alquiler': 'alquiler',
-                            'alquiler temporario': 'alquiler_temp'}[operation.lower()],
+            tipo_operacion=_LABEL_OPERATIONS[operation],
             precio=_number(price_text), moneda=currency,
             url_origen=urljoin(source.base_url, str(link['href'])),
             imagenes=[photo] if photo.startswith('https://') else [],
@@ -162,8 +169,8 @@ def parse_detail(html: str, prop: RawProperty) -> RawProperty:
             values[_plain(label)] = value.strip()
     update: dict[str, Any] = {}
     for label, field in [('ambientes', 'ambientes'), ('banos', 'banos'), ('cocheras', 'cocheras')]:
-        value = _number(values.get(label, ''))
-        update[field] = int(value) if value is not None else None
+        numeric_value = _number(values.get(label, ''))
+        update[field] = int(numeric_value) if numeric_value is not None else None
     raw = dict(prop.raw)
     bedrooms = _number(values.get('dormitorios', ''))
     raw['dormitorios'] = int(bedrooms) if bedrooms is not None else None
