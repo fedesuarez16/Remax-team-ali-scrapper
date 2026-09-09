@@ -1,18 +1,14 @@
-import { Building2, ImageIcon, Mail, MapPin, Phone } from 'lucide-react'
-import type { Property } from '@/hooks/useSSEStream'
-import { agenteByEmail } from '@/lib/ficha'
+'use client'
 
-const FUENTE_LABEL: Record<string, string> = {
-  zonaprop: 'ZonaProp',
-  mercadolibre: 'MercadoLibre',
-  googlemaps: 'Sitios web',
-  mauroperri: 'Mauro Perri',
-  urquiza: 'Urquiza Propiedades',
-  inmobusqueda: 'InmoBúsqueda',
-}
+import { ArrowUpRight, Mail, MapPin, MessageCircle, Phone } from 'lucide-react'
+import type { Property } from '@/hooks/useSSEStream'
+import { agenteByEmail, whatsappUrl } from '@/lib/ficha'
+import { AgentAvatar } from './AgentAvatar'
+import { FichaGallery } from './FichaGallery'
+import { useFichaTextos } from '@/hooks/useFichaTextos'
 
 export function fmtPrice(p: Property) {
-  if (p.precio == null) return 'Consultar'
+  if (p.precio == null) return 'Consultar precio'
   const n = new Intl.NumberFormat('es-AR', { maximumFractionDigits: 0 }).format(p.precio)
   return `${p.moneda ?? 'USD'} ${n}${p.tipo_operacion !== 'venta' ? '/mes' : ''}`
 }
@@ -21,15 +17,16 @@ function Spec({ label, value }: { label: string; value: string }) {
   // min-w-0 + break-words: los "destacados" del LLM traen valores libres que
   // pueden ser largos — envuelven dentro de la card, nunca se pisan entre sí.
   return (
-    <div className="min-w-0 rounded-lg border border-border bg-muted/40 px-3 py-2">
-      <p className="truncate text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
-      <p className="break-words text-sm font-semibold leading-snug text-foreground">{value}</p>
+    <div className="min-w-0 rounded-xl bg-muted/60 px-3 py-3">
+      <p className="break-words text-[10px] uppercase tracking-wider text-muted-foreground">{label}</p>
+      <p className="mt-1 break-words text-base font-semibold leading-snug text-foreground">{value}</p>
     </div>
   )
 }
 
 export function PropertyFicha({ p }: { p: Property }) {
   const agente = agenteByEmail(p.agente_email)
+  const { textos } = useFichaTextos()
 
   const specs: { label: string; value: string }[] = []
   if (p.tipo_propiedad) specs.push({ label: 'Tipo', value: p.tipo_propiedad.charAt(0).toUpperCase() + p.tipo_propiedad.slice(1) })
@@ -44,82 +41,76 @@ export function PropertyFicha({ p }: { p: Property }) {
   for (const d of p.destacados ?? []) specs.push({ label: d.label, value: d.value })
 
   return (
-    <article className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm print:break-inside-avoid">
-      {/* Branding header — a nombre del agente asignado a ESTA ficha */}
-      <header className="flex items-center justify-between gap-3 border-b border-border bg-foreground px-5 py-3.5 text-background">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-background/15">
-            <Building2 className="size-4" />
-          </div>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold leading-tight">{agente.inmobiliaria}</p>
-            <p className="truncate text-[11px] leading-tight opacity-80">{agente.nombre} · {agente.cargo}</p>
-          </div>
+    <article className="overflow-hidden rounded-3xl border border-border bg-card shadow-sm print:overflow-visible print:break-inside-avoid print:shadow-none">
+      <header className="flex flex-wrap items-center justify-between gap-2 px-5 py-4 sm:px-6">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.2em]">Team Alí</p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">{agente.inmobiliaria}</p>
         </div>
-        <span className="shrink-0 rounded-full bg-background/15 px-2.5 py-0.5 text-[11px] font-medium">
+        <span className="rounded-full bg-foreground px-3 py-1.5 text-[11px] font-medium text-background">
           {p.tipo_operacion === 'venta' ? 'En venta' : 'En alquiler'}
         </span>
       </header>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2">
-        {/* Image */}
-        <div className="relative aspect-[4/3] bg-muted sm:aspect-auto">
-          {p.imagenes?.[0] ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={p.imagenes[0]} alt={p.titulo ?? p.direccion} className="h-full w-full object-cover" />
-          ) : (
-            <div className="flex h-full min-h-48 items-center justify-center">
-              <ImageIcon className="size-10 text-muted-foreground/40" />
-            </div>
-          )}
-          {p.imagenes && p.imagenes.length > 1 && (
-            <span className="absolute bottom-2 right-2 rounded-full bg-black/60 px-2 py-0.5 text-[11px] font-medium text-white">
-              {p.imagenes.length} fotos
-            </span>
-          )}
-        </div>
+      <FichaGallery images={p.imagenes ?? []} title={p.titulo ?? p.direccion} compact />
 
-        {/* Body */}
-        <div className="min-w-0 p-5">
-          <p className="text-2xl font-bold tracking-tight text-foreground">{fmtPrice(p)}</p>
-          {p.titulo && <p className="mt-1 line-clamp-2 break-words text-sm font-medium text-foreground">{p.titulo}</p>}
-          {p.direccion && (
-            <div className="mt-1.5 flex items-start gap-1 text-muted-foreground">
-              <MapPin className="mt-0.5 size-3.5 shrink-0" />
-              <p className="break-words text-xs">{p.direccion}</p>
-            </div>
-          )}
-
-          {specs.length > 0 && (
-            <div className="mt-4 grid grid-cols-2 gap-2">
-              {specs.map((s) => <Spec key={s.label} {...s} />)}
-            </div>
-          )}
+      <div className="space-y-5 p-5 sm:p-6">
+        <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+          <div className="min-w-0 flex-1 basis-56">
+            <h2 className="break-words text-xl font-semibold leading-snug tracking-tight sm:text-2xl">{p.titulo || p.direccion || 'Propiedad seleccionada'}</h2>
+            {p.direccion && (
+              <p className="mt-2 flex items-start gap-1.5 text-sm text-muted-foreground">
+                <MapPin className="mt-0.5 size-4 shrink-0" /><span className="break-words">{p.direccion}</span>
+              </p>
+            )}
+          </div>
+          <div>
+            <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{p.tipo_operacion === 'venta' ? 'Valor de venta' : 'Alquiler mensual'}</p>
+            <p className="mt-1 text-2xl font-semibold tracking-tight">{fmtPrice(p)}</p>
+          </div>
         </div>
+        {specs.length > 0 && (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {specs.map((spec, index) => <Spec key={`${spec.label}-${index}`} {...spec} />)}
+          </div>
+        )}
+        {p.descripcion && (
+          <div>
+            <h3 className="mb-2 text-sm font-semibold">Sobre esta propiedad</h3>
+            <p className="line-clamp-6 whitespace-pre-line break-words text-sm leading-relaxed text-muted-foreground print:line-clamp-none">{p.descripcion}</p>
+          </div>
+        )}
+        {!!p.amenities?.length && (
+          <div className="flex flex-wrap gap-2">
+            {p.amenities.map((amenity) => <span key={amenity} className="max-w-full break-words rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">{amenity}</span>)}
+          </div>
+        )}
       </div>
 
-      {/* Description + amenities */}
-      {(p.descripcion || (p.amenities && p.amenities.length > 0)) && (
-        <div className="border-t border-border px-5 py-4">
-          {p.descripcion && <p className="line-clamp-6 text-sm leading-relaxed text-muted-foreground">{p.descripcion}</p>}
-          {p.amenities && p.amenities.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {p.amenities.map((a) => (
-                <span key={a} className="rounded-full border border-border bg-muted/50 px-2.5 py-0.5 text-xs text-muted-foreground">
-                  {a}
-                </span>
-              ))}
+      <footer className="border-t border-border bg-muted/30 p-5 sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <AgentAvatar agente={agente} className="size-16" />
+            <div className="min-w-0">
+              <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Tu contacto</p>
+              <p className="mt-0.5 text-base font-semibold">{agente.nombre}</p>
+              <p className="text-xs text-muted-foreground">{agente.cargo}</p>
             </div>
-          )}
+          </div>
+          <a href={whatsappUrl(agente.telefono, `Hola ${agente.nombre}, me interesa la propiedad "${p.titulo ?? p.direccion}" (${fmtPrice(p)}). ¿Sigue disponible?`)} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 rounded-xl bg-foreground px-4 py-3 text-xs font-medium text-background transition hover:bg-foreground/85 print:hidden">
+            <MessageCircle className="size-4" />Consultar<ArrowUpRight className="size-3.5" />
+          </a>
         </div>
-      )}
-
-      {/* Contact footer — datos del agente asignado */}
-      <footer className="flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t border-border bg-muted/30 px-5 py-3 text-xs text-foreground">
-        <span className="flex items-center gap-1.5 font-medium">{agente.nombre}</span>
-        <span className="flex items-center gap-1.5"><Phone className="size-3.5 shrink-0 text-muted-foreground" />{agente.telefono}</span>
-        <span className="flex min-w-0 items-center gap-1.5"><Mail className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate">{agente.email}</span></span>
-        <span className="ml-auto text-muted-foreground">Fuente: {FUENTE_LABEL[p.fuente] ?? p.fuente}</span>
+        <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted-foreground">
+          <a href={`tel:+${agente.telefono.replace(/\D/g, '')}`} className="flex items-center gap-2 hover:text-foreground"><Phone className="size-3.5 shrink-0" />{agente.telefono}</a>
+          <a href={`mailto:${agente.email}`} className="flex min-w-0 items-center gap-2 hover:text-foreground"><Mail className="size-3.5 shrink-0" /><span className="break-all">{agente.email}</span></a>
+        </div>
+        <div className="mt-5 hidden space-y-2 border-t border-border pt-4 text-[10px] leading-relaxed text-muted-foreground print:block">
+          <p>{textos.texto_seleccion}</p>
+          <p>{textos.firma} · {textos.colegiatura}</p>
+          <p>{textos.disclaimer_legal}</p>
+          <p>{textos.pie_publicacion}</p>
+        </div>
       </footer>
     </article>
   )

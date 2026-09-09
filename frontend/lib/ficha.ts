@@ -99,6 +99,9 @@ export async function marcarEnviadas(ids: string[], enviada = true): Promise<str
 
 export type Agente = {
   nombre: string
+  foto: string | null
+  /** Encuadre del retrato original dentro del avatar circular. */
+  encuadre?: { width: string; left: string; top: string }
   inmobiliaria: string
   /** Rol tal como debe figurar en la ficha (matrícula incluida si corresponde). */
   cargo: string
@@ -115,6 +118,8 @@ export type Agente = {
 export const AGENTES: readonly Agente[] = [
   {
     nombre: 'Andrés Alí',
+    foto: '/agents/andres-ali.jpeg',
+    encuadre: { width: '200%', left: '-57%', top: '-49%' },
     inmobiliaria: 'RE/MAX Diagonal II',
     cargo: 'Corredor Inmobiliario Col. 7428',
     telefono: '+54 9 221 477 0660',
@@ -124,6 +129,7 @@ export const AGENTES: readonly Agente[] = [
   },
   {
     nombre: 'Nahir Alí',
+    foto: null,
     inmobiliaria: 'RE/MAX Diagonal II',
     cargo: 'Agente Inmobiliario',
     telefono: '+54 9 221 477 0661',
@@ -133,6 +139,8 @@ export const AGENTES: readonly Agente[] = [
   },
   {
     nombre: 'Ahmed Alí',
+    foto: '/agents/ahmed-ali.jpeg',
+    encuadre: { width: '190%', left: '-58%', top: '-40%' },
     inmobiliaria: 'RE/MAX Diagonal II',
     cargo: 'Team Alí',
     telefono: '+54 9 221 477 0671',

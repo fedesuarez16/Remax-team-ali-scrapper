@@ -2,11 +2,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   Check, ChevronDown, ChevronUp, Copy, ExternalLink, FileText, Folder as FolderIcon, Link2, Loader2,
-  Pencil, RotateCcw, Send, Sparkles, UserRound,
+  Pencil, RotateCcw, Send, Sparkles,
 } from 'lucide-react'
 import type { Property } from '@/hooks/useSSEStream'
 import { useFichaFolders } from '@/hooks/useFichaFolders'
 import { AGENTES, agenteByEmail, enrichFicha, fichaUrl, marcarEnviadas } from '@/lib/ficha'
+import { AgentAvatar } from '@/components/ficha/AgentAvatar'
 import { PropertyFicha, fmtPrice } from '@/components/ficha/PropertyFicha'
 import { FichaEditor } from '@/components/ficha/FichaEditor'
 import { AgenteSelector } from '@/components/ficha/AgenteSelector'
@@ -158,7 +159,7 @@ function FichaRow({
 
   return (
     <div className="rounded-2xl border border-border bg-card shadow-sm">
-      <div className="flex items-center gap-3 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-3 px-4 py-3">
         <input
           type="checkbox"
           checked={selected}
@@ -168,7 +169,7 @@ function FichaRow({
           className="size-4 shrink-0 accent-foreground disabled:opacity-30"
         />
         <FileText className="size-4 shrink-0 text-muted-foreground" />
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 basis-40">
           <p className="truncate text-sm font-medium text-foreground">
             {p.titulo ?? p.direccion}
           </p>
@@ -187,7 +188,7 @@ function FichaRow({
           </span>
         )}
         <span className="hidden shrink-0 items-center gap-1 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[11px] text-muted-foreground sm:flex">
-          <UserRound className="size-3" />
+          <AgentAvatar agente={agente} className="size-6 text-[9px]" />
           {agente.nombre}
         </span>
         {enviada && (
@@ -236,12 +237,12 @@ function FichaRow({
 
       {/* Link propio + link original */}
       <div className="space-y-1.5 border-t border-border px-4 py-2.5">
-        <div className="flex items-center gap-2 rounded-xl border border-border bg-muted/40 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-muted/40 px-3 py-2">
           <Link2 className="size-4 shrink-0 text-foreground" />
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
             Ficha propia
           </span>
-          <code className="flex-1 truncate text-xs text-foreground">{url}</code>
+          <code className="min-w-0 flex-1 basis-28 truncate text-xs text-foreground">{url}</code>
           <button
             onClick={copy}
             className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground transition hover:bg-muted"
@@ -464,9 +465,10 @@ export default function FichaPropioPage() {
 
   return (
     <div className="flex h-full flex-col overflow-y-auto bg-background text-foreground">
-      <header className="border-b border-border px-6 py-4">
-        <div className="mx-auto w-full max-w-3xl">
-          <h1 className="text-xl font-semibold tracking-tight">Ficha Propio</h1>
+      <header className="border-b border-border bg-card px-5 py-6 sm:px-8">
+        <div className="mx-auto w-full max-w-4xl">
+          <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-muted-foreground">Team Alí · Propiedades para compartir</p>
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Fichas propias</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Pegá links de propiedades de cualquier portal (Zonaprop, Argenprop, MercadoLibre,
             RE/MAX…) y generá fichas con tu marca y tus datos, listas para compartir.
@@ -474,13 +476,19 @@ export default function FichaPropioPage() {
         </div>
       </header>
 
-      <div className="mx-auto w-full max-w-3xl flex-1 space-y-6 p-6">
+      <div className="mx-auto w-full max-w-4xl flex-1 space-y-6 p-4 sm:p-6">
         <StatsBar stats={stats} loading={statsLoading} />
 
         {/* Carga de links */}
-        <div className="space-y-3 rounded-2xl border border-border bg-card p-4 shadow-sm">
+        <div className="space-y-5 rounded-3xl border border-border bg-card p-5 shadow-sm sm:p-6">
+          <div>
+            <h2 className="text-lg font-semibold tracking-tight">Creá tu próxima ficha</h2>
+            <p className="mt-1 text-sm text-muted-foreground">Elegí el agente y agregá las propiedades que querés compartir.</p>
+          </div>
           <AgenteSelector selected={agenteEmail} onSelect={setAgenteEmail} disabled={importing} />
+          <label htmlFor="ficha-links" className="block text-xs font-medium">Links de las propiedades <span className="font-normal text-muted-foreground">· Hasta 10, uno por línea</span></label>
           <textarea
+            id="ficha-links"
             value={raw}
             onChange={(e) => setRaw(e.target.value)}
             rows={3}
@@ -496,7 +504,7 @@ export default function FichaPropioPage() {
           <button
             onClick={generar}
             disabled={importing || urls.length === 0}
-            className="flex w-full items-center justify-center gap-2 rounded-xl bg-foreground px-3 py-2 text-sm font-medium text-background transition hover:bg-foreground/85 disabled:opacity-40"
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-foreground px-4 py-3 text-sm font-medium text-background transition hover:bg-foreground/85 disabled:opacity-40"
           >
             {importing ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
             {importing

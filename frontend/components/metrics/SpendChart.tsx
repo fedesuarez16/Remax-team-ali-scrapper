@@ -1,17 +1,23 @@
 'use client'
 
 import { useCallback, useEffect, useLayoutEffect, useState } from 'react'
-import type { SpendDay } from '@/hooks/useMetrics'
+import type { Granularity, SpendBucket } from '@/hooks/useMetrics'
 import { Column, DataTable, Legend } from '@/components/metrics/Primitives'
-import { shortDate, usd } from '@/components/metrics/format'
+import { bucketLabel, compact, count, rangeLabel, usd } from '@/components/metrics/format'
 
 /**
- * Gasto diario, Apify + LLM, en columnas apiladas.
+ * Gasto por período, Apify + LLM, en columnas apiladas.
+ *
+ * El período lo decide `granularidad` (día, semana o mes) y los buckets llegan ya
+ * armados desde el backend, huecos incluidos: un eje temporal posicionado por
+ * índice de fila y no por fecha dibuja once días repartidos en treinta como si
+ * fueran consecutivos, comprimiendo semanas enteras sin avisar.
  *
  * Apiladas y no dos líneas porque la pregunta es parte-respecto-del-total: cuánto
- * se gastó ese día y en qué proporción. Y explícitamente NO es un gráfico de dos
- * ejes: las dos series están en la misma unidad (USD), así que comparten una sola
- * escala. Dos escalas y inventaríamos una correlación que no está en los datos.
+ * se gastó en ese período y en qué proporción. Y explícitamente NO es un gráfico
+ * de dos ejes: las dos series están en la misma unidad (USD), así que comparten
+ * una sola escala. Dos escalas y inventaríamos una correlación que no está en los
+ * datos.
  *
  * El SVG se dibuja al ancho real medido del contenedor en vez de escalar por
  * viewBox: escalar deforma el texto de los ejes y provoca justo las colisiones de
@@ -56,32 +62,6 @@ function axisTick(value: number, max: number): string {
   const decimals = max >= 100 ? 0 : max >= 10 ? 1 : max >= 1 ? 2 : max >= 0.1 ? 3 : 4
   if (value === 0) return '$0'
   return `$${value.toFixed(decimals)}`
-}
-
-/**
- * Completa la ventana con los días que no tienen ninguna fila.
- *
- * Sin esto el eje X se posiciona por índice de fila y no por fecha: once días con
- * datos repartidos en treinta se dibujan equiespaciados y se leen como
- * consecutivos, comprimiendo semanas enteras sin avisar. Un eje temporal tiene
- * que ser proporcional al tiempo, así que los días sin gasto van explícitos en
- * cero — que además es el dato correcto: ese día no se gastó nada.
- */
-function fillWindow(rows: SpendDay[], fromISO: string, windowDays: number): SpendDay[] {
-  const byDay = new Map(rows.map((r) => [r.dia, r]))
-  const start = new Date(`${fromISO}T00:00:00Z`)
-  if (Number.isNaN(start.getTime()) || windowDays <= 0) return rows
-
-  // Si llegaran filas fuera de la ventana (reloj corrido, datos viejos), se
-  // respeta el rango pedido y no se inventa un eje más largo.
-  const out: SpendDay[] = []
-  for (let i = 0; i < windowDays; i += 1) {
-    const day = new Date(start)
-    day.setUTCDate(start.getUTCDate() + i)
-    const iso = day.toISOString().slice(0, 10)
-    out.push(byDay.get(iso) ?? { dia: iso, llm_usd: 0, apify_usd: 0, total_usd: 0 })
-  }
-  return out
 }
 
 /** Rect con las esquinas de ARRIBA redondeadas y la base en escuadra: la marca
@@ -134,19 +114,19 @@ function useContainerWidth() {
 }
 
 export default function SpendChart({
-  days: rows, from, windowDays,
+  serie: days, granularidad = 'dia',
 }: {
-  days: SpendDay[]
-  from?: string
-  windowDays?: number
+  serie: SpendBucket[]
+  granularidad?: Granularity
 }) {
   const { ref, width } = useContainerWidth()
   const [active, setActive] = useState<number | null>(null)
   const [showTable, setShowTable] = useState(false)
 
-  // El eje se arma sobre la ventana completa; la tabla muestra lo mismo, así el
-  // gráfico y su gemelo accesible nunca discrepan.
-  const days = from && windowDays ? fillWindow(rows, from, windowDays) : rows
+  const label = useCallback(
+    (b: SpendBucket) => bucketLabel(b.periodo, granularidad),
+    [granularidad],
+  )
 
   const plotW = Math.max(0, width - Y_AXIS_W)
   const max = niceMax(Math.max(...days.map((d) => d.total_usd), 0))
@@ -183,10 +163,30 @@ export default function SpendChart({
     0,
   )
 
-  const columns: Column<SpendDay>[] = [
-    { key: 'dia', header: 'Día', render: (r) => shortDate(r.dia) },
+  // La tabla es el gemelo accesible del gráfico, y además donde vive el detalle
+  // que una barra no puede cargar: llamadas y tokens. El USD dice cuánto salió el
+  // LLM; los tokens dicen POR QUÉ — un mes caro por volumen y uno caro por prompts
+  // largos valen lo mismo y se arreglan distinto.
+  const columns: Column<SpendBucket>[] = [
+    {
+      key: 'periodo',
+      header: 'Período',
+      render: (r) => (
+        <span className="text-foreground">
+          {label(r)}
+          {r.parcial ? <span className="ml-1 text-[11px] text-muted-foreground">(parcial)</span> : null}
+        </span>
+      ),
+    },
     { key: 'apify', header: 'Apify', align: 'right', render: (r) => usd(r.apify_usd) },
     { key: 'llm', header: 'LLM', align: 'right', render: (r) => usd(r.llm_usd) },
+    { key: 'llamadas', header: 'Llamadas', align: 'right', render: (r) => count(r.llm_llamadas) },
+    {
+      key: 'tokens',
+      header: 'Tokens in / out',
+      align: 'right',
+      render: (r) => `${compact(r.llm_input_tokens)} / ${compact(r.llm_output_tokens)}`,
+    },
     { key: 'total', header: 'Total', align: 'right', render: (r) => usd(r.total_usd) },
   ]
 
@@ -210,7 +210,7 @@ export default function SpendChart({
         <DataTable
           columns={columns}
           rows={days}
-          rowKey={(r) => r.dia}
+          rowKey={(r) => r.periodo}
           emptyLabel="Sin gasto registrado en el rango"
         />
       ) : (
@@ -227,7 +227,7 @@ export default function SpendChart({
                 width={width || 1}
                 height={BASE + AXIS_BAND}
                 role="img"
-                aria-label="Gasto diario en Apify y LLM"
+                aria-label="Gasto en Apify y LLM por período"
               >
                 {/* Grilla: hairline sólida, un paso off-surface, recesiva. */}
                 {Array.from({ length: TICKS + 1 }, (_, i) => {
@@ -261,7 +261,7 @@ export default function SpendChart({
                   const topIsLlm = llmH > 0
 
                   return (
-                    <g key={day.dia}>
+                    <g key={day.periodo}>
                       {/* Segmento inferior: escuadra si algo se apila encima. */}
                       {apifyH > 0 ? (
                         topIsLlm ? (
@@ -311,7 +311,7 @@ export default function SpendChart({
                   </text>
                 ) : null}
 
-                {/* Eje X: primero, último y el pico. Con pocos días, todos. */}
+                {/* Eje X: primero, último y el pico. Con pocos períodos, todos. */}
                 {days.map((day, i) => {
                   const show = days.length <= 8 || i === 0 || i === days.length - 1 || i === peakIdx
                   if (!show) return null
@@ -319,13 +319,13 @@ export default function SpendChart({
                   const cx = Y_AXIS_W + band * i + band / 2
                   return (
                     <text
-                      key={day.dia}
+                      key={day.periodo}
                       x={anchor === 'start' ? Y_AXIS_W : anchor === 'end' ? width : cx}
                       y={BASE + 14}
                       textAnchor={anchor}
                       className="fill-muted-foreground text-[10px]"
                     >
-                      {shortDate(day.dia)}
+                      {label(day)}
                     </text>
                   )
                 })}
@@ -351,8 +351,14 @@ export default function SpendChart({
                     ),
                   }}
                 >
+                  {/* Un bucket de semana o mes cubre varios días: el rango exacto
+                      va acá, porque la etiqueta del eje sola ("sep 26") no dice
+                      cuánto de ese mes entró en la ventana. */}
                   <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
-                    {shortDate(activeDay.dia)}
+                    {granularidad === 'dia'
+                      ? bucketLabel(activeDay.periodo, 'dia')
+                      : rangeLabel(activeDay.desde, activeDay.fin)}
+                    {activeDay.parcial ? ' · parcial' : ''}
                   </p>
                   {/* El valor manda y el nombre de la serie acompaña: acá el
                       lector ya tiene la serie y lo que quiere es el número. */}
@@ -375,6 +381,15 @@ export default function SpendChart({
                     </span>
                     <span className="ml-1.5 text-[11px] text-muted-foreground">total</span>
                   </div>
+                  {/* El consumo del LLM en unidades del LLM. Solo cuando lo hubo:
+                      una fila de ceros en un período sin llamadas es ruido. */}
+                  {activeDay.llm_llamadas > 0 ? (
+                    <p className="mt-1 text-[11px] leading-snug text-muted-foreground">
+                      {count(activeDay.llm_llamadas)} llamadas ·{' '}
+                      {compact(activeDay.llm_input_tokens)} in /{' '}
+                      {compact(activeDay.llm_output_tokens)} out
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
             </>

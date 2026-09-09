@@ -1,22 +1,40 @@
 'use client'
 
 import { BarChart3, RefreshCw } from 'lucide-react'
-import { RANGE_PRESETS, useMetrics, type ExpensiveSearch, type ZoneRow } from '@/hooks/useMetrics'
+import {
+  GRANULARITIES, RANGE_PRESETS, useMetrics, type ExpensiveSearch, type ZoneRow,
+} from '@/hooks/useMetrics'
 import SpendChart from '@/components/metrics/SpendChart'
 import {
   BarList, Column, DataTable, HeroFigure, Legend, Meter, Panel, PanelNote, StatTile,
 } from '@/components/metrics/Primitives'
 import {
-  compact, count, dateTime, duration, pct, scopeLabel, shortDate, usd,
+  compact, count, dateTime, duration, pct, rangeLabel, scopeLabel, shortDate, usd,
 } from '@/components/metrics/format'
 
-const RANGE_LABELS: Record<number, string> = {
-  7: '7 días', 30: '30 días', 90: '90 días', 365: '1 año',
+/** Los botones del filtro comparten forma: la única diferencia entre un preset,
+ * una granularidad y el refresh es qué hacen, no cómo se ven. */
+function filterButton(active: boolean): string {
+  return `rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+    active
+      ? 'border-foreground bg-foreground text-background'
+      : 'border-border text-muted-foreground hover:bg-muted hover:text-foreground'
+  }`
 }
 
 export default function MetricsPage() {
-  const { days, setRange, data, loading, stale, unreachable, panelErrors, refresh } = useMetrics()
+  const {
+    range, setPreset, setDates, setGranularidad,
+    data, loading, stale, unreachable, panelErrors, refresh,
+  } = useMetrics()
   const { costs, searches, properties, zones } = data
+
+  // La granularidad que se marca activa es la que el backend RESOLVIÓ, no la que
+  // está en el estado local: cuando nadie eligió una, el backend la deriva del
+  // largo del rango, y marcar el estado local (null) dejaría los tres botones
+  // apagados mientras el gráfico ya está agrupando por semana.
+  const granActiva = costs?.granularidad ?? range.granularidad
+  const granEsAutomatica = range.granularidad === null
 
   const searchColumns: Column<ExpensiveSearch>[] = [
     {
@@ -70,24 +88,67 @@ export default function MetricsPage() {
             Búsquedas, inventario, zonas y lo que cuesta operarlo.
           </p>
 
-          {/* Una sola fila de filtros, arriba de todo lo que scopea: cada panel
-              se recalcula contra la misma ventana, así los números concuerdan. */}
+          {/* Un solo filtro, arriba de todo lo que scopea: cada panel se recalcula
+              contra la misma ventana, así los números concuerdan entre paneles.
+              Los presets y las fechas a mano escriben el MISMO rango — el rango
+              arbitrario es la primitiva y el preset es solo el atajo. */}
           <div className="mt-4 flex flex-wrap items-center gap-2">
             {RANGE_PRESETS.map((preset) => (
               <button
-                key={preset}
+                key={preset.key}
                 type="button"
-                onClick={() => setRange(preset)}
-                aria-pressed={days === preset}
-                className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
-                  days === preset
-                    ? 'border-foreground bg-foreground text-background'
-                    : 'border-border text-muted-foreground hover:bg-muted hover:text-foreground'
-                }`}
+                onClick={() => setPreset(preset.key)}
+                aria-pressed={range.preset === preset.key}
+                className={filterButton(range.preset === preset.key)}
               >
-                {RANGE_LABELS[preset] ?? `${preset} días`}
+                {preset.label}
               </button>
             ))}
+
+            <span aria-hidden className="mx-1 h-4 w-px bg-border" />
+
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span className="sr-only">Desde</span>
+              <input
+                type="date"
+                value={range.desde}
+                max={range.hasta}
+                onChange={(e) => setDates(e.target.value, range.hasta)}
+                className="rounded-lg border border-border bg-card px-2 py-1 text-xs text-foreground"
+              />
+            </label>
+            <span aria-hidden className="text-xs text-muted-foreground">→</span>
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span className="sr-only">Hasta</span>
+              <input
+                type="date"
+                value={range.hasta}
+                min={range.desde}
+                onChange={(e) => setDates(range.desde, e.target.value)}
+                className="rounded-lg border border-border bg-card px-2 py-1 text-xs text-foreground"
+              />
+            </label>
+
+            <span aria-hidden className="mx-1 h-4 w-px bg-border" />
+
+            <span className="text-xs text-muted-foreground">Ver por</span>
+            {GRANULARITIES.map((gran) => (
+              <button
+                key={gran.key}
+                type="button"
+                onClick={() => setGranularidad(gran.key)}
+                aria-pressed={granActiva === gran.key}
+                title={
+                  granActiva === gran.key && granEsAutomatica
+                    ? 'Elegida automáticamente según el largo del rango. Tocá otra para fijarla.'
+                    : undefined
+                }
+                className={filterButton(granActiva === gran.key)}
+              >
+                {gran.label}
+              </button>
+            ))}
+
             <button
               type="button"
               onClick={() => void refresh()}
@@ -130,9 +191,7 @@ export default function MetricsPage() {
                     // un refetch el botón ya está apretado pero los datos abajo
                     // siguen siendo los anteriores, y un label que se adelanta
                     // atribuiría el total viejo al rango nuevo.
-                    label={`Total · ${
-                      costs ? RANGE_LABELS[costs.dias] ?? `${costs.dias} días` : '—'
-                    }`}
+                    label={`Total · ${costs ? rangeLabel(costs.desde, costs.hasta) : '—'}`}
                     value={
                       // El prefijo "≥" no es adorno: mientras haya búsquedas con
                       // costo sin registrar, este número es un piso.
@@ -165,9 +224,8 @@ export default function MetricsPage() {
                   </div>
                 </div>
                 <SpendChart
-                  days={costs?.serie_diaria ?? []}
-                  from={costs?.desde}
-                  windowDays={costs?.dias}
+                  serie={costs?.serie ?? []}
+                  granularidad={costs?.granularidad ?? 'dia'}
                 />
               </div>
 
@@ -198,7 +256,7 @@ export default function MetricsPage() {
                   value={compact(costs?.llm.llamadas ?? null)}
                   hint={
                     costs?.llm.costo_por_llamada != null
-                      ? `${usd(costs.llm.costo_por_llamada)} promedio por llamada.`
+                      ? `${compact(costs.llm.input_tokens)} tokens de input y ${compact(costs.llm.output_tokens)} de output · ${usd(costs.llm.costo_por_llamada)} promedio por llamada.`
                       : 'Todavía sin llamadas registradas en el rango.'
                   }
                 />

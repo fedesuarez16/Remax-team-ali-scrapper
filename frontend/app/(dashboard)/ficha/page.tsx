@@ -26,10 +26,10 @@ function FichaLinkBar({ p, onEdit }: { p: Property; onEdit: () => void }) {
   return (
     <div className="space-y-1.5 print:hidden">
       {/* Nuevo link propio */}
-      <div className="flex items-center gap-2 rounded-xl border border-border bg-muted/40 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-muted/40 px-3 py-2">
         <Link2 className="size-4 shrink-0 text-foreground" />
         <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Ficha propia</span>
-        <code className="flex-1 truncate text-xs text-foreground">{url}</code>
+        <code className="min-w-0 flex-1 basis-28 truncate text-xs text-foreground">{url}</code>
         <button
           onClick={copy}
           className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground transition hover:bg-muted"
@@ -105,9 +105,9 @@ export default function FichaPage() {
   }
 
   return (
-    <div className="flex h-full flex-col bg-background text-foreground">
+    <div className="flex h-full flex-col bg-background text-foreground print:block print:h-auto">
       {/* Toolbar — hidden on print */}
-      <header className="flex items-center justify-between gap-3 border-b border-border px-6 py-4 print:hidden">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-4 sm:px-6 print:hidden">
         <div className="flex items-center gap-3">
           <button
             onClick={() => router.back()}
@@ -144,7 +144,7 @@ export default function FichaPage() {
       </header>
 
       {/* Sheets */}
-      <div className="flex-1 overflow-y-auto p-6 print:overflow-visible print:p-0">
+      <div className="flex-1 overflow-y-auto bg-muted/25 p-4 sm:p-6 print:overflow-visible print:p-0">
         {props.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
             <Building2 className="size-10 text-muted-foreground/40" />
@@ -162,7 +162,7 @@ export default function FichaPage() {
             </button>
           </div>
         ) : (
-          <div className="mx-auto grid max-w-3xl gap-6">
+          <div className="mx-auto grid max-w-4xl gap-6 print:block print:space-y-6">
             {props.map((p, i) => (
               <div key={p.id ?? i} className="space-y-2">
                 <FichaLinkBar p={p} onEdit={() => setEditingId(p.id ?? null)} />

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -41,7 +41,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 DEFAULT_WINDOW_DAYS = 30
-MAX_WINDOW_DAYS = 365
+# Tres años. El tope no es de rendimiento — Postgres ya agregó — sino de honestidad:
+# más atrás que eso los precios por token de `llm_costs` ya no son los que se
+# facturaron, así que la serie compararía dólares de distintas tablas de precios.
+MAX_WINDOW_DAYS = 1095
+
+# Cómo se agrupa la serie temporal. `dia` es lo que devuelven las vistas; semana y
+# mes se pliegan acá porque el corte depende del rango que se está mirando, no del
+# dato: la misma fila entra en un bucket distinto según qué preguntaste.
+GRANULARIDADES = ('dia', 'semana', 'mes')
+
+# Umbrales de la granularidad automática. Una barra tiene que poder verse: 365
+# columnas diarias en el ancho de un panel son ~1.6px cada una, o sea una textura,
+# no un gráfico. Cuando el rango crece, el bucket crece con él.
+AUTO_DIA_MAX_DAYS = 62
+AUTO_SEMANA_MAX_DAYS = 366
 
 # Zone stats key off `scraping_jobs.zona`, which is NULL for polygon searches.
 # Those rows carry real spend, so they are labelled rather than dropped — else the
@@ -121,14 +135,101 @@ def _project_month(total_usd: float, days: int) -> float | None:
     return total_usd / days * 30
 
 
-def _since(days: int) -> str:
-    """Inclusive lower bound for the window, as a date the views can compare on."""
-    return (datetime.now(UTC).date() - timedelta(days=days - 1)).isoformat()
+def _parse_date(raw: Any) -> date | None:
+    """An ISO date, or None for anything unusable.
+
+    None and not a 422 for the same reason `_window_days` clamps: these are view
+    controls. A dashboard that refuses to render because a date input holds half a
+    typed date is worse than one that falls back to its default range.
+    """
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return None
 
 
-async def _rows(sb: Any, view: str, *, since: str | None = None,
+def _resolve_window(days: Any, desde: Any, hasta: Any) -> tuple[date, date, int]:
+    """Settle the window into (desde, hasta, dias), both ends INCLUSIVE.
+
+    The explicit range is the primitive and `days` is only the shortcut that fills
+    in a missing end: "el 1 al 31 de marzo" has to mean 31 days, so a window whose
+    span is derived has to count both endpoints.
+    """
+    hoy = datetime.now(UTC).date()
+    inicio = _parse_date(desde)
+    fin = _parse_date(hasta)
+
+    # Two date inputs filled in the wrong order is a slip, not a reason to blank the
+    # screen. Swapping shows what was meant.
+    if inicio is not None and fin is not None and inicio > fin:
+        inicio, fin = fin, inicio
+
+    if fin is None:
+        # A `desde` in the future would otherwise invert the window against today.
+        fin = max(hoy, inicio) if inicio is not None else hoy
+    if inicio is None:
+        inicio = fin - timedelta(days=_window_days(days) - 1)
+
+    span = (fin - inicio).days + 1
+    if span > MAX_WINDOW_DAYS:
+        # Trimmed from the START. The end is the side being read: keeping "hasta"
+        # preserves the question that was asked and drops the oldest tail.
+        inicio = fin - timedelta(days=MAX_WINDOW_DAYS - 1)
+        span = MAX_WINDOW_DAYS
+    return inicio, fin, span
+
+
+def _granularidad(raw: Any, span_days: int) -> str:
+    """The requested bucket size, or one derived from the span. Never raises."""
+    if isinstance(raw, str) and raw.lower() in GRANULARIDADES:
+        return raw.lower()
+    if span_days <= AUTO_DIA_MAX_DAYS:
+        return 'dia'
+    if span_days <= AUTO_SEMANA_MAX_DAYS:
+        return 'semana'
+    return 'mes'
+
+
+def _bucket_start(day: date, gran: str) -> date:
+    """The period a day belongs to. Weeks cut on Monday (ISO) so the chart and any
+    report built outside this system agree on where a week begins."""
+    if gran == 'mes':
+        return day.replace(day=1)
+    if gran == 'semana':
+        return day - timedelta(days=day.weekday())
+    return day
+
+
+def _next_bucket(start: date, gran: str) -> date:
+    if gran == 'mes':
+        return date(start.year + start.month // 12, start.month % 12 + 1, 1)
+    if gran == 'semana':
+        return start + timedelta(days=7)
+    return start + timedelta(days=1)
+
+
+def _buckets(desde: date, hasta: date, gran: str) -> list[date]:
+    """Every period the window touches, in order — including the partial ones at
+    both ends. Dropping a partial month would take its spend out of the series
+    while it stays in the panel total: two numbers on the same screen that no
+    longer add up."""
+    out: list[date] = []
+    cursor = _bucket_start(desde, gran)
+    while cursor <= hasta:
+        out.append(cursor)
+        cursor = _next_bucket(cursor, gran)
+    return out
+
+
+async def _rows(sb: Any, view: str, *, since: date | None = None, until: date | None = None,
                 date_column: str = 'dia') -> tuple[list[dict[str, Any]], str | None]:
-    """Read a metrics view. Returns (rows, error) — never raises.
+    """Read a metrics view over [since, until]. Returns (rows, error) — never raises.
+
+    `until` is applied as an EXCLUSIVE bound on the day after. `metrics_job_costs`
+    filters on `creado_at`, a timestamptz: a `lte` against the last date compares
+    against its midnight and silently drops everything that happened that day.
 
     The error is surfaced instead of swallowed so the dashboard can say "this panel
     is empty because the migration has not run" rather than just showing zeros.
@@ -138,7 +239,9 @@ async def _rows(sb: Any, view: str, *, since: str | None = None,
     try:
         query = sb.table(view).select('*')
         if since is not None:
-            query = query.gte(date_column, since)
+            query = query.gte(date_column, since.isoformat())
+        if until is not None:
+            query = query.lt(date_column, (until + timedelta(days=1)).isoformat())
         res = await query.execute()
     except Exception as exc:
         logger.warning('metrics view %s unavailable: %s', view, exc)
@@ -264,28 +367,78 @@ def _summarize_apify(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _daily_series(llm_rows: list[dict[str, Any]],
-                  apify_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One chronological row per day carrying both spend sources.
+def _spend_series(llm_rows: list[dict[str, Any]], apify_rows: list[dict[str, Any]],
+                  *, desde: date, hasta: date, gran: str) -> list[dict[str, Any]]:
+    """One chronological row per period, carrying both spend sources plus the LLM's
+    call and token counts.
 
-    Days present in only one source still appear, with 0 for the other: a gap in
-    the series would read as "no spend" on a stacked chart, which is the same
-    pixel as a real zero but a different fact.
+    Three things this has to get right:
+
+    1. **Empty periods are emitted at zero.** A gap in the series draws the same
+       pixel as a real zero but states the opposite fact, and an axis positioned by
+       row index rather than by date compresses whole weeks without saying so.
+
+    2. **Tokens and calls travel with the dollars.** The question is LLM
+       CONSUMPTION, not just its price: without them an expensive month caused by
+       volume is indistinguishable from one caused by longer prompts.
+
+    3. **Partial periods are flagged.** Reading a month-to-date column against a
+       finished month is the classic lie of these panels. `parcial` lets the UI say
+       so instead of letting a drop that is only the calendar read as a real one.
     """
-    days: dict[str, dict[str, float]] = defaultdict(lambda: {'llm_usd': 0.0, 'apify_usd': 0.0})
+    buckets = _buckets(desde, hasta, gran)
+    acc: dict[date, dict[str, float]] = {
+        b: {'llm_usd': 0.0, 'apify_usd': 0.0, 'llm_llamadas': 0.0,
+            'llm_input_tokens': 0.0, 'llm_output_tokens': 0.0}
+        for b in buckets
+    }
+
+    def _bucket_for(raw: Any) -> dict[str, float] | None:
+        """The accumulator for a view row, or None when it falls outside the window.
+
+        Rows are already filtered in Postgres, so this only catches the pathological
+        cases — a skewed clock, a stale cached response. Booking them into the
+        nearest bucket would be worse than dropping them: it would move real spend
+        onto a date it did not happen.
+        """
+        day = _parse_date(raw)
+        return acc.get(_bucket_start(day, gran)) if day is not None else None
 
     for row in llm_rows:
-        dia = str(row.get('dia'))
-        days[dia]['llm_usd'] += _num(row.get('cost_usd'))
-    for row in apify_rows:
-        dia = str(row.get('dia'))
-        days[dia]['apify_usd'] += _num(row.get('cost_usd'))
+        bucket = _bucket_for(row.get('dia'))
+        if bucket is None:
+            continue
+        bucket['llm_usd'] += _num(row.get('cost_usd'))
+        bucket['llm_llamadas'] += _int(row.get('llamadas'))
+        bucket['llm_input_tokens'] += _num(row.get('input_tokens'))
+        bucket['llm_output_tokens'] += _num(row.get('output_tokens'))
 
-    return [
-        {'dia': dia, 'llm_usd': v['llm_usd'], 'apify_usd': v['apify_usd'],
-         'total_usd': v['llm_usd'] + v['apify_usd']}
-        for dia, v in sorted(days.items())
-    ]
+    for row in apify_rows:
+        bucket = _bucket_for(row.get('dia'))
+        if bucket is None:
+            continue
+        bucket['apify_usd'] += _num(row.get('cost_usd'))
+
+    out: list[dict[str, Any]] = []
+    for start in buckets:
+        end = _next_bucket(start, gran) - timedelta(days=1)
+        v = acc[start]
+        out.append({
+            # `periodo` is the period's TRUE start, so a label reads "enero" even
+            # when the window opens on the 20th. The covered edges are clamped
+            # separately — they are what the numbers actually sum over.
+            'periodo': start.isoformat(),
+            'desde': max(start, desde).isoformat(),
+            'fin': min(end, hasta).isoformat(),
+            'parcial': start < desde or end > hasta,
+            'llm_usd': v['llm_usd'],
+            'apify_usd': v['apify_usd'],
+            'total_usd': v['llm_usd'] + v['apify_usd'],
+            'llm_llamadas': int(v['llm_llamadas']),
+            'llm_input_tokens': int(v['llm_input_tokens']),
+            'llm_output_tokens': int(v['llm_output_tokens']),
+        })
+    return out
 
 
 # ── searches ─────────────────────────────────────────────────────────────────
@@ -368,19 +521,32 @@ def _summarize_jobs(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 @router.get('/costs')
-async def costs_metrics(request: Request, days: int | None = None) -> dict[str, Any]:
-    """Apify + Anthropic spend over the window: totals, daily series, and the
-    breakdowns that say WHERE the money went (per source, per scope, per model).
+async def costs_metrics(
+    request: Request,
+    days: int | None = None,
+    desde: str | None = None,
+    hasta: str | None = None,
+    granularidad: str | None = None,
+) -> dict[str, Any]:
+    """Apify + Anthropic spend over the window: totals, the series bucketed by day,
+    week or month, and the breakdowns that say WHERE the money went (per source,
+    per scope, per model).
+
+    `desde`/`hasta` (ISO dates, both inclusive) are the real window control;
+    `days` stays as the shortcut for the presets. `granularidad` is one of
+    `dia` | `semana` | `mes`, and is derived from the span when absent — the
+    resolved value comes back in the response so the UI marks the button that
+    matches what was actually computed, not what was asked for.
 
     These are the only two spend sources in the system — geocoding runs on
     Nominatim, which is free.
     """
     sb = getattr(request.app.state, 'supabase', None)
-    window = _window_days(days)
-    since = _since(window)
+    since, until, window = _resolve_window(days, desde, hasta)
+    gran = _granularidad(granularidad, window)
 
-    llm_rows, llm_err = await _rows(sb, 'metrics_llm_daily', since=since)
-    apify_rows, apify_err = await _rows(sb, 'metrics_apify_daily', since=since)
+    llm_rows, llm_err = await _rows(sb, 'metrics_llm_daily', since=since, until=until)
+    apify_rows, apify_err = await _rows(sb, 'metrics_apify_daily', since=since, until=until)
     source_rows, source_err = await _rows(sb, 'metrics_apify_source_spend')
 
     llm = _summarize_llm(llm_rows)
@@ -404,12 +570,14 @@ async def costs_metrics(request: Request, days: int | None = None) -> dict[str, 
     total = llm['cost_usd'] + apify['cost_usd']
     body: dict[str, Any] = {
         'dias': window,
-        'desde': since,
+        'desde': since.isoformat(),
+        'hasta': until.isoformat(),
+        'granularidad': gran,
         'total_usd': total,
         'proyeccion_mensual_usd': _project_month(total, window),
         'llm': llm,
         'apify': apify,
-        'serie_diaria': _daily_series(llm_rows, apify_rows),
+        'serie': _spend_series(llm_rows, apify_rows, desde=since, hasta=until, gran=gran),
     }
     error = next((e for e in (llm_err, apify_err, source_err) if e), None)
     if error:
@@ -418,34 +586,51 @@ async def costs_metrics(request: Request, days: int | None = None) -> dict[str, 
 
 
 @router.get('/searches')
-async def search_metrics(request: Request, days: int | None = None) -> dict[str, Any]:
+async def search_metrics(
+    request: Request,
+    days: int | None = None,
+    desde: str | None = None,
+    hasta: str | None = None,
+) -> dict[str, Any]:
     """Per-search economics and health: status funnel, precision, duration
-    percentiles, cost per search and per criteria-matching property."""
+    percentiles, cost per search and per criteria-matching property.
+
+    Takes the same window as `/costs`: the dashboard has one filter above every
+    panel, and a panel that ignored it would stop adding up with the one next to it.
+    """
     sb = getattr(request.app.state, 'supabase', None)
-    window = _window_days(days)
-    since = _since(window)
+    since, until, window = _resolve_window(days, desde, hasta)
 
-    rows, error = await _rows(sb, 'metrics_job_costs', since=since, date_column='creado_at')
+    rows, error = await _rows(
+        sb, 'metrics_job_costs', since=since, until=until, date_column='creado_at',
+    )
 
-    body: dict[str, Any] = {'dias': window, 'desde': since, **_summarize_jobs(rows)}
+    body: dict[str, Any] = {
+        'dias': window, 'desde': since.isoformat(), 'hasta': until.isoformat(),
+        **_summarize_jobs(rows),
+    }
     if error:
         body['error'] = error
     return body
 
 
 @router.get('/properties')
-async def property_metrics(request: Request, days: int | None = None) -> dict[str, Any]:
+async def property_metrics(
+    request: Request,
+    days: int | None = None,
+    desde: str | None = None,
+    hasta: str | None = None,
+) -> dict[str, Any]:
     """Inventory size, data completeness, commercial funnel and freshness.
 
     Completeness is not vanity: ficha generation degrades field by field, and a
     property with no m2 cannot enter the price-per-m2 medians at all.
     """
     sb = getattr(request.app.state, 'supabase', None)
-    window = _window_days(days)
-    since = _since(window)
+    since, until, window = _resolve_window(days, desde, hasta)
 
     health_rows, health_err = await _rows(sb, 'metrics_property_health')
-    daily_rows, daily_err = await _rows(sb, 'metrics_property_daily', since=since)
+    daily_rows, daily_err = await _rows(sb, 'metrics_property_daily', since=since, until=until)
 
     health = health_rows[0] if health_rows else {}
     total = _int(health.get('total'))
@@ -461,7 +646,8 @@ async def property_metrics(request: Request, days: int | None = None) -> dict[st
 
     body: dict[str, Any] = {
         'dias': window,
-        'desde': since,
+        'desde': since.isoformat(),
+        'hasta': until.isoformat(),
         'total': total,
         'enviadas': _int(health.get('enviadas')),
         'enviadas_ratio': _ratio(_int(health.get('enviadas')), total),

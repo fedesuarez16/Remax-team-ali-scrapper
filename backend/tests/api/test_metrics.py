@@ -14,6 +14,7 @@ helpers — the arithmetic that decides whether a number is honest:
 """
 from __future__ import annotations
 
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -31,11 +32,19 @@ class _FakeView:
         self._rows = rows
         self._blow_up = blow_up
         self._limit: int | None = None
+        # Los bounds se registran en vez de aplicarse: lo que hay que verificar es
+        # que el rango LLEGUE a la query, no reimplementar PostgREST en el fake.
+        self.bounds: dict[str, tuple[str, Any]] = {}
 
     def select(self, *_a: Any, **_k: Any) -> '_FakeView':
         return self
 
-    def gte(self, *_a: Any, **_k: Any) -> '_FakeView':
+    def gte(self, column: str, value: Any) -> '_FakeView':
+        self.bounds['gte'] = (column, value)
+        return self
+
+    def lt(self, column: str, value: Any) -> '_FakeView':
+        self.bounds['lt'] = (column, value)
         return self
 
     def order(self, *_a: Any, **_k: Any) -> '_FakeView':
@@ -57,10 +66,13 @@ class _FakeSupabase:
         self._views = views
         self._broken = broken or set()
         self.queried: list[str] = []
+        self.views: dict[str, _FakeView] = {}
 
     def table(self, name: str) -> _FakeView:
         self.queried.append(name)
-        return _FakeView(self._views.get(name, []), blow_up=name in self._broken)
+        view = _FakeView(self._views.get(name, []), blow_up=name in self._broken)
+        self.views[name] = view
+        return view
 
 
 def _client(sb: Any) -> AsyncClient:
@@ -87,6 +99,205 @@ def test_window_rejects_nonsense_instead_of_querying_it(raw: Any) -> None:
 def test_window_honours_a_sane_request() -> None:
     assert metrics._window_days(7) == 7
     assert metrics._window_days('90') == 90
+
+
+# ── rango explícito de fechas ────────────────────────────────────────────────
+
+
+def _hoy() -> date:
+    return datetime.now(UTC).date()
+
+
+def test_an_explicit_range_beats_the_days_preset() -> None:
+    """`desde`/`hasta` es la primitiva; `days` es solo el atajo para el default."""
+    desde, hasta, span = metrics._resolve_window(30, '2026-03-01', '2026-03-31')
+    assert (desde, hasta) == (date(2026, 3, 1), date(2026, 3, 31))
+    # Ambos extremos incluidos: pedir el 1 al 31 de marzo son 31 días, no 30.
+    assert span == 31
+
+
+def test_a_range_without_an_end_runs_up_to_today() -> None:
+    desde, hasta, _ = metrics._resolve_window(None, '2026-03-01', None)
+    assert desde == date(2026, 3, 1)
+    assert hasta == _hoy()
+
+
+def test_a_range_without_a_start_backs_off_the_days_window_from_its_end() -> None:
+    desde, hasta, span = metrics._resolve_window(7, None, '2026-03-31')
+    assert (desde, hasta) == (date(2026, 3, 25), date(2026, 3, 31))
+    assert span == 7
+
+
+def test_a_reversed_range_is_swapped_instead_of_refused() -> None:
+    """Dos inputs de fecha invertidos son un desliz de UI. Un 422 deja la pantalla
+    en blanco; darlo vuelta muestra lo que el usuario quiso pedir."""
+    desde, hasta, _ = metrics._resolve_window(None, '2026-03-31', '2026-03-01')
+    assert (desde, hasta) == (date(2026, 3, 1), date(2026, 3, 31))
+
+
+def test_an_oversized_range_keeps_its_END_and_moves_the_start() -> None:
+    """El tope se aplica desde el final: el lado que se está leyendo es el reciente,
+    así que recortar por el principio conserva la pregunta y no la respuesta."""
+    desde, hasta, span = metrics._resolve_window(None, '2000-01-01', '2026-03-31')
+    assert hasta == date(2026, 3, 31)
+    assert span == metrics.MAX_WINDOW_DAYS
+    assert desde == hasta - timedelta(days=metrics.MAX_WINDOW_DAYS - 1)
+
+
+def test_garbage_dates_fall_back_to_the_days_window_instead_of_erroring() -> None:
+    desde, hasta, span = metrics._resolve_window(7, 'no-es-una-fecha', '')
+    assert span == 7
+    assert hasta == _hoy()
+    assert desde == hasta - timedelta(days=6)
+
+
+def test_no_range_at_all_is_the_default_window_ending_today() -> None:
+    desde, hasta, span = metrics._resolve_window(None, None, None)
+    assert span == metrics.DEFAULT_WINDOW_DAYS
+    assert hasta == _hoy()
+    assert desde == hasta - timedelta(days=metrics.DEFAULT_WINDOW_DAYS - 1)
+
+
+# ── granularidad ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize('gran', ['dia', 'semana', 'mes'])
+def test_an_explicit_granularity_is_honoured_whatever_the_span(gran: str) -> None:
+    assert metrics._granularidad(gran, 400) == gran
+    assert metrics._granularidad(gran.upper(), 3) == gran
+
+
+@pytest.mark.parametrize('raw', [None, '', 'trimestre', 42])
+def test_an_unusable_granularity_falls_back_to_auto(raw: Any) -> None:
+    """Un valor inválido no puede tumbar el panel: se resuelve por el largo del rango."""
+    assert metrics._granularidad(raw, 30) == 'dia'
+
+
+def test_auto_granularity_widens_as_the_span_grows() -> None:
+    """365 barras diarias en 600px son ~1.6px cada una: eso no es un gráfico, es una
+    textura. La granularidad por defecto sube con el rango para que cada marca se lea."""
+    assert metrics._granularidad(None, 1) == 'dia'
+    assert metrics._granularidad(None, 30) == 'dia'
+    assert metrics._granularidad(None, 90) == 'semana'
+    assert metrics._granularidad(None, 365) == 'semana'
+    assert metrics._granularidad(None, 400) == 'mes'
+
+
+# ── buckets ──────────────────────────────────────────────────────────────────
+
+
+def test_month_buckets_start_on_the_first() -> None:
+    assert metrics._bucket_start(date(2026, 3, 17), 'mes') == date(2026, 3, 1)
+
+
+def test_week_buckets_start_on_monday() -> None:
+    """Semana ISO: el gráfico y cualquier reporte externo tienen que cortar igual."""
+    # 2026-03-17 es martes.
+    assert metrics._bucket_start(date(2026, 3, 17), 'semana') == date(2026, 3, 16)
+    # Un lunes es su propio comienzo de semana.
+    assert metrics._bucket_start(date(2026, 3, 16), 'semana') == date(2026, 3, 16)
+
+
+def test_day_buckets_are_the_day_itself() -> None:
+    assert metrics._bucket_start(date(2026, 3, 17), 'dia') == date(2026, 3, 17)
+
+
+def test_month_buckets_roll_over_the_year() -> None:
+    assert metrics._next_bucket(date(2026, 12, 1), 'mes') == date(2027, 1, 1)
+
+
+def test_buckets_cover_every_period_the_window_touches() -> None:
+    """Enero parcial cuenta como bucket: si se cae, su gasto desaparece del total
+    de la serie mientras sigue en el total del panel — dos números que no cierran."""
+    buckets = metrics._buckets(date(2026, 1, 20), date(2026, 3, 5), 'mes')
+    assert buckets == [date(2026, 1, 1), date(2026, 2, 1), date(2026, 3, 1)]
+
+
+# ── serie por período ────────────────────────────────────────────────────────
+
+
+def test_series_folds_daily_rows_into_the_requested_period() -> None:
+    llm = [
+        _llm_row(dia='2026-01-05', cost_usd=0.02),
+        _llm_row(dia='2026-01-28', cost_usd=0.03),
+        _llm_row(dia='2026-02-10', cost_usd=0.05),
+    ]
+    apify = [_apify_row(dia='2026-01-06', cost_usd=0.10)]
+
+    serie = metrics._spend_series(
+        llm, apify, desde=date(2026, 1, 1), hasta=date(2026, 2, 28), gran='mes',
+    )
+
+    por_periodo = {b['periodo']: b for b in serie}
+    assert por_periodo['2026-01-01']['llm_usd'] == pytest.approx(0.05)
+    assert por_periodo['2026-01-01']['apify_usd'] == pytest.approx(0.10)
+    assert por_periodo['2026-01-01']['total_usd'] == pytest.approx(0.15)
+    assert por_periodo['2026-02-01']['llm_usd'] == pytest.approx(0.05)
+    assert por_periodo['2026-02-01']['apify_usd'] == 0.0
+
+
+def test_series_keeps_empty_periods_at_zero() -> None:
+    """Un hueco en la serie se dibuja igual que un cero real pero es otro hecho.
+    El eje tiene que ser proporcional al tiempo, así que los períodos sin gasto van
+    explícitos — y además ese cero es el dato correcto."""
+    serie = metrics._spend_series(
+        [_llm_row(dia='2026-01-05', cost_usd=0.02)], [],
+        desde=date(2026, 1, 1), hasta=date(2026, 3, 31), gran='mes',
+    )
+    assert [b['periodo'] for b in serie] == ['2026-01-01', '2026-02-01', '2026-03-01']
+    assert serie[1]['total_usd'] == 0.0
+
+
+def test_series_flags_a_period_the_window_only_half_covers() -> None:
+    """Comparar un septiembre a mitad de camino contra un agosto completo es la
+    mentira clásica de estos paneles. El bucket parcial se marca para que la UI
+    pueda decirlo en vez de dejar leer una caída de gasto que no existe."""
+    serie = metrics._spend_series(
+        [], [], desde=date(2026, 1, 20), hasta=date(2026, 2, 28), gran='mes',
+    )
+    enero, febrero = serie
+
+    assert enero['parcial'] is True
+    # `periodo` es el comienzo REAL del mes (así la etiqueta dice "enero"), pero
+    # los extremos cubiertos se recortan a la ventana pedida.
+    assert enero['periodo'] == '2026-01-01'
+    assert enero['desde'] == '2026-01-20'
+    assert enero['fin'] == '2026-01-31'
+    assert febrero['parcial'] is False
+    assert febrero['fin'] == '2026-02-28'
+
+
+def test_series_carries_llm_tokens_and_calls_per_period() -> None:
+    """La pregunta es el consumo del LLM, no solo su precio: sin tokens ni llamadas
+    no se puede distinguir un mes caro por volumen de uno caro por prompts largos."""
+    llm = [
+        _llm_row(dia='2026-01-05', cost_usd=0.02, llamadas=12,
+                 input_tokens=9000, output_tokens=400),
+        _llm_row(dia='2026-01-06', cost_usd=0.01, llamadas=3,
+                 input_tokens=1000, output_tokens=100),
+    ]
+    serie = metrics._spend_series(
+        llm, [], desde=date(2026, 1, 1), hasta=date(2026, 1, 31), gran='mes',
+    )
+
+    assert serie[0]['llm_llamadas'] == 15
+    assert serie[0]['llm_input_tokens'] == 10_000
+    assert serie[0]['llm_output_tokens'] == 500
+
+
+def test_series_by_week_cuts_on_mondays() -> None:
+    llm = [
+        _llm_row(dia='2026-03-16', cost_usd=0.02),  # lunes
+        _llm_row(dia='2026-03-22', cost_usd=0.03),  # domingo, misma semana
+        _llm_row(dia='2026-03-23', cost_usd=0.05),  # lunes siguiente
+    ]
+    serie = metrics._spend_series(
+        llm, [], desde=date(2026, 3, 16), hasta=date(2026, 3, 29), gran='semana',
+    )
+
+    assert [b['periodo'] for b in serie] == ['2026-03-16', '2026-03-23']
+    assert serie[0]['llm_usd'] == pytest.approx(0.05)
+    assert serie[1]['llm_usd'] == pytest.approx(0.05)
 
 
 # ── numeric coercion ─────────────────────────────────────────────────────────
@@ -254,9 +465,11 @@ def test_daily_series_merges_both_spend_sources_on_the_same_day() -> None:
     llm = [_llm_row(dia='2026-08-01', cost_usd=0.02), _llm_row(dia='2026-08-03', cost_usd=0.05)]
     apify = [_apify_row(dia='2026-08-01', cost_usd=0.10), _apify_row(dia='2026-08-02', cost_usd=0.07)]
 
-    series = metrics._daily_series(llm, apify)
+    series = metrics._spend_series(
+        llm, apify, desde=date(2026, 8, 1), hasta=date(2026, 8, 3), gran='dia',
+    )
 
-    by_day = {d['dia']: d for d in series}
+    by_day = {d['periodo']: d for d in series}
     assert by_day['2026-08-01']['llm_usd'] == pytest.approx(0.02)
     assert by_day['2026-08-01']['apify_usd'] == pytest.approx(0.10)
     assert by_day['2026-08-01']['total_usd'] == pytest.approx(0.12)
@@ -264,7 +477,7 @@ def test_daily_series_merges_both_spend_sources_on_the_same_day() -> None:
     assert by_day['2026-08-02']['llm_usd'] == 0.0
     assert by_day['2026-08-03']['apify_usd'] == 0.0
     # Chronological — a time axis is useless unsorted.
-    assert [d['dia'] for d in series] == ['2026-08-01', '2026-08-02', '2026-08-03']
+    assert [d['periodo'] for d in series] == ['2026-08-01', '2026-08-02', '2026-08-03']
 
 
 def test_monthly_projection_uses_the_observed_daily_burn() -> None:
@@ -398,6 +611,88 @@ async def test_costs_endpoint_reports_both_sources_and_the_combined_total() -> N
     assert body['apify']['por_fuente'][0]['fuente'] == 'zonaprop'
     assert body['dias'] == 30
     assert 'error' not in body
+
+
+async def test_costs_endpoint_windows_on_an_explicit_date_range() -> None:
+    """El rango tiene que llegar a la query con AMBOS extremos. Sin el tope
+    superior, pedir 'marzo' devolvía marzo y todo lo posterior."""
+    sb = _FakeSupabase({
+        'metrics_llm_daily': [_llm_row(dia='2026-03-10', cost_usd=0.04)],
+        'metrics_apify_daily': [_apify_row(dia='2026-03-10', cost_usd=0.16)],
+    })
+    async with _client(sb) as c:
+        body = (await c.get('/metrics/costs?desde=2026-03-01&hasta=2026-03-31')).json()
+
+    assert body['desde'] == '2026-03-01'
+    assert body['hasta'] == '2026-03-31'
+    assert body['dias'] == 31
+
+    bounds = sb.views['metrics_llm_daily'].bounds
+    assert bounds['gte'] == ('dia', '2026-03-01')
+    # Cota superior EXCLUSIVA en el día siguiente: sobre una columna timestamptz un
+    # `lte` contra '2026-03-31' compara contra la medianoche y se come el último día.
+    assert bounds['lt'] == ('dia', '2026-04-01')
+
+
+async def test_costs_endpoint_groups_the_series_by_month_when_asked() -> None:
+    sb = _FakeSupabase({
+        'metrics_llm_daily': [
+            _llm_row(dia='2026-01-05', cost_usd=0.02, llamadas=4),
+            _llm_row(dia='2026-01-25', cost_usd=0.03, llamadas=6),
+            _llm_row(dia='2026-02-14', cost_usd=0.05, llamadas=1),
+        ],
+        'metrics_apify_daily': [],
+    })
+    async with _client(sb) as c:
+        body = (await c.get(
+            '/metrics/costs?desde=2026-01-01&hasta=2026-02-28&granularidad=mes'
+        )).json()
+
+    assert body['granularidad'] == 'mes'
+    assert [b['periodo'] for b in body['serie']] == ['2026-01-01', '2026-02-01']
+    assert body['serie'][0]['llm_usd'] == pytest.approx(0.05)
+    assert body['serie'][0]['llm_llamadas'] == 10
+
+
+async def test_costs_endpoint_groups_the_series_by_week_when_asked() -> None:
+    sb = _FakeSupabase({
+        'metrics_llm_daily': [_llm_row(dia='2026-03-18', cost_usd=0.07)],
+        'metrics_apify_daily': [],
+    })
+    async with _client(sb) as c:
+        body = (await c.get(
+            '/metrics/costs?desde=2026-03-16&hasta=2026-03-29&granularidad=semana'
+        )).json()
+
+    assert body['granularidad'] == 'semana'
+    assert [b['periodo'] for b in body['serie']] == ['2026-03-16', '2026-03-23']
+
+
+async def test_costs_endpoint_picks_the_granularity_when_the_caller_does_not() -> None:
+    sb = _FakeSupabase({'metrics_llm_daily': [], 'metrics_apify_daily': []})
+    async with _client(sb) as c:
+        body = (await c.get('/metrics/costs?days=365')).json()
+
+    # Se devuelve la granularidad resuelta para que la UI marque el botón activo
+    # con lo que el backend hizo de verdad, y no con lo que el usuario pidió.
+    assert body['granularidad'] == 'semana'
+
+
+@pytest.mark.parametrize('path', ['/metrics/searches', '/metrics/properties'])
+async def test_every_windowed_endpoint_accepts_the_same_date_range(path: str) -> None:
+    """El filtro es uno solo arriba del dashboard: si un panel ignorara el rango,
+    sus números no cerrarían con los de al lado."""
+    sb = _FakeSupabase({
+        'metrics_job_costs': [],
+        'metrics_property_health': [{'total': 0}],
+        'metrics_property_daily': [],
+    })
+    async with _client(sb) as c:
+        body = (await c.get(f'{path}?desde=2026-03-01&hasta=2026-03-31')).json()
+
+    assert body['desde'] == '2026-03-01'
+    assert body['hasta'] == '2026-03-31'
+    assert body['dias'] == 31
 
 
 async def test_costs_endpoint_degrades_to_zeros_when_a_view_is_missing() -> None:

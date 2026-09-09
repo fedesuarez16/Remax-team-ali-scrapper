@@ -65,6 +65,49 @@ export function shortDate(iso: string | null | undefined): string {
   return d.toLocaleDateString('es-AR', { day: '2-digit', month: 'short' })
 }
 
+/**
+ * `YYYY-MM-DD` como fecha LOCAL.
+ *
+ * `new Date('2026-01-01')` la interpreta como medianoche UTC, y al formatearla en
+ * UTC-3 sale "31 dic": un bucket mensual etiquetado con el mes anterior. Los días
+ * pelados del backend son fechas de calendario, no instantes, así que se
+ * construyen componente por componente.
+ */
+function localDay(iso: string | null | undefined): Date | null {
+  if (!iso) return null
+  const [y, m, d] = iso.slice(0, 10).split('-').map(Number)
+  if (!y || !m || !d) return null
+  const date = new Date(y, m - 1, d)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+/** Etiqueta de un bucket de la serie, según cómo se agrupó.
+ *
+ * Un mes NO se etiqueta "01 ene": la marca representa el mes entero, y una fecha
+ * exacta invita a leerla como el gasto de ese día. */
+export function bucketLabel(iso: string, gran: 'dia' | 'semana' | 'mes'): string {
+  const d = localDay(iso)
+  if (!d) return EM_DASH
+  if (gran === 'mes') return d.toLocaleDateString('es-AR', { month: 'short', year: '2-digit' })
+  return d.toLocaleDateString('es-AR', { day: '2-digit', month: 'short' })
+}
+
+/** El rango, como se lee en el encabezado. Los dos extremos incluidos. */
+export function rangeLabel(desde: string | null | undefined,
+                           hasta: string | null | undefined): string {
+  const a = localDay(desde)
+  const b = localDay(hasta)
+  if (!a || !b) return EM_DASH
+  const fmt = (d: Date, conAnio: boolean) =>
+    d.toLocaleDateString('es-AR', {
+      day: '2-digit', month: 'short', ...(conAnio ? { year: 'numeric' } : {}),
+    })
+  // El año se escribe una sola vez cuando ambos extremos caen en el mismo: dos
+  // veces es ruido, ninguna miente cuando el rango lo cruza.
+  const mismoAnio = a.getFullYear() === b.getFullYear()
+  return `${fmt(a, !mismoAnio)} → ${fmt(b, true)}`
+}
+
 export function dateTime(iso: string | null | undefined): string {
   if (!iso) return EM_DASH
   const d = new Date(iso)
