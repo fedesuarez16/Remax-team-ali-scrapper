@@ -13,8 +13,20 @@ async def create_supabase_client() -> Any:
         log.warning("Supabase credentials not set — running without persistence.")
         return None
     try:
+        import httpx
         from supabase import acreate_client  # type: ignore[attr-defined]
-        client = await acreate_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+        from supabase.lib.client_options import AsyncClientOptions
+
+        # http2=False: postgrest-py's default httpx client uses HTTP/2, whose
+        # pooled connection gets silently closed by Cloudflare (in front of
+        # Supabase) after a few idle minutes. httpx then reuses that dead
+        # connection on the next request and raises ConnectionTerminated /
+        # "Server disconnected" — seen intermittently on every endpoint after
+        # traffic gaps. HTTP/1.1 doesn't hit this reuse race.
+        options = AsyncClientOptions(httpx_client=httpx.AsyncClient(http2=False))
+        client = await acreate_client(
+            settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY, options=options,
+        )
         log.info("Supabase client connected.")
         return client
     except Exception as e:
