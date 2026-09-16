@@ -104,7 +104,7 @@ class _Spy:
         self.blocked = blocked
         self.calls: list[str] = []
 
-    async def __call__(self, url: str) -> str | None:
+    async def __call__(self, url: str, **_kwargs: object) -> str | None:
         self.calls.append(url)
         if self.blocked:
             raise importer.PortalBlocked('bloqueado')
@@ -234,3 +234,170 @@ async def test_fetch_page_parses_whatever_tier_won(
     assert 'basura()' not in text          # scripts fuera del texto del LLM
     assert len(text) <= 8000               # el recorte del prompt sigue vigente
     assert any('foto1.jpg' in i for i in images)
+
+
+# ── Bloqueo probabilístico por IP: InmoBúsqueda ───────────────────────────────
+#
+# Verificado en vivo (2026-09-16) contra dos fichas reales de inmobusqueda.com.ar:
+# el PRIMER GET volvió con el interstitial `<title>No soy bot</title>` (Cloudflare
+# Turnstile + captcha de imagen) y los DIEZ siguientes, misma IP, mismos headers,
+# mismas URLs, volvieron la ficha completa. 10 OK / 0 bloqueos.
+#
+# La conclusión importa más que el número: el muro NO depende de la URL ni de los
+# headers, depende de la reputación de la IP de salida EN ESE MOMENTO. Y contra
+# eso la herramienta correcta es rotar la sesión del proxy —gratis, milisegundos—
+# y no escalar a un browser o, peor, pagar un actor de Apify.
+#
+# `_fetch_html_httpx` pide una sesión nueva en cada llamada, así que reintentar
+# ya implica salir por otra IP. Lo que faltaba era, simplemente, reintentar.
+
+
+class _FlakySpy:
+    """httpx que bloquea las primeras `fail_times` salidas y después pasa.
+
+    Registra `use_proxy` de cada intento: la escalera tiene que agotar el proxy
+    ANTES de probar directo, no al revés.
+    """
+
+    def __init__(self, fail_times: int, result: str | None = None) -> None:
+        self.fail_times = fail_times
+        self.result = result
+        self.calls: list[bool] = []
+
+    async def __call__(self, url: str, *, use_proxy: bool = True) -> str:
+        self.calls.append(use_proxy)
+        if len(self.calls) <= self.fail_times:
+            raise importer.PortalBlocked('El portal devolvió un challenge en vez de la ficha')
+        if self.result is None:
+            raise importer.PortalBlocked('El portal devolvió un challenge en vez de la ficha')
+        return self.result
+
+
+async def test_a_probabilistic_block_retries_on_a_fresh_exit_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un bloqueo aislado se resuelve con otra IP, no con un browser.
+
+    Éste es EL caso de InmoBúsqueda. Antes se rendía en el primer challenge y
+    mandaba el import a gastar Playwright y un run de Apify para nada.
+    """
+    tier1 = _FlakySpy(fail_times=1, result=_FICHA_HTML)
+    browser, actor = _Spy(_FICHA_HTML), _Spy(_FICHA_HTML)
+    monkeypatch.setattr(importer, '_fetch_html_httpx', tier1)
+    monkeypatch.setattr(importer, 'render_page_html', browser)
+    monkeypatch.setattr(importer, 'fetch_page_html_via_actor', actor)
+
+    assert await importer._fetch_html('https://www.inmobusqueda.com.ar/fib-x.html') == _FICHA_HTML
+    assert tier1.calls == [True, True]  # dos IPs residenciales distintas
+    assert browser.calls == []
+    assert actor.calls == []
+
+
+async def test_the_proxied_retries_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rotar es gratis, pero no infinito: un portal caído no puede colgar el request."""
+    tier1 = _FlakySpy(fail_times=99)
+    browser, actor = _Spy(_FICHA_HTML), _Spy(_FICHA_HTML)
+    monkeypatch.setattr(importer, '_fetch_html_httpx', tier1)
+    monkeypatch.setattr(importer, 'render_page_html', browser)
+    monkeypatch.setattr(importer, 'fetch_page_html_via_actor', actor)
+
+    await importer._fetch_html('https://www.inmobusqueda.com.ar/fib-x.html')
+    assert tier1.calls.count(True) == importer._HTTPX_PROXY_ATTEMPTS
+
+
+async def test_a_direct_attempt_runs_before_paying_for_a_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La IP del proxy puede estar quemada y la del server limpia.
+
+    Un GET más es gratis; el browser cuesta segundos y el actor cuesta plata.
+    """
+    tier1 = _FlakySpy(fail_times=importer._HTTPX_PROXY_ATTEMPTS, result=_FICHA_HTML)
+    browser, actor = _Spy(_FICHA_HTML), _Spy(_FICHA_HTML)
+    monkeypatch.setattr(importer, '_fetch_html_httpx', tier1)
+    monkeypatch.setattr(importer, 'render_page_html', browser)
+    monkeypatch.setattr(importer, 'fetch_page_html_via_actor', actor)
+
+    assert await importer._fetch_html('https://www.inmobusqueda.com.ar/fib-x.html') == _FICHA_HTML
+    assert tier1.calls[-1] is False  # el último intento salió sin proxy
+    assert browser.calls == []
+    assert actor.calls == []
+
+
+async def test_a_dead_proxy_does_not_burn_the_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cuenta de proxy sin crédito: rotar la sesión no la va a recargar.
+
+    Antes un `ProxyError` ni siquiera se capturaba y mataba el import entero
+    sin probar browser ni actor — un fallo de NUESTRA infra reportado al
+    usuario como si el portal lo hubiera bloqueado.
+    """
+    calls: list[bool] = []
+
+    async def proxy_caido(url: str, *, use_proxy: bool = True) -> str:
+        calls.append(use_proxy)
+        if use_proxy:
+            raise httpx.ProxyError('407 Proxy Authentication Required')
+        return _FICHA_HTML
+
+    avisado: list[str | None] = []
+
+    async def chequear_limite(proxy_url: str | None) -> None:
+        avisado.append(proxy_url)
+
+    monkeypatch.setattr(importer, '_fetch_html_httpx', proxy_caido)
+    monkeypatch.setattr(importer, 'check_apify_proxy_limit', chequear_limite)
+    monkeypatch.setattr(importer, 'render_page_html', _Spy(None))
+    monkeypatch.setattr(importer, 'fetch_page_html_via_actor', _Spy(None))
+
+    assert await importer._fetch_html('https://portal.com/ficha/1') == _FICHA_HTML
+    assert calls == [True, False]  # un intento proxied, corte, directo
+    # Una cuenta sin crédito tiene que salir como "recargá el proxy", no como
+    # "el portal te bloqueó": son dos acciones distintas para el usuario.
+    assert avisado == [importer.settings.SCRAPER_PROXY_URL]
+
+
+async def test_the_browser_goes_out_through_the_residential_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chromium lanzado pelado usa la IP de datacenter del contenedor.
+
+    Es la IP que los portales bloquean MÁS fuerte que la residencial que
+    veníamos de agotar (ver `apify._playwright_proxy`). Escalar a algo peor no
+    es escalar. El path de ZonaProp ya lo hacía bien; éste no.
+    """
+    recibido: dict[str, object] = {}
+
+    async def browser(url: str, **kwargs: object) -> str:
+        recibido.update(kwargs)
+        return _FICHA_HTML
+
+    monkeypatch.setattr(importer.settings, 'SCRAPER_PROXY_URL', 'http://user:pass@proxy.apify.com:8000')
+    monkeypatch.setattr(importer, '_fetch_html_httpx', _FlakySpy(fail_times=99))
+    monkeypatch.setattr(importer, 'render_page_html', browser)
+    monkeypatch.setattr(importer, 'fetch_page_html_via_actor', _Spy(None))
+
+    await importer._fetch_html('https://www.argenprop.com/x')
+    assert recibido.get('proxy') == {
+        'server': 'http://proxy.apify.com:8000', 'username': 'user', 'password': 'pass',
+    }
+
+
+async def test_the_blocked_error_names_the_antibot_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El mensaje tiene que decir QUÉ pasó y que reintentar es lo correcto.
+
+    Con un bloqueo por reputación de IP, reintentar es la acción acertada —
+    pero sólo si el texto se lo dice al usuario en vez de dejarlo adivinando.
+    """
+    monkeypatch.setattr(importer, '_fetch_html_httpx', _FlakySpy(fail_times=99))
+    monkeypatch.setattr(importer, 'render_page_html', _Spy(None))
+    monkeypatch.setattr(importer, 'fetch_page_html_via_actor', _Spy(None))
+
+    with pytest.raises(importer.PortalBlocked) as exc:
+        await importer._fetch_html('https://www.inmobusqueda.com.ar/fib-x.html')
+    mensaje = str(exc.value).lower()
+    assert 'verificaci' in mensaje  # "verificación antibot"
+    assert 'reintent' in mensaje

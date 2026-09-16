@@ -184,23 +184,64 @@ async def _fetch_html_httpx(url: str, *, use_proxy: bool = True) -> str:
     return html
 
 
+# Cuántas IPs residenciales se prueban antes de subir de escalón. Verificado en
+# vivo contra inmobusqueda.com.ar: su muro ("No soy bot" + Turnstile) NO depende
+# de la URL ni de los headers sino de la reputación de la IP de salida en ese
+# instante — el primer GET comió challenge y los diez siguientes, idénticos,
+# devolvieron la ficha entera. Rotar sesión cuesta milisegundos y cero dólares;
+# el browser cuesta segundos y el actor cuesta plata. Se rota ANTES de escalar.
+#
+# Tres y no más: si tres exits residenciales distintos comen el mismo muro, el
+# problema ya no es la IP y seguir rotando sólo hace esperar al usuario.
+_HTTPX_PROXY_ATTEMPTS = 3
+
+
 async def _fetch_html(url: str) -> str:
     """La ficha en HTML, escalando sólo lo necesario. Ver el bloque de arriba."""
     if is_zonaprop_url(url):
         return await _fetch_zonaprop_html(url)
+
+    # Tier 1a — varias IPs residenciales. Cada llamada pide una sesión nueva a
+    # Apify, así que reintentar YA significa salir por otra IP.
+    for _ in range(_HTTPX_PROXY_ATTEMPTS):
+        try:
+            return await _fetch_html_httpx(url)
+        except PortalBlocked:
+            continue
+        except httpx.ProxyError:
+            # El proxy nos rechaza a NOSOTROS (cuenta sin crédito, credenciales
+            # vencidas). Rotar la sesión no recarga la cuenta: cortar y seguir.
+            # Antes esto ni se capturaba y mataba el import entero — un fallo de
+            # nuestra infra reportado como si el portal nos hubiera bloqueado.
+            await check_apify_proxy_limit(settings.SCRAPER_PROXY_URL)
+            break
+
+    # Tier 1b — la IP del server. Un proxy caído o quemado no puede impedir leer
+    # una página pública, y un GET más sigue siendo más barato que un browser.
     try:
-        return await _fetch_html_httpx(url)
-    except PortalBlocked:
+        return await _fetch_html_httpx(url, use_proxy=False)
+    except (PortalBlocked, httpx.TransportError):
         pass
 
-    for fetch in (render_page_html, fetch_page_html_via_actor):
-        html = await fetch(url)
-        if html and not _looks_blocked(html):
-            return html
+    # Tier 2/3 — el browser sale por el MISMO proxy residencial: lanzado pelado
+    # usa la IP de datacenter del contenedor, que los portales bloquean más
+    # fuerte que la residencial que acabamos de agotar (ver _playwright_proxy).
+    # OJO: secuencial y con corte. Una tupla de awaits los evaluaría a los DOS
+    # antes de mirar el primero — o sea, pagando un run de Apify aunque el
+    # browser ya hubiera traído la ficha.
+    html = await render_page_html(url, proxy=_playwright_proxy(settings.SCRAPER_PROXY_URL))
+    if html and not _looks_blocked(html):
+        return html
+
+    html = await fetch_page_html_via_actor(url)
+    if html and not _looks_blocked(html):
+        return html
 
     raise PortalBlocked(
-        'El portal bloqueó todos los intentos (httpx, browser y Apify). '
-        'La propiedad puede existir igual — reintentá más tarde.'
+        f'El portal nos bloqueó pidiendo verificación antibot en los '
+        f'{_HTTPX_PROXY_ATTEMPTS + 1} intentos por httpx, en el browser y en Apify. '
+        'Suele ser transitorio y depende de la IP: la propiedad existe igual, '
+        'reintentá en un minuto.'
     )
 
 
