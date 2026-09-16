@@ -291,14 +291,15 @@ def _viewbox_for_propiedades(_row: dict[str, Any]) -> str:
     return LP_VIEWBOX  # entire cartera is Gran La Plata
 
 
-# (table, select, order-by, address builder, per-row viewbox) — both tables
-# share one run so the Nominatim rate budget is spent sequentially, never in
-# parallel.
+# (table, select, order-by, order-desc, address builder, per-row viewbox) — both
+# tables share one run so the Nominatim rate budget is spent sequentially, never
+# in parallel. `properties` orders newest-first so a fresh search's rows get
+# priority over any older backlog still stuck at `geocoded_at IS NULL`.
 _TABLES: list[tuple[
-    str, str, str, Callable[[dict[str, Any]], str | None], Callable[[dict[str, Any]], str],
+    str, str, str, bool, Callable[[dict[str, Any]], str | None], Callable[[dict[str, Any]], str],
 ]] = [
-    ('properties', 'id,direccion', 'created_at', _address_properties, _viewbox_for_properties),
-    ('propiedades', 'id,direccion,zona', 'id', _address_propiedades, _viewbox_for_propiedades),
+    ('properties', 'id,direccion', 'created_at', True, _address_properties, _viewbox_for_properties),
+    ('propiedades', 'id,direccion,zona', 'id', False, _address_propiedades, _viewbox_for_propiedades),
 ]
 
 _lock = asyncio.Lock()
@@ -347,9 +348,9 @@ async def run_backfill(sb: Any, *, limit: int = 200, force: bool = False) -> dic
         })
         try:
             async with httpx.AsyncClient() as client:
-                for table, select, order, build_address, viewbox_for in _TABLES:
+                for table, select, order, order_desc, build_address, viewbox_for in _TABLES:
                     aborted = await _backfill_table(
-                        sb, client, table=table, select=select, order=order,
+                        sb, client, table=table, select=select, order=order, order_desc=order_desc,
                         build_address=build_address, viewbox_for=viewbox_for,
                         limit=limit, force=force,
                     )
@@ -371,13 +372,14 @@ async def _backfill_table(
     table: str,
     select: str,
     order: str,
+    order_desc: bool,
     build_address: Callable[[dict[str, Any]], str | None],
     viewbox_for: Callable[[dict[str, Any]], str],
     limit: int,
     force: bool,
 ) -> str | None:
     """Geocode one table's pending rows; returns an abort reason on sustained throttling."""
-    query = sb.table(table).select(select).order(order).limit(limit)
+    query = sb.table(table).select(select).order(order, desc=order_desc).limit(limit)
     query = query.is_('lat', 'null') if force else query.is_('geocoded_at', 'null')
     res = await query.execute()
     rows: list[dict[str, Any]] = res.data or []

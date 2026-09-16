@@ -3472,7 +3472,9 @@ async def century21_gallery_from_url(url: str) -> list[str]:
     return urls[:_MAX_GALLERY]
 
 
-def _century21_matches_zona(item: Mapping[str, Any], filters: ScrapingFilters) -> bool:
+def _century21_matches_zona(
+    item: Mapping[str, Any], filters: ScrapingFilters, location: str = '',
+) -> bool:
     """¿Este aviso ESTÁ en la zona que se pidió?
 
     El filtro `en-municipio_`/`en-colonia_` es server-side y confiable, así que
@@ -3485,6 +3487,21 @@ def _century21_matches_zona(item: Mapping[str, Any], filters: ScrapingFilters) -
     `municipio` el partido), así que una zona compuesta puede exigirse
     completa contra el conjunto — que es lo que mantiene afuera a los
     homónimos.
+
+    `location` — el tramo de ubicación con el que se consultó — entra al
+    haystack porque hay un nivel que NO viaja en ningún campo del aviso: el
+    barrio CERRADO. C21 lo filtra server-side con `/en-division_grand-bell` y
+    después devuelve el aviso con `colonia: City Bell` y `division: null`; el
+    nombre del barrio cerrado no aparece en un solo campo del listado. Leyendo
+    sólo el aviso, la guarda descartaba las 12 casas de Grand Bell una por una
+    y la búsqueda terminaba en cero sin un motivo visible — el mismo tipo de
+    falla muda que ya trajo el User-Agent bloqueado.
+
+    Sumarlo no afloja la guarda, porque el tramo es la RESPUESTA del portal a
+    la zona consultada, no la pedida: cuando `zona_candidates` ensancha a la
+    localidad, el tramo pasa a ser `/en-municipio_gba-sur-la-plata`, que no
+    nombra a Grand Bell, y el partido entero se sigue descartando. Sólo pasa
+    lo que el portal filtró por el barrio que se pidió.
     """
     phrase_parts = [
         parts for parts in
@@ -3493,9 +3510,10 @@ def _century21_matches_zona(item: Mapping[str, Any], filters: ScrapingFilters) -
     ]
     if not phrase_parts:
         return True
-    haystack = _slugify(' '.join(
-        str(item.get(k) or '') for k in ('colonia', 'municipio', 'estado')
-    ))
+    haystack = _slugify(' '.join((
+        *(str(item.get(k) or '') for k in ('colonia', 'municipio', 'estado')),
+        location.replace('/', ' ').replace('_', ' '),
+    )))
     return any(all(part in haystack for part in parts) for parts in phrase_parts)
 
 
@@ -3537,7 +3555,7 @@ async def _scrape_century21(
             leidos += len(items)
 
             for item in items:
-                if not _century21_matches_zona(item, filters):
+                if not _century21_matches_zona(item, filters, location):
                     continue
                 prop = _norm_century21(item, filters.zona or loc_zona)
                 if prop is None:

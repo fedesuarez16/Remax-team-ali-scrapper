@@ -928,9 +928,11 @@ async def _upsert_properties(sb: Any, props: list[NormalizedProperty], job_id: s
 
     # Best-effort geocoding of newly ingested rows — fire-and-forget so it never
     # delays the SSE `done` event or fails the scraping run. The backfill lock
-    # makes concurrent kicks (multiple save_* calls in flight) a no-op.
+    # makes concurrent kicks (multiple save_* calls in flight) a no-op, and the
+    # `properties` query orders newest-first, so a generous limit here covers a
+    # typical search's whole batch in the one run that actually executes.
     from app.services.geocode import run_backfill
-    asyncio.ensure_future(run_backfill(sb, limit=50))
+    asyncio.ensure_future(run_backfill(sb, limit=150))
 
 
 async def _link_job_properties(

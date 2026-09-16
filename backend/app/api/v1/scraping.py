@@ -271,7 +271,7 @@ async def _read_job_inputs(sb: Any, job_id: str) -> dict[str, Any]:
     try:
         res = await (
             sb.table('scraping_jobs')
-            .select('localidades,polygon,source_selection,barrios_cerrados')
+            .select('localidades,polygon,source_selection,barrios_cerrados,query_raw')
             .eq('id', job_id)
             .execute()
         )
@@ -292,44 +292,108 @@ async def _read_job_inputs(sb: Any, job_id: str) -> dict[str, Any]:
         k: row[k] for k in ('localidades', 'polygon', 'source_selection') if row.get(k)
     }
 
-    # Ids → catalogue ROWS. `route_after_parse` needs `nombre`/`localidad`/
+    # Catalogue ROWS, never ids. `route_after_parse` needs `nombre`/`localidad`/
     # `aliases` to build a fan-out unit, and resolving them here rather than in
     # the graph keeps routing a pure function of its inputs — same reason
-    # `localidades` arrives resolved. The extra SELECT is skipped entirely when
-    # no barrio was picked, which is every search on the chat path.
-    if barrio_ids := row.get('barrios_cerrados'):
-        try:
-            barrios = await (
-                sb.table('barrios_cerrados').select('*').in_('id', barrio_ids).execute()
-            )
-            rows = barrios.data or []
-            if rows:
-                # Each barrio carries its own confirmed portal refs, because
-                # `route_after_parse` decides the resolver override off
-                # `portal_refs`. Without them the probe is decorative: the
-                # search walks the candidate chain and never uses the native
-                # page the probe already found.
-                #
-                # A failure here degrades to "no refs", never to "no barrio":
-                # losing the refs costs efficiency (the chain still finds the
-                # listings), losing the barrio costs the whole search.
-                por_barrio: dict[str, list[dict]] = {}
-                try:
-                    refs = await (
-                        sb.table('barrio_cerrado_portal_refs')
-                        .select('*').in_('barrio_id', barrio_ids).execute()
-                    )
-                    for ref in refs.data or []:
-                        por_barrio.setdefault(str(ref.get('barrio_id')), []).append(ref)
-                except Exception:
-                    pass
-                inputs['barrios_cerrados'] = [
-                    {**row, 'portal_refs': por_barrio.get(str(row.get('id')), [])}
-                    for row in rows
-                ]
-        except Exception:
-            pass  # catalogue unavailable → an ordinary zona search, not a 500
+    # `localidades` arrives resolved.
+    #
+    # Two ways in, and the explicit one wins: ids picked by the operator name a
+    # concrete row, and guessing from text on top of that would override a
+    # decision that was already made.
+    try:
+        barrios = (
+            await _barrios_por_id(sb, barrio_ids)
+            if (barrio_ids := row.get('barrios_cerrados'))
+            else await _barrios_nombrados_en(sb, str(row.get('query_raw') or ''))
+        )
+        if barrios:
+            inputs['barrios_cerrados'] = await _con_portal_refs(sb, barrios)
+    except Exception:
+        pass  # catalogue unavailable → an ordinary zona search, not a 500
     return inputs
+
+
+async def _barrios_por_id(sb: Any, barrio_ids: list[str]) -> list[dict]:
+    res = await sb.table('barrios_cerrados').select('*').in_('id', barrio_ids).execute()
+    return res.data or []
+
+
+async def _barrios_nombrados_en(sb: Any, query: str) -> list[dict]:
+    """The catalogue rows this query NAMES, matched on the barrio's aliases.
+
+    WHY THE TEXT AND NOT A PICKER. `barrios_cerrados` only ever arrived as
+    explicit ids in the start body, and nothing in the frontend sends them —
+    the body carries `query`, `polygon`, `localidades` and `source_selection`,
+    full stop. So the catalogue, probe included, was built and wired to
+    nothing: filing a club de campo could not change a single search.
+
+    What the row supplies is the one fact no parser can derive: the localidad
+    that CONTAINS the barrio. Free text alone gives `zona_candidates` a
+    one-link chain ("club de campo miralagos" and nowhere to fall back to), and
+    a portal that misses it returns nothing at all; `barrio_zona` splices the
+    localidad back in and the chain gets its second link.
+
+    Matching runs on `barrio_aliases`, which already expands the identity into
+    the forms a person actually types — nobody says "Miralagos" on its own,
+    they say "el club de campo Miralagos" — and `barrio_matches` anchors on
+    word boundaries so "El Rodeo" cannot swallow "Rodeo de la Cruz".
+
+    HOMONYMS ARE NOT GUESSED. Two rows sharing a name means the text cannot
+    choose between them, and choosing wrong sends the search to another
+    province. Both are dropped and the search stays an ordinary zona search —
+    exactly what it was before this existed. Naming two DIFFERENT barrios is
+    not that: the fan-out already iterates the list, so both are searched.
+
+    The cost is one SELECT per search on a table that holds a handful of rows,
+    on the path that previously skipped it. That is the price of the catalogue
+    being reachable at all from the only entry point the product actually uses.
+    """
+    if not query.strip():
+        return []
+    from app.services.barrio_cerrado import barrio_aliases, barrio_matches
+
+    res = await sb.table('barrios_cerrados').select('*').eq('activo', True).execute()
+    nombrados = [
+        row for row in (res.data or [])
+        if barrio_matches(query, barrio_aliases(
+            str(row.get('nombre') or ''), row.get('aliases') or []))
+    ]
+    from collections import Counter
+    veces = Counter(_norm_nombre(row) for row in nombrados)
+    return [row for row in nombrados if veces[_norm_nombre(row)] == 1]
+
+
+def _norm_nombre(row: dict) -> str:
+    from app.services.zona import normalize_address
+
+    return normalize_address(str(row.get('nombre') or ''))
+
+
+async def _con_portal_refs(sb: Any, barrios: list[dict]) -> list[dict]:
+    """Each barrio with its own confirmed portal refs attached.
+
+    `route_after_parse` decides the resolver override off `portal_refs`.
+    Without them the probe is decorative: the search walks the candidate chain
+    and never uses the native page the probe already found.
+
+    A failure here degrades to "no refs", never to "no barrio": losing the refs
+    costs efficiency (the chain still finds the listings), losing the barrio
+    costs the whole search.
+    """
+    por_barrio: dict[str, list[dict]] = {}
+    try:
+        refs = await (
+            sb.table('barrio_cerrado_portal_refs')
+            .select('*').in_('barrio_id', [b.get('id') for b in barrios]).execute()
+        )
+        for ref in refs.data or []:
+            por_barrio.setdefault(str(ref.get('barrio_id')), []).append(ref)
+    except Exception:
+        pass
+    return [
+        {**b, 'portal_refs': por_barrio.get(str(b.get('id')), [])}
+        for b in barrios
+    ]
 
 
 async def _stream_graph_events(

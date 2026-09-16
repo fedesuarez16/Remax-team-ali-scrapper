@@ -296,6 +296,49 @@ def test_la_guarda_acepta_el_barrio_por_colonia() -> None:
     assert _century21_matches_zona(item, filters)
 
 
+def test_la_guarda_acepta_el_barrio_cerrado_por_el_tramo_de_ubicacion() -> None:
+    """Un barrio CERRADO no vive en ningún campo del aviso.
+
+    C21 lo filtra server-side con `/en-division_grand-bell`, pero después
+    devuelve el aviso con `colonia: City Bell` y `division: null` — el nombre
+    del barrio cerrado no aparece en un solo campo del listado. La guarda, que
+    sólo miraba `colonia/municipio/estado`, descartaba las 12 casas de Grand
+    Bell una por una y la búsqueda terminaba en cero sin un motivo visible.
+
+    El tramo de ubicación ES la respuesta del portal a la pregunta que se hizo:
+    si dice `en-division_grand-bell`, esos avisos están en Grand Bell aunque
+    ningún campo lo repita.
+    """
+    item = {**_RESULT, 'colonia': 'City Bell', 'municipio': 'La Plata',
+            'division': None}
+    filters = ScrapingFilters(zona='Grand Bell', zona_pedida='Grand Bell')
+    location = ('/en-pais_argentina/en-estado_gba-sur'
+                '/en-municipio_gba-sur-la-plata/en-colonia_city-bell'
+                '/en-division_grand-bell')
+    assert _century21_matches_zona(item, filters, location)
+
+
+def test_la_guarda_sigue_rechazando_cuando_la_ubicacion_se_ensancho() -> None:
+    """El caso que la guarda existe para atrapar, ahora con ubicación.
+
+    Cuando el barrio cerrado no resuelve, `zona_candidates` ensancha a la
+    localidad y el tramo pasa a ser `/en-municipio_gba-sur-la-plata`. Ese tramo
+    NO nombra a Grand Bell, así que sumarlo al haystack no afloja nada: los
+    avisos del partido entero se siguen descartando.
+    """
+    item = {**_RESULT, 'colonia': 'City Bell', 'municipio': 'La Plata'}
+    filters = ScrapingFilters(zona='La Plata', zona_pedida='Grand Bell')
+    location = '/en-pais_argentina/en-estado_gba-sur/en-municipio_gba-sur-la-plata'
+    assert not _century21_matches_zona(item, filters, location)
+
+
+def test_la_guarda_sin_ubicacion_se_comporta_igual_que_antes() -> None:
+    """`location` es opcional: sin él la guarda lee sólo el aviso."""
+    item = {**_RESULT, 'colonia': 'City Bell', 'municipio': 'La Plata'}
+    filters = ScrapingFilters(zona='Grand Bell', zona_pedida='Grand Bell')
+    assert not _century21_matches_zona(item, filters)
+
+
 # ── Paginación ────────────────────────────────────────────────────────────────
 
 def test_el_techo_de_paginas_es_el_del_portal() -> None:

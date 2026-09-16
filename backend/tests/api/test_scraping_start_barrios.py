@@ -126,19 +126,44 @@ class TestElStreamInyectaLasFilas:
         inputs = await _read_job_inputs(sb, 'job-1')
         assert [b['nombre'] for b in inputs['barrios_cerrados']] == ['Grand Bell']
 
-    async def test_un_job_sin_barrios_no_toca_el_catalogo(self, sb):
-        """Un SELECT de más por búsqueda, en el camino que NUNCA usa barrios,
-        es puro costo. La clave ausente también deja `inputs` byte-idéntico al
-        de antes de este cambio, que es lo que protege al camino de chat."""
+    async def test_un_job_sin_barrios_ni_query_no_toca_el_catalogo(self, sb):
+        """Sin ids Y sin texto contra el que matchear, el catálogo no se lee.
+
+        La premisa de este test cambió cuando el texto de la query pasó a
+        aplicar el catálogo solo (ver `test_scraping_autodetect_barrios`): un
+        job CON `query_raw` sí lo consulta ahora, y debe hacerlo — era la única
+        forma de que dar de alta un barrio cambiara alguna búsqueda. Lo que se
+        sostiene es que sin nada que matchear no se gasta el SELECT, y que la
+        clave queda AUSENTE, que es lo que deja `inputs` byte-idéntico para el
+        camino que no busca barrios.
+        """
+        from app.api.v1.scraping import _read_job_inputs
+
+        sb.rows['scraping_jobs'] = [{
+            'id': 'job-1', 'localidades': ['City Bell'], 'polygon': None,
+            'source_selection': None, 'barrios_cerrados': None, 'query_raw': '',
+        }]
+        inputs = await _read_job_inputs(sb, 'job-1')
+        assert 'barrios_cerrados' not in inputs
+        assert ('barrios_cerrados', '*') not in sb.selects
+
+    async def test_una_query_que_no_nombra_barrios_consulta_pero_no_inyecta(self, sb):
+        """El SELECT se paga; la inyección no ocurre. Ese es el trade real de
+        tener el catálogo enchufado al camino de chat."""
         from app.api.v1.scraping import _read_job_inputs
 
         sb.rows['scraping_jobs'] = [{
             'id': 'job-1', 'localidades': ['City Bell'], 'polygon': None,
             'source_selection': None, 'barrios_cerrados': None,
+            'query_raw': 'casas en venta en City Bell',
         }]
+        sb.rows['barrios_cerrados'] = [
+            {'id': 'b1', 'nombre': 'Grand Bell', 'localidad': 'City Bell, La Plata',
+             'aliases': [], 'activo': True},
+        ]
         inputs = await _read_job_inputs(sb, 'job-1')
         assert 'barrios_cerrados' not in inputs
-        assert ('barrios_cerrados', '*') not in sb.selects
+        assert ('barrios_cerrados', '*') in sb.selects
 
 
 class TestLaColumnaPuedeNoExistirTodavia:

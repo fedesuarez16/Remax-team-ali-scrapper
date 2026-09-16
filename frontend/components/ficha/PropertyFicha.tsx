@@ -17,7 +17,7 @@ function Spec({ label, value }: { label: string; value: string }) {
   // min-w-0 + break-words: los "destacados" del LLM traen valores libres que
   // pueden ser largos — envuelven dentro de la card, nunca se pisan entre sí.
   return (
-    <div className="min-w-0 rounded-xl bg-muted/60 px-3 py-3">
+    <div className="min-w-0 rounded-xl bg-muted/60 px-3 py-3 print:py-2">
       <p className="break-words text-[10px] uppercase tracking-wider text-muted-foreground">{label}</p>
       <p className="mt-1 break-words text-base font-semibold leading-snug text-foreground">{value}</p>
     </div>
@@ -42,7 +42,7 @@ export function PropertyFicha({ p }: { p: Property }) {
 
   return (
     <article className="overflow-hidden rounded-3xl border border-border bg-card shadow-sm print:overflow-visible print:break-inside-avoid print:shadow-none">
-      <header className="flex flex-wrap items-center justify-between gap-2 px-5 py-4 sm:px-6">
+      <header className="flex flex-wrap items-center justify-between gap-2 px-5 py-4 sm:px-6 print:py-2">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.2em]">Team Alí</p>
           <p className="mt-0.5 text-[11px] text-muted-foreground">{agente.inmobiliaria}</p>
@@ -54,7 +54,7 @@ export function PropertyFicha({ p }: { p: Property }) {
 
       <FichaGallery images={p.imagenes ?? []} title={p.titulo ?? p.direccion} compact />
 
-      <div className="space-y-5 p-5 sm:p-6">
+      <div className="space-y-5 p-5 sm:p-6 print:space-y-3 print:p-4">
         <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
           <div className="min-w-0 flex-1 basis-56">
             <h2 className="break-words text-xl font-semibold leading-snug tracking-tight sm:text-2xl">{p.titulo || p.direccion || 'Propiedad seleccionada'}</h2>
@@ -87,7 +87,7 @@ export function PropertyFicha({ p }: { p: Property }) {
         )}
       </div>
 
-      <footer className="border-t border-border bg-muted/30 p-5 sm:p-6">
+      <footer className="border-t border-border bg-muted/30 p-5 sm:p-6 print:p-4">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex min-w-0 items-center gap-3">
             <AgentAvatar agente={agente} className="size-16" />
