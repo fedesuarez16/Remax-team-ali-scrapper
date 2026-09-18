@@ -129,7 +129,7 @@ export const AGENTES: readonly Agente[] = [
   },
   {
     nombre: 'Nahir Alí',
-    foto: null,
+    foto: '/agents/nahir-ali.jpeg',
     inmobiliaria: 'RE/MAX Diagonal II',
     cargo: 'Agente Inmobiliario',
     telefono: '+54 9 221 477 0661',
