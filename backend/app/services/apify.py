@@ -1863,8 +1863,11 @@ def _parse_inmobusqueda_page(html: str, filters: ScrapingFilters) -> list[RawPro
         descripcion = desc_el.get_text(' ', strip=True) if desc_el else None
 
         # Photoless listings render the agency's "sin fotos" placeholder.
+        # Las tarjetas sirven `/x200/` (200x150): se normaliza acá para que la
+        # propiedad entre al catálogo con el original y no arrastre la miniatura
+        # hasta la ficha. Ver `_full_size_image_url`.
         imagenes = [
-            src for img in card.select('img.FotoBox')
+            _full_size_image_url(src) for img in card.select('img.FotoBox')
             if (src := str(img.get('src') or '').strip()).startswith('http')
             and 'sinfotos' not in src
         ]
@@ -3874,6 +3877,39 @@ def _url_dir(url: str) -> str:
     return url.rsplit('/', 1)[0] if '/' in url else url
 
 
+# ── Miniaturas vs. original ──────────────────────────────────────────────────
+#
+# InmoBúsqueda sirve la galería de la ficha en `/x100/` (100x75, ~2 KB) y la del
+# listado en `/x200/` (200x150). El original vive en la MISMA ruta sin ese
+# segmento: `/x100/foo.jpg` -> `/foo.jpg` da 1280x959. Medido en vivo sobre dos
+# avisos reales; las dos variantes responden 200.
+#
+# Se normaliza al momento de juntar las URLs, no al mostrarlas, por tres efectos
+# que sólo se consiguen ahí:
+#   1. la ficha guarda el original en vez de una miniatura estirada;
+#   2. el og:image (que ya apunta al original) deja de duplicar a su propia
+#      miniatura, porque tras normalizar son la misma cadena;
+#   3. `anchor_to_og` vuelve a agrupar: la miniatura colgaba de `.../512291/x100/`
+#      y el og:image de `.../512291/`, no coincidían, el anclaje se desactivaba y
+#      pasaban los íconos del sitio como si fueran fotos del inmueble.
+#
+# Acotado al CDN de InmoBúsqueda a propósito: en otro host `/x100/` puede ser un
+# directorio de verdad, y reescribirlo a ciegas devolvería 404. Una ficha sin
+# fotos es peor que una pixelada.
+_INMOBUSQUEDA_CDN = 'inmobusqueda.com'
+_RESIZE_SEGMENT_RE = re.compile(r'/x\d+/')
+
+
+def _full_size_image_url(url: str) -> str:
+    """La foto original detrás de una miniatura de un CDN conocido."""
+    from urllib.parse import urlparse
+
+    host = urlparse(url).netloc.lower()
+    if host.endswith(_INMOBUSQUEDA_CDN):
+        return _RESIZE_SEGMENT_RE.sub('/', url, count=1)
+    return url
+
+
 def _extract_images_from_html(html: str, base: str, anchor_to_og: bool = False) -> list[str]:
     """Property photos visible in server HTML: og:image/twitter:image metas plus
     content <img> tags (honoring lazy-load attrs and srcset) and inline
@@ -3906,6 +3942,7 @@ def _extract_images_from_html(html: str, base: str, anchor_to_og: bool = False) 
         if not src or src.startswith('data:'):
             return
         full = src if src.startswith('http') else base.rstrip('/') + '/' + src.lstrip('/')
+        full = _full_size_image_url(full)
         low = full.lower()
         if not any(ext in low for ext in ('.jpg', '.jpeg', '.png', '.webp')):
             return
