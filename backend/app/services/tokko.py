@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import unicodedata
 from collections.abc import Awaitable, Callable
@@ -35,6 +36,7 @@ _LABEL_TYPES: dict[str, TipoPropiedad] = {
 _LABEL_OPERATIONS: dict[str, TipoOperacion] = {
     'venta': 'venta', 'alquiler': 'alquiler', 'alquiler temporario': 'alquiler_temp',
 }
+_log = logging.getLogger(__name__)
 
 
 def _plain(value: str) -> str:
@@ -171,6 +173,7 @@ def parse_listing(html: str, source: SearchSource) -> list[RawProperty]:
             return []
         raise ValueError(f'{source.name}: no se reconoció el listado de propiedades.')
     results = []
+    malformed = 0
     for card in cards:
         link = card if card.name == 'a' and str(card.get('href') or '').startswith('/p/') \
             else card.select_one('a[href^="/p/"]')
@@ -187,7 +190,8 @@ def parse_listing(html: str, source: SearchSource) -> list[RawProperty]:
             operation_text = _text(card, '.prop_operation')
             operation_match = re.match(r'(Alquiler Temporario|Alquiler|Venta)\b', operation_text, re.I)
             if not classic_match or not operation_match:
-                raise ValueError(f'{source.name}: cambió el formato de una tarjeta.')
+                malformed += 1
+                continue
             kind, location = classic_match.groups()
             operation = operation_match.group(1)
             street = _text(card, '.prop_titulo')
@@ -204,12 +208,14 @@ def parse_listing(html: str, source: SearchSource) -> list[RawProperty]:
             image = card.select_one('img.img-whp')
             title = _text(card, '.prop-title') or f'{kind} en {operation} en {location}'
         if not kind or not operation or not location or not link:
-            raise ValueError(f'{source.name}: cambió el formato de una tarjeta.')
+            malformed += 1
+            continue
         # Unscoped listings can say "Venta / Alquiler" but display only the
         # first operation's price. Never attach that sale price to a rental.
         operation = ' '.join(operation.split('/')[0].lower().split())
         if operation not in _LABEL_OPERATIONS:
-            raise ValueError(f'{source.name}: no se reconoció la operación publicada.')
+            malformed += 1
+            continue
         price_text = ' '.join(str(t) for t in price_box.find_all(string=True, recursive=False)) \
             if price_box else ''
         currency: Moneda = 'USD' if re.search(r'USD|U\$S|US\$', price_text, re.I) else 'ARS'
@@ -237,6 +243,13 @@ def parse_listing(html: str, source: SearchSource) -> list[RawProperty]:
             raw=raw,
         )
         results.append(prop)
+    if not results and malformed:
+        raise ValueError(f'{source.name}: cambió el formato de las tarjetas.')
+    if malformed:
+        _log.warning(
+            '%s: se ignoraron %d tarjetas con formato inesperado y se conservaron %d',
+            source.name, malformed, len(results),
+        )
     return results
 
 

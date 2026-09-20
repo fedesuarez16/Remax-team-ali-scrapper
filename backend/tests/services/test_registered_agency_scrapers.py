@@ -195,6 +195,20 @@ def test_current_tokko_template_parses_location_facts_detail_and_gallery():
     assert detailed.amenities == ['Jardín', 'Parrilla']
 
 
+def test_one_malformed_card_does_not_discard_the_whole_tokko_page():
+    malformed = '''
+    <div prop-id="999">
+      <div class="prop_dir">Casa en City Bell</div>
+      <div class="prop_operation">Consultar</div>
+    </div>
+    '''
+
+    props = parse_listing(current_card() + malformed, source_by_id('kwsuma'))
+
+    assert len(props) == 1
+    assert props[0].raw['listing_id'] == '200'
+
+
 def test_classic_tokko_template_parses_exact_location_and_card_facts():
     prop = parse_listing(classic_card(), source_by_id('keymex'))[0]
     assert prop.fuente == 'keymex'
