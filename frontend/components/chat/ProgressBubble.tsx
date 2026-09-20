@@ -8,6 +8,13 @@ const LABEL: Record<string, string> = {
   inmobiliarias: 'Inmobiliarias',
   mauroperri: 'Mauro Perri',
   urquiza: 'Urquiza Propiedades',
+  kwsuma: 'KW Suma',
+  dacalbr: 'Dacal Bienes Raíces',
+  keymex: 'Keymex La Plata',
+  albertodacal: 'Alberto Dacal',
+  remaxroble: 'RE/MAX Roble',
+  axion: 'Axion Group',
+  sabella: 'Sabella Propiedades',
   inmobusqueda: 'InmoBúsqueda',
   extraccion: 'Analizando páginas',
 }

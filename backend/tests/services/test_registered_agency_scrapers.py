@@ -29,6 +29,17 @@ LOCATIONS = [
      'parent_name': 'La Plata'},
 ]
 CATALOG = f'<script>var locations_response = {json.dumps(LOCATIONS)}\nload_locations();</script>'
+TREE_CATALOG = '''<script>var locations_response = [{
+  "location_id": 1, "location_name": "Argentina", "children": [{
+    "location_id": 149, "location_name": "G.B.A. Zona Sur", "children": [{
+      "location_id": 26499, "location_name": "La Plata", "children": [
+        {"count": 86, "location_id": 26514, "location_name": "City Bell"},
+        {"count": 299, "location_id": 26520, "location_name": "La Plata"},
+        {"count": 46, "location_id": 26532, "location_name": "Manuel B Gonnet"}
+      ]
+    }]
+  }]
+}];</script>'''
 DETAIL = '''
 <div id="ficha_desc">
  <ul id="lista_informacion_basica">
@@ -44,6 +55,31 @@ DETAIL = '''
 <img class="zoomImg" src="https://static.tokkobroker.com/pictures/test-house-a.jpg">
 <section id="seccion-similares"><img src="https://example.com/another-house.jpg"></section>
 '''
+CURRENT_DETAIL = '''
+<div class="additional_details prop-list-title-value prop-details-cont">
+  <div class="prop-detail-col"><ul class="list-inline-item"><li><p>Dormitorios:</p></li></ul>
+    <ul class="list-inline-item"><li><p><span>3</span></p></li></ul></div>
+  <div class="prop-detail-col"><ul class="list-inline-item"><li><p>Baños:</p></li></ul>
+    <ul class="list-inline-item"><li><p><span>2</span></p></li></ul></div>
+</div>
+<div class="additional_details prop-list-title-value"><div class="row">
+  <div class="col-md-4 col-lg-4 col-xl-4">
+    <ul class="list-inline-item"><li><p>Cubierta:</p></li></ul>
+    <ul class="list-inline-item"><li><p><span>140 m²</span></p></li></ul>
+  </div>
+  <div class="col-md-4 col-lg-4 col-xl-4">
+    <ul class="list-inline-item"><li><p>Total Construido:</p></li></ul>
+    <ul class="list-inline-item"><li><p><span>180 m²</span></p></li></ul>
+  </div>
+</div></div>
+<div class="full-description">Casa con <b>jardín</b>.</div>
+<div class="dev-photo-carousel"><div class="m-pswp-gallery">
+  <a class="pswp-elem" href="https://static.tokkobroker.com/pictures/current-a.jpg"></a>
+  <a class="pswp-elem" href="https://static.tokkobroker.com/pictures/current-b.jpg"></a>
+  <a class="pswp-elem" href="https://static.tokkobroker.com/pictures/current-a.jpg"></a>
+</div></div>
+<div class="prop-check-list"><ul class="order_list"><li>Jardín</li><li>Parrilla</li></ul></div>
+'''
 
 
 def card(listing_id=100, *, operation='Venta', kind='Casa', location='City Bell, La Plata',
@@ -58,9 +94,42 @@ def card(listing_id=100, *, operation='Venta', kind='Casa', location='City Bell,
     </li>'''
 
 
+def current_card(listing_id=200, *, location='City Bell, La Plata') -> str:
+    street = '476 esquina 132 bis'
+    return f'''<div class="col-12 col-md-6 col-lg-12" prop-id="{listing_id}">
+      <a class="item card-prop-short-wide" href="/p/{listing_id}-Casa-en-Venta-en-City-Bell">
+        <img class="img-whp" src="https://static.tokkobroker.com/pictures/current-cover.jpg"
+             alt="Foto Casa en Venta en {location} {street}">
+        <li class="prop-card-operation-tag">Venta</li>
+        <div class="price-list-tag">USD120.000</div>
+        <p class="text-thm">Casa</p><h4 class="prop-title">Casa de prueba</h4>
+        <p><span class="flaticon-placeholder"></span> {street}</p>
+        <ul class="prop_details"><li>Superficie cubierta: 130 m²</li>
+          <li>Ambientes: 4</li><li>Dormitorios: 3</li></ul>
+      </a>
+    </div>'''
+
+
+def classic_card(listing_id=300) -> str:
+    return f'''<a href="/p/{listing_id}-Casa-en-Venta-en-City-Bell" prop-id="{listing_id}">
+      <div class="propiedad">
+        <div class="prop_img"><img src="https://static.tokkobroker.com/w_pics/cover.jpg"></div>
+        <div class="prop_dir">Casa en City Bell, La Plata</div>
+        <div class="prop_titulo">465 e/ 15a y 17</div>
+        <div class="prop_operation">VENTA USD220.000</div>
+        <div class="prop_datos"><div class="prop_dato">Total construido: 180 m²</div>
+          <div class="prop_dato">Dormitorios: 3</div>
+          <div class="prop_dato">Ambientes: 4</div><div class="prop_dato">Baños: 2</div>
+          <div class="prop_dato">Cocheras: 1</div></div>
+      </div>
+    </a>'''
+
+
 @pytest.mark.parametrize(('url', 'expected'), [
     ('https://www.mauroperribienesraices.com.ar/', 'mauroperri'),
     ('http://urquiza.com.ar/Venta', 'urquiza'),
+    ('https://www.kwsuma.com.ar/Propiedades', 'kwsuma'),
+    ('https://keymexlaplata.com.ar/Buscar?operation=1', 'keymex'),
     ('https://www.inmobusqueda.com.ar/', 'inmobusqueda'),
     ('https://www.inmobusqueda.com.ar/inmobiliaria-123', None),
     ('https://urquiza.com.ar.evil.example/', None),
@@ -83,6 +152,13 @@ def test_location_resolution_uses_catalogue_and_ancestry(zona, expected):
     assert resolve_location(location_catalog(CATALOG), zona) == expected
 
 
+@pytest.mark.parametrize(('zona', 'expected'), [
+    ('City Bell, La Plata', '26514'), ('La Plata', '26520'), ('Gonnet', '26532'),
+])
+def test_nested_location_catalogue_uses_the_exact_city_id(zona, expected):
+    assert resolve_location(location_catalog(TREE_CATALOG), zona) == expected
+
+
 def test_ambiguous_location_requires_a_parent():
     rows = LOCATIONS + [{'location_id': 9, 'location_name': 'City Bell',
                          'parent_id': 8, 'parent_name': 'Otra provincia'}]
@@ -100,6 +176,46 @@ def test_detail_owns_its_gallery_and_distinguishes_rooms_and_bedrooms():
     assert len(prop.imagenes) == 2
     assert all('test-house' in url for url in prop.imagenes)
     assert '<br>' not in prop.descripcion
+
+
+def test_current_tokko_template_parses_location_facts_detail_and_gallery():
+    prop = parse_listing(current_card(), source_by_id('kwsuma'))[0]
+    assert prop.fuente == 'kwsuma'
+    assert prop.direccion == '476 esquina 132 bis, City Bell, La Plata'
+    assert (prop.precio, prop.ambientes, prop.raw['dormitorios']) == (120000, 4, 3)
+    assert prop.m2_cubiertos == 130
+
+    detailed = parse_detail(CURRENT_DETAIL, prop)
+    assert (detailed.banos, detailed.m2_cubiertos, detailed.m2_total) == (2, 140, 180)
+    assert detailed.descripcion == 'Casa con jardín .'
+    assert detailed.imagenes == [
+        'https://static.tokkobroker.com/pictures/current-a.jpg',
+        'https://static.tokkobroker.com/pictures/current-b.jpg',
+    ]
+    assert detailed.amenities == ['Jardín', 'Parrilla']
+
+
+def test_classic_tokko_template_parses_exact_location_and_card_facts():
+    prop = parse_listing(classic_card(), source_by_id('keymex'))[0]
+    assert prop.fuente == 'keymex'
+    assert prop.direccion == '465 e/ 15a y 17, City Bell, La Plata'
+    assert (prop.precio, prop.ambientes, prop.banos, prop.cocheras) == (220000, 4, 2, 1)
+    assert (prop.raw['dormitorios'], prop.m2_total) == (3, 180)
+    assert prop.imagenes == ['https://static.tokkobroker.com/w_pics/cover.jpg']
+
+
+def test_keymex_static_catalogue_resolves_reviewed_la_plata_locations():
+    source = source_by_id('keymex')
+    rows = [
+        {'location_id': row[0], 'location_name': row[1],
+         'parent_id': row[2], 'parent_name': row[3]}
+        for row in source.locations
+    ]
+    assert resolve_location(rows, 'City Bell, La Plata') == '26514'
+    assert resolve_location(rows, 'Gonnet') == '26532'
+    assert resolve_location(rows, 'Villa Elisa') == '26539'
+    assert resolve_location(rows, 'Grand Bell, City Bell, La Plata') == '26503'
+    assert resolve_location(rows, 'City Bell, Córdoba') is None
 
 
 def test_consultar_never_parses_the_listing_code_as_the_price():
@@ -151,7 +267,7 @@ def mock_client(monkeypatch, handler):
     return requests
 
 
-@pytest.mark.parametrize('source_id', ['mauroperri', 'urquiza'])
+@pytest.mark.parametrize('source_id', ['mauroperri', 'urquiza', 'kwsuma', 'keymex'])
 async def test_scraper_walks_beyond_an_unmatched_page_and_fetches_only_own_details(
     monkeypatch, source_id,
 ):

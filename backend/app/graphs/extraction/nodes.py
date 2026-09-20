@@ -230,15 +230,20 @@ def _read_selection(state: ScrapingState) -> dict[str, Any]:
     """Normalize the user's pre-search source pick (`POST /scraping/start` →
     `source_selection` on the job row → graph `inputs`).
 
-    An absent key means "search everything", which is what every caller did
-    before the selector existed — so legacy job rows and the map flow behave
-    exactly as they always did."""
+    An absent key preserves the historical discovery flow for jobs created
+    before the precise registry existed. New chat and map requests always send
+    `inmobiliarias`, even when its empty value means "all ten"."""
     sel = state.get('source_selection') or {}
     zona = (sel.get('zona_inmobiliarias') or '').strip()
     return {
         'buscar_portales': bool(sel.get('buscar_portales', True)),
         'portales': [str(p) for p in (sel.get('portales') or [])],
         'buscar_inmobiliarias': bool(sel.get('buscar_inmobiliarias', True)),
+        'inmobiliarias': [str(source) for source in (sel.get('inmobiliarias') or [])],
+        # Jobs anteriores a esta lista conservan el flujo histórico. Toda
+        # búsqueda nueva creada por /start trae la clave y usa únicamente el
+        # catálogo revisado de source_registry.
+        'registro_preciso': 'inmobiliarias' in sel,
         'zona_inmobiliarias': zona or None,
         'solo_fuentes_cargadas': bool(sel.get('solo_fuentes_cargadas', False)),
     }
@@ -249,10 +254,11 @@ def _hay_que_descubrir_agencias(selection: dict[str, Any]) -> bool:
 
     El descubrimiento es lo que llena la búsqueda de inmobiliarias que nadie
     eligió — 390 en una zona — con todo lo que cuesta scrapearlas y
-    analizarlas. Se apaga en tres casos, y conviene que estén juntos y con
+    analizarlas. Se apaga en cuatro casos, y conviene que estén juntos y con
     nombre:
 
     - no se buscan inmobiliarias en absoluto;
+    - la búsqueda nueva usa el registro preciso, que ya define sus fuentes;
     - `solo_fuentes_cargadas`: el operador pidió su registro y nada más;
     - hay una `zona_inmobiliarias` elegida, que ya significaba "consultá sólo
       lo que clasifiqué en esa zona". Ese caso funcionaba de rebote, como
@@ -260,6 +266,8 @@ def _hay_que_descubrir_agencias(selection: dict[str, Any]) -> bool:
       de pedir "sólo las cargadas, en cualquier zona".
     """
     if not selection['buscar_inmobiliarias']:
+        return False
+    if selection['registro_preciso']:
         return False
     if selection['solo_fuentes_cargadas']:
         return False
@@ -358,16 +366,25 @@ def route_after_parse(state: ScrapingState) -> str | list[Any]:
     # The user's pre-search pick narrows what the deployment already allows —
     # env gates are a hard ceiling, the selection can only subtract from it.
     selection = _read_selection(state)
-    sources: tuple[str, ...] = _env_allowed_sources() if selection['buscar_portales'] else ()
+    portal_sources: tuple[str, ...] = (
+        _env_allowed_sources() if selection['buscar_portales'] else ()
+    )
     if picked := selection['portales']:
-        sources = tuple(s for s in sources if s in set(picked))
+        portal_sources = tuple(source for source in portal_sources if source in set(picked))
     buscar_inmobiliarias = selection['buscar_inmobiliarias']
-    # A zona-scoped run consults ONLY the inmobiliarias we filed under that
-    # zona, so Google-Maps discovery (which surfaces agencies belonging to no
-    # curated zona) is skipped entirely — the curated registry, fetched in
-    # `review_agencies`, becomes the single inmobiliaria source. "Todas las
-    # zonas" keeps discovery on: it's the broadest search, unchanged from
-    # before the selector existed.
+    registered_sources: tuple[str, ...] = ()
+    if buscar_inmobiliarias and selection['registro_preciso']:
+        picked_agencies = set(selection['inmobiliarias'])
+        registered_sources = tuple(
+            source.id for source in SEARCH_SOURCES
+            if not picked_agencies or source.id in picked_agencies
+        )
+    # InmoBúsqueda puede estar seleccionado en ambos catálogos. Una sola
+    # entrada evita pagar tiempo doble y devolver el mismo aviso dos veces.
+    sources = tuple(dict.fromkeys((*portal_sources, *registered_sources)))
+    # El catálogo preciso nunca descubre agencias: sus diez ids ya están en
+    # `sources`. Las condiciones de zona/manual_sources que siguen existen
+    # únicamente para búsquedas históricas persistidas antes de este catálogo.
     descubrir_agencias = _hay_que_descubrir_agencias(selection)
 
     # Fan-out: one portal-scraper + agency-discovery branch per (unit × source)
@@ -1162,6 +1179,9 @@ async def review_agencies(state: ScrapingState, config: RunnableConfig) -> dict[
     agencies = state.get('agencies', [])
     sb = config['configurable'].get('supabase')
     selection = _read_selection(state)
+    # Las búsquedas precisas ya terminaron sus diez ramas en la fase de
+    # portales. Este bloque sólo puede consultar manual_sources para un job
+    # histórico que no tenga la clave `inmobiliarias`.
     # Portales-only search: the inmobiliarias registry is never consulted.
     # `zona_inmobiliarias` es un desplegable APARTE del prompt, y su default es
     # "todas las zonas". Con eso vacío se traían las inmobiliarias curadas de
@@ -1183,7 +1203,7 @@ async def review_agencies(state: ScrapingState, config: RunnableConfig) -> dict[
             sb, zona_registro,
             incluir_sin_zona=not selection['zona_inmobiliarias'],
         )
-        if selection['buscar_inmobiliarias'] else []
+        if selection['buscar_inmobiliarias'] and not selection['registro_preciso'] else []
     )
 
     if not agencies and not manual_sources:
@@ -1723,7 +1743,10 @@ async def extract_website_properties_llm(state: ScrapingState, config: RunnableC
     # linked explicitly qualify; the listing page itself would re-yield the mixed pool.
     # Also covers props stuck with a lone og:image from a scraped detail sub-page.
     scraped_urls = {p.get('url') for p in pages}
-    detailed_sources = {source.id for source in SEARCH_SOURCES if source.adapter == 'tokko'}
+    detailed_sources = {
+        source.id for source in SEARCH_SOURCES
+        if source.adapter in {'tokko', 'dacal_api', 'brokian', 'remax_office', 'houzez'}
+    }
     pending = [p for p in results
                if p.fuente not in detailed_sources and len(p.imagenes) < 4
                and p.url_origen and p.url_origen not in scraped_urls]

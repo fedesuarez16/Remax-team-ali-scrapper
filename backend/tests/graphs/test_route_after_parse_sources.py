@@ -17,9 +17,11 @@ against the real `PORTAL_SOURCES`, and the env-gate interaction gets its own
 test at the bottom.
 """
 from app.core.config import settings
-from app.graphs.extraction.nodes import route_after_parse
+from app.graphs.extraction import nodes
+from app.graphs.extraction.nodes import review_agencies, route_after_parse
 from app.models.property import ScrapingFilters
 from app.services.apify import PORTAL_SOURCES
+from app.services.source_registry import SEARCH_SOURCES
 
 
 def _state(**overrides) -> dict:
@@ -79,6 +81,70 @@ def test_portal_subset_applies_per_fanout_unit(monkeypatch) -> None:
 
 
 # ── inmobiliarias toggle ──────────────────────────────────────────────────────
+
+
+def test_new_agency_catalog_fans_out_only_registered_scrapers(monkeypatch) -> None:
+    _pin_env(monkeypatch)
+    sends = route_after_parse(_state(source_selection={
+        'buscar_portales': False,
+        'buscar_inmobiliarias': True,
+        'inmobiliarias': [],
+    }))
+
+    assert all(send.node == 'run_portal_scraper' for send in sends)
+    assert [send.arg['__source'] for send in sends] == [source.id for source in SEARCH_SOURCES]
+
+
+def test_new_agency_catalog_honours_selected_subset(monkeypatch) -> None:
+    _pin_env(monkeypatch)
+    sends = route_after_parse(_state(source_selection={
+        'buscar_portales': False,
+        'buscar_inmobiliarias': True,
+        'inmobiliarias': ['keymex', 'sabella'],
+    }))
+
+    assert [send.arg['__source'] for send in sends] == ['keymex', 'sabella']
+    assert 'discover_agencies' not in _nodes(sends)
+
+
+def test_inmobusqueda_selected_in_both_catalogs_runs_once(monkeypatch) -> None:
+    _pin_env(monkeypatch)
+    sends = route_after_parse(_state(source_selection={
+        'buscar_portales': True,
+        'portales': ['inmobusqueda'],
+        'buscar_inmobiliarias': True,
+        'inmobiliarias': ['inmobusqueda'],
+    }))
+
+    assert [send.arg['__source'] for send in sends] == ['inmobusqueda']
+
+
+async def test_precise_catalog_never_opens_legacy_cost_review(monkeypatch) -> None:
+    """La tarjeta de ~USD 4 pertenecía al crawler genérico de cientos de
+    sitios. Las integraciones precisas ya corrieron como portales y deben
+    cerrar la búsqueda sin consultar manual_sources ni pedir confirmación."""
+    events: list[str] = []
+
+    async def forbidden_fetch(*_args, **_kwargs):
+        raise AssertionError('no debe consultar el registro histórico')
+
+    async def capture_event(name, *_args, **_kwargs):
+        events.append(name)
+
+    monkeypatch.setattr(nodes, '_fetch_active_manual_sources', forbidden_fetch)
+    monkeypatch.setattr(nodes, 'adispatch_custom_event', capture_event)
+
+    result = await review_agencies(
+        _state(source_selection={
+            'buscar_portales': False,
+            'buscar_inmobiliarias': True,
+            'inmobiliarias': [],
+        }),
+        {'configurable': {'supabase': object()}},
+    )
+
+    assert events == ['done']
+    assert result == {'selected_agency_ids': [], 'manual_sources': []}
 
 
 def test_inmobiliarias_only_skips_every_portal_branch(monkeypatch) -> None:

@@ -53,9 +53,9 @@ async def _cancel_graph_task(job_id: str) -> bool:
 class SourceSelection(BaseModel):
     """Where to scrape, picked by the user BEFORE the search runs.
 
-    Defaults reproduce the pre-feature behaviour exactly (every portal + the
-    inmobiliarias track over all zonas), so callers that omit the field — and
-    job rows persisted before the column existed — keep working untouched.
+    New requests use every portal plus the reviewed agency registry. Historical
+    job rows that lack `inmobiliarias` are still interpreted by the graph with
+    the former Google Maps/manual_sources behavior.
 
     `portales=[]` with `buscar_portales=True` means "todos los portales": an
     empty subset is no restriction, not an empty search.
@@ -63,14 +63,13 @@ class SourceSelection(BaseModel):
     buscar_portales: bool = True
     portales: list[str] = []
     buscar_inmobiliarias: bool = True
-    # None/blank = todas las zonas. Otherwise only the inmobiliarias we
-    # manually classified into this zona are consulted.
+    # Vacío = todas las integraciones revisadas de source_registry. A
+    # diferencia del registro histórico de manual_sources, estas fuentes
+    # tienen rutas/ids geográficos propios y no usan Google Maps ni LLM.
+    inmobiliarias: list[str] = []
+    # Legacy fields kept so persisted jobs from the previous selector remain
+    # readable. They do not widen a new precise-registry request.
     zona_inmobiliarias: str | None = None
-    # Buscar SÓLO en las inmobiliarias cargadas a mano en /sources, sin salir a
-    # descubrir con Google Maps. El descubrimiento es lo que trae cientos de
-    # inmobiliarias que nadie eligió; el registro curado lo cargó alguien que
-    # las conoce. Flag propio y no un efecto secundario de `zona_inmobiliarias`:
-    # así se puede pedir "sólo las cargadas" en cualquier zona.
     solo_fuentes_cargadas: bool = False
 
 
@@ -107,6 +106,7 @@ def _validated_selection(selection: SourceSelection) -> dict[str, Any]:
     """Reject selections that can only produce an empty search, then hand back
     the normalized dict that gets persisted on the job row."""
     from app.services.apify import PORTAL_SOURCES
+    from app.services.source_registry import SEARCH_SOURCES
 
     if not selection.buscar_portales and not selection.buscar_inmobiliarias:
         raise HTTPException(
@@ -120,11 +120,22 @@ def _validated_selection(selection: SourceSelection) -> dict[str, Any]:
             detail=f'Portales desconocidos: {", ".join(unknown)}. '
                    f'Disponibles: {", ".join(PORTAL_SOURCES)}.',
         )
+    registered_ids = {source.id for source in SEARCH_SOURCES}
+    unknown_agencies = [
+        source for source in selection.inmobiliarias if source not in registered_ids
+    ]
+    if unknown_agencies:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Inmobiliarias desconocidas: {", ".join(unknown_agencies)}. '
+                   f'Disponibles: {", ".join(source.id for source in SEARCH_SOURCES)}.',
+        )
     zona = (selection.zona_inmobiliarias or '').strip()
     return {
         'buscar_portales': selection.buscar_portales,
         'portales': selection.portales,
         'buscar_inmobiliarias': selection.buscar_inmobiliarias,
+        'inmobiliarias': selection.inmobiliarias,
         'zona_inmobiliarias': zona or None,
         'solo_fuentes_cargadas': selection.solo_fuentes_cargadas,
     }

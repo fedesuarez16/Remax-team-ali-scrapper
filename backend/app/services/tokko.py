@@ -1,8 +1,8 @@
-"""Tokko's public website search, reviewed for Mauro Perri and Urquiza.
+"""Tokko's public website search, reviewed for Mauro Perri, Urquiza and KW Suma.
 
 Uses /Buscar and its p=N HTML fragments, then each /p/ detail page. No API
-credentials, browser, or LLM. Selectors are deliberately limited to the two
-registered sites; a different Tokko template requires its own review.
+credentials, browser, or LLM. Both Tokko templates used by the registered
+sites are parsed explicitly; a different template requires its own review.
 """
 from __future__ import annotations
 
@@ -28,7 +28,8 @@ _TYPES = {
     'local': '7', 'ph': '13',
 }
 _LABEL_TYPES: dict[str, TipoPropiedad] = {
-    'terreno': 'terreno', 'campo': 'terreno', 'departamento': 'departamento',
+    'terreno': 'terreno', 'lote': 'terreno', 'campo': 'terreno',
+    'departamento': 'departamento',
     'casa': 'casa', 'quinta': 'casa', 'oficina': 'oficina', 'local': 'local', 'ph': 'ph',
 }
 _LABEL_OPERATIONS: dict[str, TipoOperacion] = {
@@ -56,6 +57,11 @@ def _number(value: str) -> float | None:
         return None
 
 
+def _positive_number(value: str) -> float | None:
+    number = _number(value)
+    return number if number is not None and number > 0 else None
+
+
 def _text(soup: Any, selector: str) -> str:
     element = soup.select_one(selector)
     return str(element.get_text(' ', strip=True)) if element else ''
@@ -71,7 +77,27 @@ def location_catalog(html: str) -> list[dict[str, Any]]:
         raise ValueError('No se pudo leer el catálogo de ubicaciones del sitio.') from exc
     if not isinstance(data, list):
         raise ValueError('El catálogo de ubicaciones cambió de formato.')
-    return [row for row in data if isinstance(row, dict)]
+
+    # Older Tokko themes expose a flat list with parent_name. The current
+    # theme used by KW Suma exposes a nested country → region → partido → city
+    # tree. Flatten the latter and materialize the parent's name so the exact
+    # same ancestry resolver can safely serve both contracts.
+    rows: list[dict[str, Any]] = []
+
+    def visit(value: Any, parent: dict[str, Any] | None = None) -> None:
+        if not isinstance(value, dict):
+            return
+        row = {key: item for key, item in value.items() if key != 'children'}
+        if parent:
+            row.setdefault('parent_id', parent.get('location_id'))
+            row.setdefault('parent_name', parent.get('location_name'))
+        rows.append(row)
+        for child in value.get('children') or []:
+            visit(child, row)
+
+    for item in data:
+        visit(item)
+    return rows
 
 
 def resolve_location(rows: list[dict[str, Any]], zona: str) -> str | None:
@@ -115,9 +141,30 @@ def search_params(filters: ScrapingFilters, location: str | None) -> dict[str, s
     return params
 
 
+def _new_card_location(card: Any, kind: str, operation: str, street: str) -> str:
+    image = card.select_one('img.img-whp')
+    alt = str(image.get('alt') or '') if image else ''
+    prefix = re.compile(
+        rf'^Foto\s+{re.escape(kind)}\s+en\s+{re.escape(operation)}\s+en\s+', re.I,
+    )
+    remainder = prefix.sub('', alt, count=1)
+    if remainder == alt or not street or not remainder.lower().endswith(street.lower()):
+        return ''
+    return remainder[:-len(street)].rstrip(' ,-')
+
+
+def _card_facts(card: Any) -> dict[str, str]:
+    facts: dict[str, str] = {}
+    for item in card.select('.prop_details li, .prop_dato'):
+        label, separator, value = item.get_text(' ', strip=True).partition(':')
+        if separator:
+            facts[_plain(label)] = value.strip()
+    return facts
+
+
 def parse_listing(html: str, source: SearchSource) -> list[RawProperty]:
     soup = BeautifulSoup(html, 'html.parser')
-    cards = soup.select('li[prop-id]')
+    cards = soup.select('[prop-id]')
     if not cards:
         visible = soup.get_text(' ', strip=True)
         if 'No hubo resultados para su búsqueda' in visible or html.strip() == '--NoMoreProperties--':
@@ -125,34 +172,69 @@ def parse_listing(html: str, source: SearchSource) -> list[RawProperty]:
         raise ValueError(f'{source.name}: no se reconoció el listado de propiedades.')
     results = []
     for card in cards:
-        identity = _text(card, '.prop-desc-tipo-ub')
-        match = re.match(r'(.+?)\s+en\s+(.+?)\s+en\s+(.+)',
-                         identity, re.I)
-        link = card.select_one('a[href^="/p/"]')
-        if not match or not link:
+        link = card if card.name == 'a' and str(card.get('href') or '').startswith('/p/') \
+            else card.select_one('a[href^="/p/"]')
+        legacy_identity = _text(card, '.prop-desc-tipo-ub')
+        match = re.match(r'(.+?)\s+en\s+(.+?)\s+en\s+(.+)', legacy_identity, re.I)
+        if match:
+            kind, operation, location = match.groups()
+            street = _text(card, '.prop-desc-dir')
+            price_box = card.select_one('.prop-valor-nro')
+            image = card.select_one('img.dest-img')
+            title = f'{legacy_identity} — {street}'
+        elif classic_identity := _text(card, '.prop_dir'):
+            classic_match = re.match(r'(.+?)\s+en\s+(.+)', classic_identity, re.I)
+            operation_text = _text(card, '.prop_operation')
+            operation_match = re.match(r'(Alquiler Temporario|Alquiler|Venta)\b', operation_text, re.I)
+            if not classic_match or not operation_match:
+                raise ValueError(f'{source.name}: cambió el formato de una tarjeta.')
+            kind, location = classic_match.groups()
+            operation = operation_match.group(1)
+            street = _text(card, '.prop_titulo')
+            price_box = card.select_one('.prop_operation')
+            image = card.select_one('.prop_img img')
+            title = street or classic_identity
+        else:
+            kind = _text(card, '.text-thm')
+            operation = _text(card, '.prop-card-operation-tag')
+            marker = card.select_one('.flaticon-placeholder')
+            street = marker.parent.get_text(' ', strip=True) if marker and marker.parent else ''
+            location = _new_card_location(card, kind, operation, street)
+            price_box = card.select_one('.price-list-tag')
+            image = card.select_one('img.img-whp')
+            title = _text(card, '.prop-title') or f'{kind} en {operation} en {location}'
+        if not kind or not operation or not location or not link:
             raise ValueError(f'{source.name}: cambió el formato de una tarjeta.')
-        kind, operation, location = match.groups()
         # Unscoped listings can say "Venta / Alquiler" but display only the
         # first operation's price. Never attach that sale price to a rental.
         operation = ' '.join(operation.split('/')[0].lower().split())
         if operation not in _LABEL_OPERATIONS:
             raise ValueError(f'{source.name}: no se reconoció la operación publicada.')
-        price_box = card.select_one('.prop-valor-nro')
         price_text = ' '.join(str(t) for t in price_box.find_all(string=True, recursive=False)) \
             if price_box else ''
         currency: Moneda = 'USD' if re.search(r'USD|U\$S|US\$', price_text, re.I) else 'ARS'
-        image = card.select_one('img.dest-img')
         photo = str(image.get('src') or '') if image else ''
-        street = _text(card, '.prop-desc-dir')
+        facts = _card_facts(card)
+        bedrooms = _number(facts.get('dormitorios', ''))
+        raw: dict[str, Any] = {
+            'source_id': source.id, 'listing_id': str(card['prop-id']),
+            'dormitorios': int(bedrooms) if bedrooms is not None else None,
+        }
+        rooms = _number(facts.get('ambientes', ''))
         prop = RawProperty(
-            fuente=source.id, titulo=f'{identity} — {street}',
+            fuente=source.id, titulo=title,
             direccion=f'{street}, {location}' if street else location,
             tipo_propiedad=_LABEL_TYPES.get(_plain(kind), 'otro'),
             tipo_operacion=_LABEL_OPERATIONS[operation],
             precio=_number(price_text), moneda=currency,
+            ambientes=int(rooms) if rooms is not None else None,
+            banos=int(value) if (value := _number(facts.get('banos', ''))) is not None else None,
+            cocheras=int(value) if (value := _number(facts.get('cocheras', ''))) is not None else None,
+            m2_cubiertos=_positive_number(facts.get('superficie cubierta', '')),
+            m2_total=_positive_number(facts.get('total construido', '')),
             url_origen=urljoin(source.base_url, str(link['href'])),
             imagenes=[photo] if photo.startswith('https://') else [],
-            raw={'source_id': source.id, 'listing_id': str(card['prop-id'])},
+            raw=raw,
         )
         results.append(prop)
     return results
@@ -160,35 +242,57 @@ def parse_listing(html: str, source: SearchSource) -> list[RawProperty]:
 
 def parse_detail(html: str, prop: RawProperty) -> RawProperty:
     soup = BeautifulSoup(html, 'html.parser')
-    if not soup.select_one('#ficha_desc'):
+    legacy = soup.select_one('#ficha_desc')
+    current = soup.select_one('.prop-details-cont')
+    if not legacy and not current:
         raise ValueError('La ficha no contiene los datos de la propiedad esperados.')
     values = {}
     for item in soup.select('#lista_informacion_basica li, #lista_superficies li'):
         label, separator, value = item.get_text(' ', strip=True).partition(':')
         if separator:
             values[_plain(label)] = value.strip()
+    for item in soup.select(
+        '.prop-detail-col, .prop-list-title-value .col-md-4, '
+        '.prop-list-title-value .col-lg-4, .prop-list-title-value .col-xl-4'
+    ):
+        fields = item.select('ul.list-inline-item p')
+        if len(fields) >= 2:
+            label = fields[0].get_text(' ', strip=True).rstrip(':')
+            values[_plain(label)] = fields[1].get_text(' ', strip=True)
     update: dict[str, Any] = {}
     for label, field in [('ambientes', 'ambientes'), ('banos', 'banos'), ('cocheras', 'cocheras')]:
         numeric_value = _number(values.get(label, ''))
-        update[field] = int(numeric_value) if numeric_value is not None else None
+        update[field] = int(numeric_value) if numeric_value is not None else getattr(prop, field)
     raw = dict(prop.raw)
     bedrooms = _number(values.get('dormitorios', ''))
-    raw['dormitorios'] = int(bedrooms) if bedrooms is not None else None
+    if bedrooms is not None:
+        raw['dormitorios'] = int(bedrooms)
     update['raw'] = raw
-    update['m2_cubiertos'] = _number(values.get('cubierta', ''))
-    update['m2_total'] = _number(values.get('total construido', ''))
+    update['m2_cubiertos'] = (
+        _number(values.get('cubierta', '') or values.get('superficie cubierta', ''))
+        or prop.m2_cubiertos
+    )
+    update['m2_total'] = _number(values.get('total construido', '')) or prop.m2_total
     if prop.tipo_propiedad == 'terreno':
-        update['m2_total'] = _number(values.get('terreno', ''))
+        update['m2_total'] = _number(values.get('terreno', '')) or update['m2_total']
     age = values.get('antiguedad', '')
-    update['antiguedad'] = 0 if _plain(age) == 'a estrenar' else _number(age)
+    update['antiguedad'] = (
+        0 if _plain(age) == 'a estrenar' else (_number(age) if age else prop.antiguedad)
+    )
     # Tokko escapes the description's HTML and unescapes it in the browser.
-    description = _text(soup, '#prop-desc')
+    description = _text(soup, '#prop-desc') or _text(soup, '.full-description')
     update['descripcion'] = BeautifulSoup(description, 'html.parser').get_text(' ', strip=True)
     photos = [str(image.get('src') or '') for image in soup.select('img.zoomImg')]
-    update['imagenes'] = list(dict.fromkeys(p for p in photos if p.startswith('https://')))[:20] \
+    photos.extend(str(link.get('href') or '')
+                  for link in soup.select('.dev-photo-carousel a.pswp-elem[href]'))
+    update['imagenes'] = list(dict.fromkeys(p for p in photos if p.startswith('https://'))) \
         or prop.imagenes
-    update['amenities'] = [item.get_text(' ', strip=True)
-                           for item in soup.select('#ficha_servicios li, #ficha_ambientes li')]
+    update['amenities'] = [
+        item.get_text(' ', strip=True)
+        for item in soup.select(
+            '#ficha_servicios li, #ficha_ambientes li, .prop-check-list .order_list li'
+        )
+    ]
     return prop.model_copy(update=update)
 
 
@@ -209,7 +313,13 @@ async def scrape_tokko(
         base = f'{source.base_url}/Buscar'
         catalog_response = await client.get(base)
         catalog_response.raise_for_status()
-        rows = location_catalog(catalog_response.text)
+        rows = [
+            {
+                'location_id': location_id, 'location_name': name,
+                'parent_id': parent_id, 'parent_name': parent_name,
+            }
+            for location_id, name, parent_id, parent_name in source.locations
+        ] or location_catalog(catalog_response.text)
         zona = filters.localidades[0] if filters.localidades else (filters.zona or '')
         location = resolve_location(rows, zona) if zona else None
         if zona and location is None:

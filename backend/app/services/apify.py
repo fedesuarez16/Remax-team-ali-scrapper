@@ -16,7 +16,7 @@ from typing import Any, Awaitable, Callable, Iterable, Iterator, Mapping
 import httpx
 
 from app.models.property import (
-    Agency, Moneda, RawProperty, ScrapingFilters, TipoOperacion, TipoPropiedad,
+    Agency, Fuente, Moneda, RawProperty, ScrapingFilters, TipoOperacion, TipoPropiedad,
 )
 from app.services.zona import zona_candidates
 
@@ -1642,9 +1642,15 @@ async def _inmobusqueda_resolve_zona_slug(zona: str) -> str | None:
     if cache_key in _INMOBUSQUEDA_SLUG_CACHE:
         return _INMOBUSQUEDA_SLUG_CACHE[cache_key]
 
+    from app.core.config import settings
+
     slug: str | None = None
     try:
-        async with httpx.AsyncClient(timeout=8) as client:
+        async with httpx.AsyncClient(
+            timeout=8,
+            headers={'User-Agent': _BROWSER_UA},
+            proxy=_proxy_with_session(settings.SCRAPER_PROXY_URL, _next_proxy_session('inmobusqueda')),
+        ) as client:
             resp = await client.get(
                 _INMOBUSQUEDA_AUTOCOMPLETE_URL,
                 params={'partido': 1, 'valor': query_parts[0]},
@@ -3023,7 +3029,9 @@ async def remax_gallery_from_url(url: str) -> list[str]:
     return _remax_photo_urls(item) if isinstance(item, dict) else []
 
 
-def _norm_remax(item: dict[str, Any], zona: str) -> RawProperty | None:
+def _norm_remax(
+    item: dict[str, Any], zona: str, source_id: Fuente = 'remax',
+) -> RawProperty | None:
     precio = item.get('price')
     if not precio:
         return None
@@ -3033,11 +3041,17 @@ def _norm_remax(item: dict[str, Any], zona: str) -> RawProperty | None:
     tipo_operacion = 'alquiler' if op_val in ('rent', 'temporal') else 'venta'
     type_val = (item.get('type') or {}).get('value', '')
     tipo_propiedad = _REMAX_TYPE_VALUE_TO_TIPO.get(type_val, 'otro')
-    direccion = item.get('displayAddress') or item.get('geoLabel') or zona
+    display_address = str(item.get('displayAddress') or '').strip()
+    geo_label = str(item.get('geoLabel') or '').strip()
+    direccion = display_address or geo_label or zona
+    if source_id != 'remax' and display_address and geo_label:
+        direccion = f'{display_address}, {geo_label}'
+    associate = item.get('associate') or {}
 
     return RawProperty(
-        fuente='remax',
+        fuente=source_id,
         titulo=item.get('title', ''),
+        descripcion=item.get('description') or None,
         direccion=direccion,
         precio=float(precio),
         moneda=moneda,  # type: ignore[arg-type]
@@ -3050,6 +3064,14 @@ def _norm_remax(item: dict[str, Any], zona: str) -> RawProperty | None:
         amenities=[],
         imagenes=_remax_photo_urls(item),
         url_origen=f'https://www.remax.com.ar/listings/{item.get("slug", "")}',
+        raw={
+            'source_id': source_id,
+            'listing_id': str(item.get('id') or ''),
+            'dormitorios': item.get('bedrooms'),
+            'office_id': associate.get('officeId'),
+            'office_name': associate.get('officeName'),
+            'geo_label': geo_label,
+        },
     )
 
 
@@ -3144,6 +3166,9 @@ async def _remax_resolve_location(zona: str) -> str | None:
 async def _scrape_remax_api(
     filters: ScrapingFilters,
     on_progress: ProgressCb,
+    *,
+    source_id: Fuente = 'remax',
+    office_ids: tuple[str, ...] = (),
 ) -> list[RawProperty]:
     from app.core.config import settings
 
@@ -3161,7 +3186,7 @@ async def _scrape_remax_api(
     loc_zona = filters.localidades[0] if filters.localidades else zona
     location = await _resolve_remax_location(filters, loc_zona)
 
-    await on_progress('remax', 'running', 0)
+    await on_progress(source_id, 'running', 0)
 
     # 0 = uncapped: page until `totalPages`. That is safe ONLY once `locations`
     # bounded the result set to the zona server-side. Without it the API serves
@@ -3175,46 +3200,58 @@ async def _scrape_remax_api(
     page_size = max(1, settings.REMAX_PAGE_SIZE)
 
     results: list[RawProperty] = []
+    seen: set[str] = set()
     async with httpx.AsyncClient(timeout=20) as client:
-        page = 0
-        while max_pages <= 0 or page < max_pages:
-            params: dict[str, Any] = {
-                'page': page, 'pageSize': page_size,
-                'sort': '-createdAt', 'in': in_params,
-            }
-            if location:
-                params['locations'] = location
-            try:
-                resp = await client.get(
-                    f'{_REMAX_API_BASE}/listings/findAllWithEntrepreneurships',
-                    params=params,
-                )
-                resp.raise_for_status()
-                body = resp.json()
-            except Exception:
-                break
+        # `eq=officeId:<uuid>` is the native API filter. One request chain per
+        # office keeps Roble and Roble II together without admitting any other
+        # franchise from the national portal.
+        for office_id in office_ids or (None,):
+            page = 0
+            while max_pages <= 0 or page < max_pages:
+                params: dict[str, Any] = {
+                    'page': page, 'pageSize': page_size,
+                    'sort': '-createdAt', 'in': in_params,
+                }
+                if location:
+                    params['locations'] = location
+                if office_id:
+                    params['eq'] = f'officeId:{office_id}'
+                try:
+                    resp = await client.get(
+                        f'{_REMAX_API_BASE}/listings/findAllWithEntrepreneurships',
+                        params=params,
+                    )
+                    resp.raise_for_status()
+                    body = resp.json()
+                except Exception:
+                    break
 
-            # Response is double-nested: {"data": {"data": [...items...],
-            # "page":.., "totalPages":..}, "code":200, "message":.., "errors":..}
-            # — confirmed against a real request.
-            paging = body.get('data') or {}
-            items = paging.get('data', [])
-            if not items:
-                break
+                # Response is double-nested: {"data": {"data": [...items...],
+                # "page":.., "totalPages":..}, "code":200, "message":.., "errors":..}
+                # — confirmed against a real request.
+                paging = body.get('data') or {}
+                items = paging.get('data', [])
+                if not items:
+                    break
 
-            for item in items:
-                if not _remax_matches_zona(item, zona):
-                    continue
-                prop = _norm_remax(item, zona)
-                if prop is not None:
-                    results.append(prop)
+                for item in items:
+                    associate = item.get('associate') or {}
+                    if office_id and associate.get('officeId') != office_id:
+                        continue
+                    if not _remax_matches_zona(item, zona):
+                        continue
+                    prop = _norm_remax(item, zona, source_id)
+                    key = str(prop.url_origen or '') if prop else ''
+                    if prop is not None and key not in seen:
+                        seen.add(key)
+                        results.append(prop)
 
-            if page + 1 >= paging.get('totalPages', 0):
-                break
-            page += 1
-            await on_progress('remax', 'running', len(results))
+                if page + 1 >= paging.get('totalPages', 0):
+                    break
+                page += 1
+                await on_progress(source_id, 'running', len(results))
 
-    await on_progress('remax', 'done', len(results))
+    await on_progress(source_id, 'done', len(results))
     return results
 
 
@@ -4651,11 +4688,28 @@ class ApifyService(BaseApifyService):
         from app.core.config import settings
 
         from app.services.source_registry import source_by_id
+        from app.services.dacal import scrape_dacal
+        from app.services.houzez import scrape_houzez
+        from app.services.sabella import scrape_sabella
         from app.services.tokko import scrape_tokko
+        from app.services.alberto_dacal import scrape_alberto_dacal
 
         registered = source_by_id(source)
         if registered and registered.adapter == 'tokko':
             return await scrape_tokko(registered, filters, on_progress)
+        if registered and registered.adapter == 'dacal_api':
+            return await scrape_dacal(registered, filters, on_progress)
+        if registered and registered.adapter == 'brokian':
+            return await scrape_alberto_dacal(registered, filters, on_progress)
+        if registered and registered.adapter == 'remax_office':
+            return await _scrape_remax_api(
+                filters, on_progress, source_id=registered.id,
+                office_ids=registered.office_ids,
+            )
+        if registered and registered.adapter == 'houzez':
+            return await scrape_houzez(registered, filters, on_progress)
+        if registered and registered.adapter == 'sabella':
+            return await scrape_sabella(registered, filters, on_progress)
 
         if source == 'mercadolibre':
             return await _scrape_mercadolibre(filters, on_progress)

@@ -1,7 +1,12 @@
 'use client'
-import { Building2, Globe, MapPin } from 'lucide-react'
-import { useSourceZonas } from '@/hooks/useManualSources'
-import { PORTALES, type PortalId, type SourceSelection } from '@/lib/sources'
+import { Building2, Globe } from 'lucide-react'
+import {
+  INMOBILIARIAS,
+  PORTALES,
+  type InmobiliariaId,
+  type PortalId,
+  type SourceSelection,
+} from '@/lib/sources'
 import { cn } from '@/lib/utils'
 
 /**
@@ -9,9 +14,7 @@ import { cn } from '@/lib/utils'
  *
  * Two independent tracks, either or both:
  * - Portales inmobiliarios → optional subset of the portal scrapers.
- * - Inmobiliarias → reveals the extra step, picking one manually-curated zona
- *   (or all of them). The zona→inmobiliaria classification is loaded by hand in
- *   the Fuentes tab; this only reads it.
+ * - Inmobiliarias → optional subset of the ten reviewed integrations.
  */
 export function SourceSelector({
   value,
@@ -22,13 +25,28 @@ export function SourceSelector({
   onChange: (next: SourceSelection) => void
   disabled?: boolean
 }) {
-  const { zonas, loading } = useSourceZonas()
-
   const togglePortal = (id: PortalId) => {
     const next = value.portales.includes(id)
       ? value.portales.filter((p) => p !== id)
       : [...value.portales, id]
     onChange({ ...value, portales: next })
+  }
+
+  const toggleInmobiliaria = (id: InmobiliariaId) => {
+    const current = value.inmobiliarias.length === 0
+      ? INMOBILIARIAS.map((source) => source.id)
+      : value.inmobiliarias
+    const next = current.includes(id)
+      ? current.filter((source) => source !== id)
+      : [...current, id]
+    if (next.length === 0) {
+      onChange({ ...value, buscar_inmobiliarias: false, inmobiliarias: [] })
+      return
+    }
+    onChange({
+      ...value,
+      inmobiliarias: next.length === INMOBILIARIAS.length ? [] : next,
+    })
   }
 
   return (
@@ -44,7 +62,11 @@ export function SourceSelector({
         <TrackToggle
           icon={<Building2 className="size-4" />}
           label="Inmobiliarias"
-          hint={value.zona_inmobiliarias ?? 'Todas las zonas'}
+          hint={
+            value.inmobiliarias.length === 0
+              ? `${INMOBILIARIAS.length} configuradas`
+              : `${value.inmobiliarias.length} seleccionadas`
+          }
           active={value.buscar_inmobiliarias}
           onClick={() =>
             onChange({ ...value, buscar_inmobiliarias: !value.buscar_inmobiliarias })
@@ -86,65 +108,41 @@ export function SourceSelector({
         </div>
       )}
 
-      {/* Sólo el registro curado, sin descubrir con Google Maps.
-          El descubrimiento es lo que trae cientos de inmobiliarias que nadie
-          eligió — y lo que se paga scrapeándolas y analizándolas. Antes esto
-          se conseguía de rebote eligiendo una zona; ahora se pide derecho. */}
       {value.buscar_inmobiliarias && (
-        <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-border bg-card p-3">
-          <input
-            type="checkbox"
-            checked={value.solo_fuentes_cargadas}
-            onChange={() =>
-              onChange({ ...value, solo_fuentes_cargadas: !value.solo_fuentes_cargadas })
-            }
-            disabled={disabled}
-            className="mt-0.5 size-4 shrink-0 accent-foreground"
-          />
-          <span className="space-y-0.5">
-            <span className="block text-xs font-medium text-foreground">
-              Solo mis inmobiliarias cargadas
-            </span>
-            <span className="block text-xs text-muted-foreground">
-              {value.solo_fuentes_cargadas
-                ? 'Se buscan únicamente las de la pestaña Fuentes. No se descubren nuevas con Google Maps.'
-                : 'Además de las cargadas, se descubren inmobiliarias nuevas en la zona (más cobertura, más costo).'}
-            </span>
-          </span>
-        </label>
-      )}
-
-      {/* Extra step: pick the zona whose curated inmobiliarias to consult. */}
-      {value.buscar_inmobiliarias && !value.solo_fuentes_cargadas && (
-        <div className="space-y-1.5 rounded-xl border border-border bg-card p-3">
-          <label className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-            <MapPin className="size-3.5" />
-            Zona de las inmobiliarias
-          </label>
-          <select
-            value={value.zona_inmobiliarias ?? ''}
-            onChange={(e) =>
-              onChange({ ...value, zona_inmobiliarias: e.target.value || null })
-            }
-            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
-          >
-            <option value="">Todas las zonas</option>
-            {zonas.map((z) => (
-              <option key={z.zona_norm} value={z.zona}>
-                {z.zona} ({z.count})
-              </option>
-            ))}
-          </select>
+        <div className="space-y-2">
+          <div className="flex flex-wrap gap-1.5">
+            {INMOBILIARIAS.map((source) => {
+              const on = value.inmobiliarias.length === 0
+                || value.inmobiliarias.includes(source.id)
+              return (
+                <button
+                  key={source.id}
+                  type="button"
+                  onClick={() => toggleInmobiliaria(source.id)}
+                  className={cn(
+                    'rounded-full border px-3 py-1 text-xs font-medium transition',
+                    on
+                      ? 'border-foreground bg-foreground text-background'
+                      : 'border-border bg-card text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  {source.label}
+                </button>
+              )
+            })}
+            {value.inmobiliarias.length > 0 && (
+              <button
+                type="button"
+                onClick={() => onChange({ ...value, inmobiliarias: [] })}
+                className="rounded-full px-2 py-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
+              >
+                Todas
+              </button>
+            )}
+          </div>
           <p className="text-xs text-muted-foreground">
-            {value.zona_inmobiliarias
-              ? `Solo las inmobiliarias cargadas en ${value.zona_inmobiliarias}. No se buscan otras zonas ni se descubren nuevas.`
-              : 'Todas las inmobiliarias cargadas, más las que se descubran en la zona de la búsqueda.'}
+            Se usan sus rutas y ubicaciones configuradas. No se agregan inmobiliarias de Google Maps.
           </p>
-          {!loading && zonas.length === 0 && (
-            <p className="text-xs text-muted-foreground">
-              Todavía no clasificaste inmobiliarias por zona. Cargalas en la pestaña Fuentes.
-            </p>
-          )}
         </div>
       )}
     </div>

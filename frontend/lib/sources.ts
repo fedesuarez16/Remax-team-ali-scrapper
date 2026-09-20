@@ -24,16 +24,42 @@ export const PORTALES: { id: PortalId; label: string }[] = [
   { id: 'century21', label: 'CENTURY 21' },
 ]
 
+export type InmobiliariaId =
+  | 'inmobusqueda'
+  | 'mauroperri'
+  | 'urquiza'
+  | 'kwsuma'
+  | 'dacalbr'
+  | 'keymex'
+  | 'albertodacal'
+  | 'remaxroble'
+  | 'axion'
+  | 'sabella'
+
+/** Inmobiliarias con integración revisada y búsqueda geográfica nativa.
+ * Vacío en SourceSelection significa las diez, igual que en portales. */
+export const INMOBILIARIAS: { id: InmobiliariaId; label: string }[] = [
+  { id: 'inmobusqueda', label: 'InmoBúsqueda' },
+  { id: 'mauroperri', label: 'Mauro Perri' },
+  { id: 'urquiza', label: 'Urquiza Propiedades' },
+  { id: 'kwsuma', label: 'KW Suma' },
+  { id: 'dacalbr', label: 'Dacal Bienes Raíces' },
+  { id: 'keymex', label: 'Keymex La Plata' },
+  { id: 'albertodacal', label: 'Alberto Dacal' },
+  { id: 'remaxroble', label: 'RE/MAX Roble' },
+  { id: 'axion', label: 'Axion Group' },
+  { id: 'sabella', label: 'Sabella Propiedades' },
+]
+
 export type SourceSelection = {
   buscar_portales: boolean
   /** Empty = todos los portales. A subset restricts the fan-out. */
   portales: PortalId[]
   buscar_inmobiliarias: boolean
-  /** null = todas las zonas. Otherwise only that zona's curated inmobiliarias. */
+  /** Empty = las diez inmobiliarias con scraper preciso. */
+  inmobiliarias: InmobiliariaId[]
+  /** Campos legados conservados para poder abrir búsquedas anteriores. */
   zona_inmobiliarias: string | null
-  /** Buscar SÓLO en las inmobiliarias cargadas a mano en /sources, sin salir a
-   * descubrir con Google Maps. El descubrimiento trae cientos que nadie
-   * eligió; el registro curado lo cargó alguien que las conoce. */
   solo_fuentes_cargadas: boolean
 }
 
@@ -42,8 +68,9 @@ export const DEFAULT_SELECTION: SourceSelection = {
   buscar_portales: true,
   portales: [],
   buscar_inmobiliarias: true,
+  inmobiliarias: [],
   zona_inmobiliarias: null,
-  solo_fuentes_cargadas: false,
+  solo_fuentes_cargadas: true,
 }
 
 /** The backend rejects a selection with no track enabled (400), so the UI
@@ -65,9 +92,11 @@ export function describeSelection(s: SourceSelection): string {
   }
   if (s.buscar_inmobiliarias) {
     parts.push(
-      s.zona_inmobiliarias
-        ? `inmobiliarias de ${s.zona_inmobiliarias}`
-        : 'todas las inmobiliarias'
+      s.inmobiliarias.length === 0
+        ? `las ${INMOBILIARIAS.length} inmobiliarias configuradas`
+        : s.inmobiliarias
+            .map((id) => INMOBILIARIAS.find((source) => source.id === id)?.label ?? id)
+            .join(', ')
     )
   }
   return parts.length > 0 ? parts.join(' + ') : 'ninguna fuente seleccionada'

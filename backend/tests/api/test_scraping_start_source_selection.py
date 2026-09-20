@@ -75,9 +75,10 @@ async def test_start_without_source_selection_persists_search_everything_default
         'buscar_portales': True,
         'portales': [],
         'buscar_inmobiliarias': True,
+        'inmobiliarias': [],
         'zona_inmobiliarias': None,
-        # Descubrir con Google Maps sigue prendido por defecto: apagarlo es una
-        # decisión del operador, no algo que le pase por no elegir nada.
+        # Campo legado; las búsquedas nuevas usan `inmobiliarias` y nunca
+        # descubren cientos de fuentes con Google Maps.
         'solo_fuentes_cargadas': False,
     }
 
@@ -111,6 +112,22 @@ async def test_start_rejects_unknown_portal_id() -> None:
         resp = await client.post('/start', json={
             'query': 'Casa en City Bell',
             'source_selection': {'buscar_portales': True, 'portales': ['inventado']},
+        })
+
+    assert resp.status_code == 400
+    assert fake_sb.captured_inserts == []
+
+
+async def test_start_rejects_unknown_registered_agency_id() -> None:
+    fake_sb = _FakeSupabase()
+    async with _client(fake_sb) as client:
+        resp = await client.post('/start', json={
+            'query': 'Casa en City Bell',
+            'source_selection': {
+                'buscar_portales': False,
+                'buscar_inmobiliarias': True,
+                'inmobiliarias': ['inventada'],
+            },
         })
 
     assert resp.status_code == 400

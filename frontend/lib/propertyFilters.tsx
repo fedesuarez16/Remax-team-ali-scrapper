@@ -46,6 +46,15 @@ export const FUENTES = [
   { value: 'inmobusqueda', label: 'InmoBusqueda' },
   { value: 'mudafy', label: 'Mudafy' },
   { value: 'century21', label: 'CENTURY 21' },
+  { value: 'mauroperri', label: 'Mauro Perri' },
+  { value: 'urquiza', label: 'Urquiza Propiedades' },
+  { value: 'kwsuma', label: 'KW Suma' },
+  { value: 'dacalbr', label: 'Dacal Bienes Raíces' },
+  { value: 'keymex', label: 'Keymex La Plata' },
+  { value: 'albertodacal', label: 'Alberto Dacal' },
+  { value: 'remaxroble', label: 'RE/MAX Roble' },
+  { value: 'axion', label: 'Axion Group' },
+  { value: 'sabella', label: 'Sabella Propiedades' },
   { value: 'googlemaps', label: 'Sitios web' },
 ]
 

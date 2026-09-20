@@ -19,6 +19,13 @@ const FUENTE_LABEL: Record<string, string> = {
   inmobusqueda: 'InmoBúsqueda',
   mauroperri: 'Mauro Perri',
   urquiza: 'Urquiza Propiedades',
+  kwsuma: 'KW Suma',
+  dacalbr: 'Dacal Bienes Raíces',
+  keymex: 'Keymex La Plata',
+  albertodacal: 'Alberto Dacal',
+  remaxroble: 'RE/MAX Roble',
+  axion: 'Axion Group',
+  sabella: 'Sabella Propiedades',
   googlemaps: 'Google Maps',
 }
 
