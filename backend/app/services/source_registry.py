@@ -88,6 +88,13 @@ SEARCH_SOURCES = (
     ),
 )
 
+# InmoBúsqueda usa el mismo registro técnico para resolver su catálogo, pero
+# conceptualmente es un portal. Este catálogo es el único que puede aparecer
+# bajo el selector "Inmobiliarias".
+AGENCY_SEARCH_SOURCES = tuple(
+    source for source in SEARCH_SOURCES if source.id != 'inmobusqueda'
+)
+
 
 def source_by_id(source_id: str) -> SearchSource | None:
     return next((source for source in SEARCH_SOURCES if source.id == source_id), None)

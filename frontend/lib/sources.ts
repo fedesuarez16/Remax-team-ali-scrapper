@@ -25,7 +25,6 @@ export const PORTALES: { id: PortalId; label: string }[] = [
 ]
 
 export type InmobiliariaId =
-  | 'inmobusqueda'
   | 'mauroperri'
   | 'urquiza'
   | 'kwsuma'
@@ -39,7 +38,6 @@ export type InmobiliariaId =
 /** Inmobiliarias con integración revisada y búsqueda geográfica nativa.
  * Vacío en SourceSelection significa las diez, igual que en portales. */
 export const INMOBILIARIAS: { id: InmobiliariaId; label: string }[] = [
-  { id: 'inmobusqueda', label: 'InmoBúsqueda' },
   { id: 'mauroperri', label: 'Mauro Perri' },
   { id: 'urquiza', label: 'Urquiza Propiedades' },
   { id: 'kwsuma', label: 'KW Suma' },

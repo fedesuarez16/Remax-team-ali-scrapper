@@ -106,7 +106,7 @@ def _validated_selection(selection: SourceSelection) -> dict[str, Any]:
     """Reject selections that can only produce an empty search, then hand back
     the normalized dict that gets persisted on the job row."""
     from app.services.apify import PORTAL_SOURCES
-    from app.services.source_registry import SEARCH_SOURCES
+    from app.services.source_registry import AGENCY_SEARCH_SOURCES
 
     if not selection.buscar_portales and not selection.buscar_inmobiliarias:
         raise HTTPException(
@@ -120,7 +120,7 @@ def _validated_selection(selection: SourceSelection) -> dict[str, Any]:
             detail=f'Portales desconocidos: {", ".join(unknown)}. '
                    f'Disponibles: {", ".join(PORTAL_SOURCES)}.',
         )
-    registered_ids = {source.id for source in SEARCH_SOURCES}
+    registered_ids = {source.id for source in AGENCY_SEARCH_SOURCES}
     unknown_agencies = [
         source for source in selection.inmobiliarias if source not in registered_ids
     ]
@@ -128,7 +128,7 @@ def _validated_selection(selection: SourceSelection) -> dict[str, Any]:
         raise HTTPException(
             status_code=400,
             detail=f'Inmobiliarias desconocidas: {", ".join(unknown_agencies)}. '
-                   f'Disponibles: {", ".join(source.id for source in SEARCH_SOURCES)}.',
+                   f'Disponibles: {", ".join(source.id for source in AGENCY_SEARCH_SOURCES)}.',
         )
     zona = (selection.zona_inmobiliarias or '').strip()
     return {

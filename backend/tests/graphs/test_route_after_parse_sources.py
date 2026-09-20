@@ -21,7 +21,7 @@ from app.graphs.extraction import nodes
 from app.graphs.extraction.nodes import review_agencies, route_after_parse
 from app.models.property import ScrapingFilters
 from app.services.apify import PORTAL_SOURCES
-from app.services.source_registry import SEARCH_SOURCES
+from app.services.source_registry import AGENCY_SEARCH_SOURCES
 
 
 def _state(**overrides) -> dict:
@@ -92,7 +92,9 @@ def test_new_agency_catalog_fans_out_only_registered_scrapers(monkeypatch) -> No
     }))
 
     assert all(send.node == 'run_portal_scraper' for send in sends)
-    assert [send.arg['__source'] for send in sends] == [source.id for source in SEARCH_SOURCES]
+    assert [send.arg['__source'] for send in sends] == [
+        source.id for source in AGENCY_SEARCH_SOURCES
+    ]
 
 
 def test_new_agency_catalog_honours_selected_subset(monkeypatch) -> None:
@@ -107,16 +109,15 @@ def test_new_agency_catalog_honours_selected_subset(monkeypatch) -> None:
     assert 'discover_agencies' not in _nodes(sends)
 
 
-def test_inmobusqueda_selected_in_both_catalogs_runs_once(monkeypatch) -> None:
+def test_inmobusqueda_is_not_part_of_the_agency_catalog(monkeypatch) -> None:
     _pin_env(monkeypatch)
     sends = route_after_parse(_state(source_selection={
-        'buscar_portales': True,
-        'portales': ['inmobusqueda'],
+        'buscar_portales': False,
         'buscar_inmobiliarias': True,
-        'inmobiliarias': ['inmobusqueda'],
+        'inmobiliarias': [],
     }))
 
-    assert [send.arg['__source'] for send in sends] == ['inmobusqueda']
+    assert 'inmobusqueda' not in [send.arg['__source'] for send in sends]
 
 
 async def test_precise_catalog_never_opens_legacy_cost_review(monkeypatch) -> None:

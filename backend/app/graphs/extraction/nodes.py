@@ -26,7 +26,7 @@ from app.services.apify import (
     harvest_page_images,
 )
 from app.services.dedup import collapse_duplicates
-from app.services.source_registry import SEARCH_SOURCES, source_for_url
+from app.services.source_registry import AGENCY_SEARCH_SOURCES, SEARCH_SOURCES, source_for_url
 from app.services.ficha import portal_gallery_from_url
 from app.services.llm_costs import (
     SCOPE_EXTRACT_INSTAGRAM,
@@ -376,7 +376,7 @@ def route_after_parse(state: ScrapingState) -> str | list[Any]:
     if buscar_inmobiliarias and selection['registro_preciso']:
         picked_agencies = set(selection['inmobiliarias'])
         registered_sources = tuple(
-            source.id for source in SEARCH_SOURCES
+            source.id for source in AGENCY_SEARCH_SOURCES
             if not picked_agencies or source.id in picked_agencies
         )
     # InmoBúsqueda puede estar seleccionado en ambos catálogos. Una sola
