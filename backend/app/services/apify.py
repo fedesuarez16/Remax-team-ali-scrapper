@@ -3032,6 +3032,8 @@ async def remax_gallery_from_url(url: str) -> list[str]:
 def _norm_remax(
     item: dict[str, Any], zona: str, source_id: Fuente = 'remax',
 ) -> RawProperty | None:
+    from app.services.listing_location import remax_coordinates
+
     precio = item.get('price')
     if not precio:
         return None
@@ -3044,9 +3046,10 @@ def _norm_remax(
     display_address = str(item.get('displayAddress') or '').strip()
     geo_label = str(item.get('geoLabel') or '').strip()
     direccion = display_address or geo_label or zona
-    if source_id != 'remax' and display_address and geo_label:
+    if display_address and geo_label and geo_label.casefold() not in display_address.casefold():
         direccion = f'{display_address}, {geo_label}'
     associate = item.get('associate') or {}
+    point = remax_coordinates(item)
 
     return RawProperty(
         fuente=source_id,
@@ -3071,6 +3074,8 @@ def _norm_remax(
             'office_id': associate.get('officeId'),
             'office_name': associate.get('officeName'),
             'geo_label': geo_label,
+            'latitude': point[0] if point else None,
+            'longitude': point[1] if point else None,
         },
     )
 

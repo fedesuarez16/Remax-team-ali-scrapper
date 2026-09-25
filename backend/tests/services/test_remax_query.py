@@ -117,7 +117,7 @@ async def test_filters_results_by_zona_text_match(_mock_remax_api) -> None:
     filters = ScrapingFilters(zona='Palermo', tipo_operacion='venta')
     results = await _scrape_remax_api(filters, _noop_progress)
     assert len(results) == 1
-    assert results[0].direccion == 'Calle Falsa 1'
+    assert results[0].direccion == 'Calle Falsa 1, Palermo, Capital Federal'
 
 
 async def test_unresolved_location_sends_no_locations_param(_mock_remax_api) -> None:

@@ -37,7 +37,7 @@ def test_maps_core_fields() -> None:
     assert prop.banos == 2
     assert prop.m2_total == 114.47
     assert prop.m2_cubiertos == 103.38
-    assert prop.direccion == 'Avenida Asamblea 1400'
+    assert prop.direccion == 'Avenida Asamblea 1400, Parque Chacabuco, Capital Federal'
 
 
 def test_builds_listing_detail_url_from_slug() -> None:

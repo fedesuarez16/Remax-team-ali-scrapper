@@ -14,16 +14,16 @@ from app.services.geocode import _clean_street
     # --- between-streets: the "e/" separator has no canonical spelling ---
     # Slash glued to the next number — the original regex demanded whitespace
     # on BOTH sides of "e/", so these were passed to Nominatim untouched.
-    ('19 E/41 y 42 0', 'Calle 19'),
-    ('Calle 487 E/16 y 16 Bis 2100', 'Calle 487'),
+    ('19 E/41 y 42 0', 'Calle 19 entre 41 y 42'),
+    ('Calle 487 E/16 y 16 Bis 2100', 'Calle 487 2100'),
     # Space between the "e" and the slash.
-    ('29 E / 418 y 419 900', 'Calle 29'),
+    ('29 E / 418 y 419 900', 'Calle 29 900'),
     # No slash at all — bare "E" standing in for "entre".
-    ('509 E 14 y 15 1900', 'Calle 509'),
+    ('509 E 14 y 15 1900', 'Calle 509 1900'),
     # Canonical spelling must keep working.
-    ('502 e/ 17 y 18', 'Calle 502'),
+    ('502 e/ 17 y 18', 'Calle 502 entre 17 y 18'),
 ])
-def test_between_streets_variants_are_stripped(raw: str, expected: str) -> None:
+def test_between_streets_preserve_height_or_block(raw: str, expected: str) -> None:
     assert _clean_street(raw) == expected
 
 
@@ -31,7 +31,7 @@ def test_between_streets_keeps_the_locality_after_the_comma() -> None:
     """The old regex ran to end-of-string, so it ate the city along with the
     cross streets. Losing "La Plata" sends the numbered-grid address to the
     Buenos Aires viewbox and it resolves to the wrong district (or nowhere)."""
-    assert _clean_street('48 e/ 7 y 8, La Plata') == 'Calle 48, La Plata'
+    assert _clean_street('48 e/ 7 y 8, La Plata') == 'Calle 48 entre 7 y 8, La Plata'
 
 
 def test_entre_rios_is_not_a_between_streets_marker() -> None:
@@ -42,7 +42,7 @@ def test_entre_rios_is_not_a_between_streets_marker() -> None:
 
 @pytest.mark.parametrize(('raw', 'expected'), [
     ('Camino General Belgrano 800, Piso 0', 'Camino General Belgrano 800'),
-    ('473 bis e/15 a y 17 , Piso 0', 'Calle 473 bis'),
+    ('473 bis e/15 a y 17 , Piso 0', 'Calle 473 bis entre 15 a y 17'),
     ('Av. Rivadavia 1234, Piso 3', 'Av. Rivadavia 1234'),
 ])
 def test_piso_suffix_is_dropped(raw: str, expected: str) -> None:
@@ -56,7 +56,7 @@ def test_property_type_prefix_is_dropped() -> None:
     cleaned = _clean_street(
         'Oficina en 48 e/ 7 y 8 Centro calle 8, La Plata (Casco Urbano), Pdo. de La Plata'
     )
-    assert cleaned.startswith('Calle 48,')
+    assert cleaned.startswith('Calle 48 entre 7 y 8')
     assert 'Oficina' not in cleaned
     assert 'La Plata' in cleaned
 
@@ -97,12 +97,12 @@ def test_corner_notation_is_normalised(raw: str, expected: str) -> None:
 
 @pytest.mark.parametrize(('raw', 'expected'), [
     # La Plata's grid, written with the "e/" marker simply left out.
-    ('11 43 y 44', 'Calle 11'),
-    ('11 43 y 44, La Plata', 'Calle 11, La Plata'),
-    ('26 55 y 56, La Plata', 'Calle 26, La Plata'),
-    ('14 502 y 503', 'Calle 14'),
+    ('11 43 y 44', 'Calle 11 entre 43 y 44'),
+    ('11 43 y 44, La Plata', 'Calle 11 entre 43 y 44, La Plata'),
+    ('26 55 y 56, La Plata', 'Calle 26 entre 55 y 56, La Plata'),
+    ('14 502 y 503', 'Calle 14 entre 502 y 503'),
 ])
-def test_implicit_between_streets_is_stripped(raw: str, expected: str) -> None:
+def test_implicit_between_streets_is_preserved(raw: str, expected: str) -> None:
     assert _clean_street(raw) == expected
 
 
@@ -117,7 +117,7 @@ def test_corner_is_not_mistaken_for_implicit_between_streets() -> None:
     ('136 Esquina 442 Villa Elisa S/N', 'Calle 136 y 442 Villa Elisa'),
     # Street-number markers: keep the number, drop the marker.
     ('121 N°380, La Plata', 'Calle 121 380, La Plata'),
-    ('25 506 y 507 al 2500', 'Calle 25'),
+    ('25 506 y 507 al 2500', 'Calle 25 2500'),
     ('Av. Mitre nro 1301', 'Av. Mitre 1301'),
 ])
 def test_altura_markers_and_sentinels_are_normalised(raw: str, expected: str) -> None:
@@ -133,12 +133,13 @@ def test_empty_address_stays_empty() -> None:
     # "Pdo." (partido) is an abbreviation Nominatim does not know — it reads as a
     # street-name token and poisons the whole query. 316 of the 963 rows still
     # unlocated carry it, and inmobusqueda alone failed on 93.5% of its rows.
-    ('Casa en 121 e/ 73 y 74 Villa Elvira, Pdo. de La Plata', 'Calle 121, La Plata'),
+    ('Casa en 121 e/ 73 y 74 Villa Elvira, Pdo. de La Plata',
+     'Calle 121 entre 73 y 74 Villa Elvira, La Plata'),
     ('Cochera en 34 e/ 12 y 13 La Plata (Casco Urbano), Pdo. de La Plata',
-     'Calle 34, La Plata'),
-    ('Casa en 115 N°829 e/ 523 y 524 Tolosa, Pdo. de La Plata', 'Calle 115 829, La Plata'),
+     'Calle 34 entre 12 y 13 La Plata (Casco Urbano), La Plata'),
+    ('Casa en 115 N°829 e/ 523 y 524 Tolosa, Pdo. de La Plata', 'Calle 115 829 Tolosa, La Plata'),
     # Spelled out in full, same meaning.
-    ('Casa en 12 e/ 3 y 4, Partido de Ensenada', 'Calle 12, Ensenada'),
+    ('Casa en 12 e/ 3 y 4, Partido de Ensenada', 'Calle 12 entre 3 y 4, Ensenada'),
 ])
 def test_partido_abbreviation_is_unwrapped(raw: str, expected: str) -> None:
     assert _clean_street(raw) == expected

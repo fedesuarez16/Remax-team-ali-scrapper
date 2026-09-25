@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any
 
 from anthropic import AsyncAnthropic
@@ -541,8 +542,20 @@ def _normalize_tipo_propiedad(valor: str | None) -> str:
 
 
 def normalize_properties(state: ScrapingState) -> dict[str, Any]:
+    from app.services.geocode import LP_VIEWBOX, _inside_viewbox, _viewbox_for_properties
+    from app.services.listing_location import valid_coordinates
+
     out: list[NormalizedProperty] = []
     for r in state.get('collected_properties', []):
+        point = None
+        if r.fuente in {
+            'remax', 'remaxroble', 'urquiza', 'kwsuma', 'mauroperri', 'keymex',
+            'dacalbr', 'albertodacal',
+        }:
+            point = valid_coordinates(r.raw.get('latitude'), r.raw.get('longitude'))
+            viewbox = _viewbox_for_properties({'direccion': r.direccion, 'titulo': r.titulo})
+            if point and viewbox == LP_VIEWBOX and not _inside_viewbox(point, viewbox):
+                point = None
         out.append(NormalizedProperty(
             titulo=r.titulo,
             descripcion=r.descripcion,
@@ -556,6 +569,7 @@ def normalize_properties(state: ScrapingState) -> dict[str, Any]:
             m2_total=r.m2_total, m2_cubiertos=r.m2_cubiertos,
             antiguedad=r.antiguedad, amenities=r.amenities, imagenes=r.imagenes,
             fuente=r.fuente, url_origen=r.url_origen,
+            lat=point[0] if point else None, lng=point[1] if point else None,
         ))
     return {'normalized_properties': out}
 
@@ -739,6 +753,9 @@ def _prop_to_dict(p: NormalizedProperty, job_id: str | None) -> dict[str, Any]:
         'antiguedad': _fits('antiguedad', p.antiguedad, d),
         'amenities': p.amenities, 'imagenes': p.imagenes,
         'fuente': p.fuente, 'url_origen': p.url_origen, 'scraping_job_id': job_id,
+        'lat': p.lat, 'lng': p.lng,
+        'geocoded_at': datetime.now(timezone.utc).isoformat()
+        if p.lat is not None and p.lng is not None else None,
         'confianza_extraccion': _fits(
             'confianza_extraccion', float(p.confianza_extraccion), d,
         ),

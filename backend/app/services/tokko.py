@@ -254,6 +254,8 @@ def parse_listing(html: str, source: SearchSource) -> list[RawProperty]:
 
 
 def parse_detail(html: str, prop: RawProperty) -> RawProperty:
+    from app.services.listing_location import tokko_coordinates
+
     soup = BeautifulSoup(html, 'html.parser')
     legacy = soup.select_one('#ficha_desc')
     current = soup.select_one('.prop-details-cont')
@@ -277,6 +279,9 @@ def parse_detail(html: str, prop: RawProperty) -> RawProperty:
         numeric_value = _number(values.get(label, ''))
         update[field] = int(numeric_value) if numeric_value is not None else getattr(prop, field)
     raw = dict(prop.raw)
+    point = tokko_coordinates(html)
+    if point:
+        raw['latitude'], raw['longitude'] = point
     bedrooms = _number(values.get('dormitorios', ''))
     if bedrooms is not None:
         raw['dormitorios'] = int(bedrooms)

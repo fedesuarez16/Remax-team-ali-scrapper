@@ -212,12 +212,27 @@ async def properties_map(request: Request, limit: int = 50000) -> dict[str, Any]
 
 
 @router.post('/geocode/backfill')
-async def trigger_backfill(request: Request, limit: int = 200, force: bool = False) -> dict[str, Any]:
+async def trigger_backfill(
+    request: Request, limit: int = 200, force: bool = False,
+    job_id: str | None = None, recheck: bool = False, dry_run: bool = False,
+) -> dict[str, Any]:
     """Kick off a background geocoding pass; fire-and-forget like scraping.py's pattern."""
     sb = request.app.state.supabase
     if sb is None:
         return {'error': 'Supabase no configurado'}
-    asyncio.ensure_future(_run_backfill(sb, limit=limit, force=force))
+    if not 1 <= limit <= 1000:
+        raise HTTPException(status_code=422, detail='limit debe estar entre 1 y 1000')
+    if recheck and not job_id:
+        raise HTTPException(status_code=422, detail='recheck requiere job_id')
+    if job_id:
+        from uuid import UUID
+        try:
+            job_id = str(UUID(job_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail='job_id inválido') from exc
+    asyncio.ensure_future(_run_backfill(
+        sb, limit=limit, force=force, job_id=job_id, recheck=recheck, dry_run=dry_run,
+    ))
     return _backfill_state()
 
 

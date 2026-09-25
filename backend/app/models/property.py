@@ -73,6 +73,8 @@ class NormalizedProperty(BaseModel):
     imagenes: list[str] = Field(default_factory=list)
     fuente: Fuente
     url_origen: str | None = None
+    lat: float | None = None
+    lng: float | None = None
     confianza_extraccion: float = 0.8
 
 
