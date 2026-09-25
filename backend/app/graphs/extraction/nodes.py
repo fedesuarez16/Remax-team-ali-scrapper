@@ -1378,13 +1378,34 @@ async def run_website_scraper(state: dict[str, Any], config: RunnableConfig) -> 
                 units = state.get('source_filters')
                 if not units:
                     raise ValueError('Faltan los filtros para buscar en la fuente configurada.')
+                # Una unidad por zona pedida. Se aíslan entre sí porque cada
+                # una es un pedido distinto a una red ajena: la zona 5 con
+                # captcha no puede descartar las cuatro que YA trajeron avisos.
+                # Antes el `for` iba pelado y el `except` de afuera se comía
+                # `properties` entero — tirar trabajo ya hecho y pagado.
                 properties = []
+                unit_errors: list[str] = []
                 for filters in units:
-                    properties.extend(await service.scrape_source(
-                        registered.id, filters, on_progress,
-                    ))
+                    try:
+                        properties.extend(await service.scrape_source(
+                            registered.id, filters, on_progress,
+                        ))
+                    except Exception as unit_exc:
+                        # Seguir no es tapar: sin esto una búsqueda que perdió
+                        # media zona se ve igual que una completa.
+                        zona_fallida = filters.zona_pedida or filters.zona or 'zona sin nombre'
+                        unit_errors.append(
+                            f'{registered.id} ({zona_fallida}): {unit_exc}'
+                        )
+                        await adispatch_custom_event('error', {
+                            'event': 'error', 'source': registered.id,
+                            'message': f'{registered.name} — {zona_fallida}: {unit_exc}',
+                            'recoverable': True,
+                        }, config=config)
                 unique = {p.url_origen: p for p in properties if p.url_origen}
                 output = {'registered_properties': list(unique.values())}
+                if unit_errors:
+                    output['errors'] = unit_errors
             else:
                 pages = await service.scrape_website(url, on_progress)
                 output = {'website_pages': pages}

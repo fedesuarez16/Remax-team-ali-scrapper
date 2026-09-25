@@ -205,13 +205,34 @@ export function useSSEStream() {
       close()
     })
 
+    // `error` en un EventSource son DOS cosas distintas y antes se trataban
+    // igual, cerrando el stream en ambos casos:
+    //
+    // 1. sin `data` → falla de transporte (la conexión se cortó). Ahí cerrar es
+    //    correcto: si no, EventSource reconecta solo y en loop.
+    // 2. con `data` → un `event: error` que mandó el backend. Y esos vienen
+    //    casi siempre con `recoverable: true`: es UN portal o UNA inmobiliaria
+    //    que falló, con la búsqueda viva y el resto de las fuentes todavía
+    //    corriendo del otro lado.
+    //
+    // Cerrar en el caso 2 era el bug: un portal con captcha colgaba el
+    // teléfono y el usuario se quedaba sin los resultados de los otros seis,
+    // sin `done`, sin conteo final y sin el costo — mientras el backend seguía
+    // scrapeando y guardando en la base. La búsqueda no se detenía: dejábamos
+    // de escucharla.
+    //
+    // El default es SEGUIR: el backend usa el mismo criterio
+    // (`data.get('recoverable', True)`), y sólo su error terminal manda
+    // `recoverable: false` explícito.
     es.addEventListener('error', (e) => {
       const me = e as MessageEvent
-      if (me.data) {
-        const d = JSON.parse(me.data)
-        setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'agent', text: `Error: ${d.message}` }])
-      }
-      close()
+      if (!me.data) { close(); return }
+      let d: { message?: string; recoverable?: boolean } = {}
+      try { d = JSON.parse(me.data) } catch { close(); return }
+      setMessages((p) => [...p, {
+        id: crypto.randomUUID(), type: 'agent', text: `Error: ${d.message}`,
+      }])
+      if (d.recoverable === false) close()
     })
 
     return es
