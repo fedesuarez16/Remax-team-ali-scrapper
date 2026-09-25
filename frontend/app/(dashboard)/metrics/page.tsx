@@ -5,6 +5,7 @@ import {
   GRANULARITIES, RANGE_PRESETS, useMetrics, type ExpensiveSearch, type ZoneRow,
 } from '@/hooks/useMetrics'
 import SpendChart from '@/components/metrics/SpendChart'
+import { PasswordGate } from '@/components/auth/PasswordGate'
 import {
   BarList, Column, DataTable, HeroFigure, Legend, Meter, Panel, PanelNote, StatTile,
 } from '@/components/metrics/Primitives'
@@ -23,6 +24,14 @@ function filterButton(active: boolean): string {
 }
 
 export default function MetricsPage() {
+  return (
+    <PasswordGate title="Métricas">
+      <MetricsDashboard />
+    </PasswordGate>
+  )
+}
+
+function MetricsDashboard() {
   const {
     range, setPreset, setDates, setGranularidad,
     data, loading, stale, unreachable, panelErrors, refresh,
