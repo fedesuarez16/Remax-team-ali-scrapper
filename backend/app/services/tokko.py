@@ -1,4 +1,4 @@
-"""Tokko's public website search, reviewed for Mauro Perri, Urquiza and KW Suma.
+"""Tokko's public website search for the reviewed agencies in source_registry.
 
 Uses /Buscar and its p=N HTML fragments, then each /p/ detail page. No API
 credentials, browser, or LLM. Both Tokko templates used by the registered
@@ -146,6 +146,8 @@ def search_params(filters: ScrapingFilters, location: str | None) -> dict[str, s
 def _new_card_location(card: Any, kind: str, operation: str, street: str) -> str:
     image = card.select_one('img.img-whp')
     alt = str(image.get('alt') or '') if image else ''
+    alt = ' '.join(alt.split())
+    street = ' '.join(street.split())
     prefix = re.compile(
         rf'^Foto\s+{re.escape(kind)}\s+en\s+{re.escape(operation)}\s+en\s+', re.I,
     )
@@ -199,14 +201,14 @@ def parse_listing(html: str, source: SearchSource) -> list[RawProperty]:
             image = card.select_one('.prop_img img')
             title = street or classic_identity
         else:
-            kind = _text(card, '.text-thm')
+            kind = _text(card, '.text-thm, .prop-card-red-text')
             operation = _text(card, '.prop-card-operation-tag')
             marker = card.select_one('.flaticon-placeholder')
             street = marker.parent.get_text(' ', strip=True) if marker and marker.parent else ''
             location = _new_card_location(card, kind, operation, street)
-            price_box = card.select_one('.price-list-tag')
+            price_box = card.select_one('.price-list-tag, .fp_price p')
             image = card.select_one('img.img-whp')
-            title = _text(card, '.prop-title') or f'{kind} en {operation} en {location}'
+            title = _text(card, '.prop-title, .details h4') or f'{kind} en {operation} en {location}'
         if not kind or not operation or not location or not link:
             malformed += 1
             continue
@@ -237,7 +239,9 @@ def parse_listing(html: str, source: SearchSource) -> list[RawProperty]:
             banos=int(value) if (value := _number(facts.get('banos', ''))) is not None else None,
             cocheras=int(value) if (value := _number(facts.get('cocheras', ''))) is not None else None,
             m2_cubiertos=_positive_number(facts.get('superficie cubierta', '')),
-            m2_total=_positive_number(facts.get('total construido', '')),
+            m2_total=_positive_number(
+                facts.get('total construido', '') or facts.get('area total construida', ''),
+            ),
             url_origen=urljoin(source.base_url, str(link['href'])),
             imagenes=[photo] if photo.startswith('https://') else [],
             raw=raw,

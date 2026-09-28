@@ -4698,6 +4698,8 @@ class ApifyService(BaseApifyService):
         from app.services.sabella import scrape_sabella
         from app.services.tokko import scrape_tokko
         from app.services.alberto_dacal import scrape_alberto_dacal
+        from app.services.prado import scrape_prado
+        from app.services.yacoub import scrape_yacoub
 
         registered = source_by_id(source)
         if registered and registered.adapter == 'tokko':
@@ -4715,6 +4717,10 @@ class ApifyService(BaseApifyService):
             return await scrape_houzez(registered, filters, on_progress)
         if registered and registered.adapter == 'sabella':
             return await scrape_sabella(registered, filters, on_progress)
+        if registered and registered.adapter == 'yacoub':
+            return await scrape_yacoub(registered, filters, on_progress)
+        if registered and registered.adapter == 'prado':
+            return await scrape_prado(registered, filters, on_progress)
 
         if source == 'mercadolibre':
             return await _scrape_mercadolibre(filters, on_progress)

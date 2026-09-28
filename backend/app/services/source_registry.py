@@ -86,6 +86,12 @@ SEARCH_SOURCES = (
         'sabella', 'Sabella Propiedades', 'https://www.sabellapropiedades.com.ar',
         'sabella',
     ),
+    SearchSource('yacoub', 'Yacoub', 'https://yacoub.com.ar', 'yacoub'),
+    SearchSource('piazza', 'Piazza Propiedades', 'https://www.piazzapropiedades.com.ar', 'tokko'),
+    SearchSource('feysulaj', 'Feysulaj Propiedades', 'https://www.feysulaj.com.ar', 'tokko'),
+    SearchSource('arraras', 'Arrarás Propiedades', 'https://www.japropiedades.com.ar', 'tokko'),
+    # The agency links this public InmoBúsqueda profile from its own website.
+    SearchSource('prado', 'Prado Propiedades', 'http://www.pradopropiedades.com.ar', 'prado'),
 )
 
 # InmoBúsqueda usa el mismo registro técnico para resolver su catálogo, pero

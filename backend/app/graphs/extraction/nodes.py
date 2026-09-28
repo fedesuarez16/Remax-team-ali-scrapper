@@ -233,7 +233,7 @@ def _read_selection(state: ScrapingState) -> dict[str, Any]:
 
     An absent key preserves the historical discovery flow for jobs created
     before the precise registry existed. New chat and map requests always send
-    `inmobiliarias`, even when its empty value means "all ten"."""
+    `inmobiliarias`, even when its empty value means "all configured agencies"."""
     sel = state.get('source_selection') or {}
     zona = (sel.get('zona_inmobiliarias') or '').strip()
     return {

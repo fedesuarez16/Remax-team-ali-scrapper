@@ -100,3 +100,67 @@ cinco ambientes, dos dormitorios y 20 fotos. Mauro Perri devolvió cero para
 ese límite; las dos casas de su listado consultado publicaban 235.000 y
 630.000 USD. La ficha de la primera se leyó además por separado y produjo cinco
 ambientes, tres dormitorios y 20 fotos.
+
+## Yacoub, Piazza, Feysulaj, Arrarás y Prado (28 de septiembre de 2026)
+
+Las cinco están disponibles en el selector de inmobiliarias, los indicadores
+de progreso y los filtros de propiedades. Se agregan al catálogo predeterminado
+(14 inmobiliarias) y pueden seleccionarse individualmente.
+
+| Fuente | `scrape_source` | Catálogo consultado |
+| --- | --- | --- |
+| [Yacoub](https://yacoub.com.ar/) | `yacoub` | Buscador público `/propiedades/` con el catálogo JSON de ubicaciones de su propia web. |
+| [Piazza Propiedades](https://www.piazzapropiedades.com.ar/) | `piazza` | Tokko: `/Buscar` y fichas `/p/`. |
+| [Feysulaj Propiedades](https://www.feysulaj.com.ar/) | `feysulaj` | Tokko: `/Buscar` y fichas `/p/`. |
+| [Arrarás Propiedades](https://www.japropiedades.com.ar/) | `arraras` | Tokko: tarjetas de cuadrícula, precio anidado y galería de la ficha. |
+| [Prado Propiedades](http://www.pradopropiedades.com.ar/) | `prado` | Su [perfil de InmoBúsqueda](https://www.inmobusqueda.com/pradopropiedades), enlazado desde el [Linktree oficial](https://linktr.ee/PradoPropiedades). |
+
+Yacoub resuelve la ubicación con ascendencia y distingue La Plata ciudad del
+partido. Envía operación y tipo al buscador, recorre `paginado=N` y lee
+la ficha para verificar ambientes, dormitorios, superficies, coordenadas y fotos.
+Las galerías excluyen las propiedades recomendadas. Las ubicaciones desconocidas
+o ambiguas nunca se convierten en una búsqueda sin zona. El precio se verifica
+al final: el sitio mostró paginación inconsistente al combinar límites de precio
+con `currency=ANY`, y el modelo de búsqueda no selecciona una moneda.
+
+Piazza y Feysulaj reutilizan las plantillas Tokko anteriores. Arrarás agrega una
+variante de tarjetas con precio dentro de `.fp_price p`, tipo en
+`.prop-card-red-text` y superficie construida en los datos de la tarjeta.
+Se conserva la distinción entre ambientes y dormitorios.
+
+La web propia de Prado muestra «en construcción». Su integración verifica el
+perfil público y envía siempre `eid=2134` al formulario de búsqueda de
+InmoBúsqueda. Recorre todas sus páginas y aplica los filtros finales por zona,
+operación, tipo, precio, dormitorios y superficie. No consulta el catálogo
+general del portal. El perfil declara UTF-8 aunque algunas respuestas llegan
+en ISO-8859-1; ambas codificaciones están cubiertas.
+
+Las tarjetas de Prado ofrecen descripción abreviada y foto de portada, y no
+siempre publican ambientes o superficies. Las fichas individuales devolvieron
+un desafío antibot durante esta revisión. No se infieren datos faltantes:
+una propiedad sin ambientes no cumple una búsqueda que exija ese campo.
+El desafío o un cambio de formato del listado se informa como error de acceso,
+no como cero coincidencias.
+
+La migración `supabase/migrations/20260928120000_add_five_agency_sources.sql`
+habilita los cinco identificadores en `properties.fuente` e inserta las fuentes
+manuales por dominio sin duplicar ni modificar filas existentes. No requiere
+credenciales nuevas, Apify ni extracción con LLM.
+
+Pruebas de esta incorporación:
+
+```sh
+cd backend
+.venv/bin/pytest tests/services/test_registered_agency_scrapers.py \
+  tests/services/test_yacoub_scraper.py tests/services/test_prado_scraper.py \
+  tests/graphs/test_registered_sources.py tests/graphs/test_route_after_parse_sources.py \
+  tests/api/test_scraping_start_source_selection.py
+```
+
+La prueba HTTP real devolvió 12 departamentos de Piazza en La Plata hasta
+100.000 USD, 4 casas de Feysulaj y 5 de Arrarás en City Bell hasta 200.000 USD,
+7 casas de Yacoub en City Bell hasta 100.000 USD y 121 departamentos de Prado
+en La Plata hasta 100.000 USD. Son consultas de verificación independientes,
+no totales de inventario: en las tres fuentes Tokko se limitó esta prueba a
+una página; Yacoub y Prado recorrieron toda la paginación de esas consultas.
+No se guardaron propiedades de prueba ni páginas capturadas en el repositorio.

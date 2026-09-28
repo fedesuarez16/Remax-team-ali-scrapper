@@ -130,6 +130,14 @@ def classic_card(listing_id=300) -> str:
     ('http://urquiza.com.ar/Venta', 'urquiza'),
     ('https://www.kwsuma.com.ar/Propiedades', 'kwsuma'),
     ('https://keymexlaplata.com.ar/Buscar?operation=1', 'keymex'),
+    ('https://yacoub.com.ar/propiedades/', 'yacoub'),
+    ('https://www.piazzapropiedades.com.ar/Buscar', 'piazza'),
+    ('https://www.feysulaj.com.ar/', 'feysulaj'),
+    ('http://japropiedades.com.ar/Venta', 'arraras'),
+    ('http://www.pradopropiedades.com.ar/', 'prado'),
+    ('https://www.pradopropiedades.com.ar/', 'prado'),
+    ('https://www.inmobusqueda.com.ar/pradopropiedades', None),
+    ('https://yacoub.com.ar.evil.example/', None),
     ('https://www.inmobusqueda.com.ar/', 'inmobusqueda'),
     ('https://www.inmobusqueda.com.ar/inmobiliaria-123', None),
     ('https://urquiza.com.ar.evil.example/', None),
@@ -281,7 +289,9 @@ def mock_client(monkeypatch, handler):
     return requests
 
 
-@pytest.mark.parametrize('source_id', ['mauroperri', 'urquiza', 'kwsuma', 'keymex'])
+@pytest.mark.parametrize('source_id', [
+    'mauroperri', 'urquiza', 'kwsuma', 'keymex', 'piazza', 'feysulaj', 'arraras',
+])
 async def test_scraper_walks_beyond_an_unmatched_page_and_fetches_only_own_details(
     monkeypatch, source_id,
 ):
@@ -357,4 +367,45 @@ async def test_apify_entrypoint_dispatches_the_registered_source(monkeypatch):
     service = apify.ApifyService.__new__(apify.ApifyService)
     props = await service.scrape_source('urquiza', ScrapingFilters(zona='City Bell'), AsyncMock())
     assert props[0].fuente == 'urquiza'
+    assert scrape.call_args.args[1].zona_pedida == 'City Bell'
+
+
+def test_arraras_grid_card_reads_nested_price_and_normalizes_street_spacing():
+    html = current_card().replace('text-thm', 'prop-card-red-text').replace(
+        '<div class="price-list-tag">USD120.000</div>',
+        '<span class="fp_price"><p>USD120.000</p></span>',
+    ).replace('Superficie cubierta: 130', 'Área total construida: 130').replace(
+        'City Bell, La Plata 476 esquina', 'City Bell, La Plata 476  esquina',
+    )
+    prop = parse_listing(html, source_by_id('arraras'))[0]
+    assert prop.precio == 120000
+    assert prop.moneda == 'USD'
+    assert prop.direccion == '476 esquina 132 bis, City Bell, La Plata'
+    assert prop.m2_total == 130
+    assert prop.ambientes == 4
+    assert prop.raw['dormitorios'] == 3
+    prop = parse_detail(CURRENT_DETAIL, prop)
+    assert prop.m2_cubiertos == 140
+    assert len(prop.imagenes) == 2
+
+
+@pytest.mark.parametrize(('source_id', 'module_name', 'function_name'), [
+    ('yacoub', 'yacoub', 'scrape_yacoub'),
+    ('piazza', 'tokko', 'scrape_tokko'),
+    ('feysulaj', 'tokko', 'scrape_tokko'),
+    ('arraras', 'tokko', 'scrape_tokko'),
+    ('prado', 'prado', 'scrape_prado'),
+])
+async def test_new_agencies_dispatch_to_their_reviewed_adapter(
+    monkeypatch, source_id, module_name, function_name,
+):
+    import importlib
+
+    module = importlib.import_module(f'app.services.{module_name}')
+    scrape = AsyncMock(return_value=[RawProperty(fuente=source_id, direccion='City Bell')])
+    monkeypatch.setattr(module, function_name, scrape)
+    service = apify.ApifyService.__new__(apify.ApifyService)
+    props = await service.scrape_source(source_id, ScrapingFilters(zona='City Bell'), AsyncMock())
+    assert props[0].fuente == source_id
+    assert scrape.call_args.args[0].id == source_id
     assert scrape.call_args.args[1].zona_pedida == 'City Bell'

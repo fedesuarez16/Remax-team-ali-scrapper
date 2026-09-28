@@ -55,6 +55,11 @@ export const FUENTES = [
   { value: 'remaxroble', label: 'RE/MAX Roble' },
   { value: 'axion', label: 'Axion Group' },
   { value: 'sabella', label: 'Sabella Propiedades' },
+  { value: 'yacoub', label: 'Yacoub' },
+  { value: 'piazza', label: 'Piazza Propiedades' },
+  { value: 'feysulaj', label: 'Feysulaj Propiedades' },
+  { value: 'arraras', label: 'Arrarás Propiedades' },
+  { value: 'prado', label: 'Prado Propiedades' },
   { value: 'googlemaps', label: 'Sitios web' },
 ]
 

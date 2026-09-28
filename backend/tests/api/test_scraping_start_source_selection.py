@@ -134,6 +134,21 @@ async def test_start_rejects_unknown_registered_agency_id() -> None:
     assert fake_sb.captured_inserts == []
 
 
+async def test_start_accepts_and_persists_the_five_new_agencies() -> None:
+    fake_sb = _FakeSupabase()
+    agencies = ['yacoub', 'piazza', 'feysulaj', 'arraras', 'prado']
+    async with _client(fake_sb) as client:
+        resp = await client.post('/start', json={
+            'query': 'Casa en City Bell',
+            'source_selection': {
+                'buscar_portales': False, 'buscar_inmobiliarias': True,
+                'inmobiliarias': agencies,
+            },
+        })
+    assert resp.status_code == 200
+    assert fake_sb.captured_inserts[0]['source_selection']['inmobiliarias'] == agencies
+
+
 # ── inmobiliarias (+ zona) ────────────────────────────────────────────────────
 
 

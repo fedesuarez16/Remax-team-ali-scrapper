@@ -34,9 +34,14 @@ export type InmobiliariaId =
   | 'remaxroble'
   | 'axion'
   | 'sabella'
+  | 'yacoub'
+  | 'piazza'
+  | 'feysulaj'
+  | 'arraras'
+  | 'prado'
 
-/** Inmobiliarias con integración revisada y búsqueda geográfica nativa.
- * Vacío en SourceSelection significa las diez, igual que en portales. */
+/** Inmobiliarias con integración revisada y filtro por ubicación.
+ * Vacío en SourceSelection significa todas las configuradas, igual que en portales. */
 export const INMOBILIARIAS: { id: InmobiliariaId; label: string }[] = [
   { id: 'mauroperri', label: 'Mauro Perri' },
   { id: 'urquiza', label: 'Urquiza Propiedades' },
@@ -47,6 +52,11 @@ export const INMOBILIARIAS: { id: InmobiliariaId; label: string }[] = [
   { id: 'remaxroble', label: 'RE/MAX Roble' },
   { id: 'axion', label: 'Axion Group' },
   { id: 'sabella', label: 'Sabella Propiedades' },
+  { id: 'yacoub', label: 'Yacoub' },
+  { id: 'piazza', label: 'Piazza Propiedades' },
+  { id: 'feysulaj', label: 'Feysulaj Propiedades' },
+  { id: 'arraras', label: 'Arrarás Propiedades' },
+  { id: 'prado', label: 'Prado Propiedades' },
 ]
 
 export type SourceSelection = {
@@ -54,7 +64,7 @@ export type SourceSelection = {
   /** Empty = todos los portales. A subset restricts the fan-out. */
   portales: PortalId[]
   buscar_inmobiliarias: boolean
-  /** Empty = las diez inmobiliarias con scraper preciso. */
+  /** Empty = todas las inmobiliarias configuradas. */
   inmobiliarias: InmobiliariaId[]
   /** Campos legados conservados para poder abrir búsquedas anteriores. */
   zona_inmobiliarias: string | null

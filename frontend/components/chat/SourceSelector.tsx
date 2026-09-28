@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils'
  *
  * Two independent tracks, either or both:
  * - Portales inmobiliarios → optional subset of the portal scrapers.
- * - Inmobiliarias → optional subset of the ten reviewed integrations.
+ * - Inmobiliarias → optional subset of the reviewed integrations.
  */
 export function SourceSelector({
   value,

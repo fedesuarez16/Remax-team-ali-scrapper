@@ -26,6 +26,11 @@ const FUENTE_LABEL: Record<string, string> = {
   remaxroble: 'RE/MAX Roble',
   axion: 'Axion Group',
   sabella: 'Sabella Propiedades',
+  yacoub: 'Yacoub',
+  piazza: 'Piazza Propiedades',
+  feysulaj: 'Feysulaj Propiedades',
+  arraras: 'Arrarás Propiedades',
+  prado: 'Prado Propiedades',
   googlemaps: 'Google Maps',
 }
 
