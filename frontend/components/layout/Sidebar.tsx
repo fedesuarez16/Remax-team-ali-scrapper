@@ -1,11 +1,48 @@
 'use client'
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { BarChart3, Building2, Database, Fence, FileText, Folder, Globe, MapPin, Plus, Search, Sparkles } from 'lucide-react'
+import { BarChart3, Building2, ChevronDown, Database, Fence, FileText, Folder, Globe, MapPin, Plus, Search, Sparkles, Users } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import SearchHistoryList from '@/components/layout/SearchHistoryList'
 
 const AGENCY_KEY = 'prop_agency_config'
+const CRM_BASE_URL = 'https://demo-ali-crm.vercel.app'
+
+type CrmLink = { label: string; path: string }
+
+const CRM_SECTIONS: { title: string | null; links: CrmLink[] }[] = [
+  {
+    title: null,
+    links: [
+      { label: 'Dashboard', path: '/dashboard' },
+      { label: 'Gastos', path: '/gastos' },
+      { label: 'Leads', path: '/leads' },
+    ],
+  },
+  {
+    title: 'Mensajería',
+    links: [
+      { label: 'Chats', path: '/chat' },
+      { label: 'Mensajes Programados', path: '/mensajes-programados' },
+    ],
+  },
+  {
+    title: 'Cartera',
+    links: [
+      { label: 'Propiedades', path: '/propiedades' },
+      { label: 'Búsquedas', path: '/propiedades/busquedas' },
+      { label: 'Campañas Activas', path: '/campanas-activas' },
+    ],
+  },
+  {
+    title: 'Asistentes',
+    links: [
+      { label: 'Cotizaciones', path: '/asistente?assistantId=tasador' },
+      { label: 'Documentación', path: '/asistente?assistantId=ventas' },
+      { label: 'Modelos', path: '/asistente?assistantId=modelos' },
+    ],
+  },
+]
 
 type AgencyConfig = {
   nombre: string
@@ -26,6 +63,7 @@ function readAgencyConfig(): AgencyConfig {
 export default function Sidebar() {
   const pathname = usePathname()
   const [agency, setAgency] = useState<AgencyConfig>({ nombre: '', telefono: '', whatsapp: '' })
+  const [crmOpen, setCrmOpen] = useState(false)
 
   useEffect(() => {
     setAgency(readAgencyConfig())
@@ -166,6 +204,42 @@ export default function Sidebar() {
           <BarChart3 className="size-4" />
           Métricas
         </Link>
+        <button
+          type="button"
+          onClick={() => setCrmOpen((open) => !open)}
+          aria-expanded={crmOpen}
+          className="flex w-full items-center gap-2 rounded-xl bg-black px-3 py-2 text-sm font-medium text-white transition hover:bg-black/85"
+        >
+          <Users className="size-4" />
+          CRM
+          <ChevronDown
+            className={`ml-auto size-4 text-white/60 transition-transform ${crmOpen ? 'rotate-180' : ''}`}
+          />
+        </button>
+        {crmOpen && (
+          <div className="space-y-2 pb-1 pl-4 pt-1">
+            {CRM_SECTIONS.map((section) => (
+              <div key={section.title ?? 'general'}>
+                {section.title && (
+                  <p className="px-3 pb-0.5 text-[10px] font-medium uppercase tracking-wide text-sidebar-foreground/40">
+                    {section.title}
+                  </p>
+                )}
+                {section.links.map((link) => (
+                  <a
+                    key={link.path}
+                    href={`${CRM_BASE_URL}${link.path}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex w-full items-center rounded-lg px-3 py-1.5 text-sm text-sidebar-foreground/80 transition hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  >
+                    {link.label}
+                  </a>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Historial */}
