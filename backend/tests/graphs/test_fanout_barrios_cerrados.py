@@ -192,3 +192,4 @@ class TestLasRefsConfirmadasViajanALaRama:
     def test_un_barrio_sin_probar_no_lleva_refs(self):
         sends = route_after_parse(_state(barrios_cerrados=[_GRAND_BELL]))
         assert _branches(sends)[0].barrio_portal_refs == {}
+

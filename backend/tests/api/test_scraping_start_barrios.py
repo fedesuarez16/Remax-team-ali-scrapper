@@ -241,3 +241,4 @@ class TestLasRefsViajanConLasFilas:
         ]
         inputs = await _read_job_inputs(sb, 'job-1')
         assert inputs['barrios_cerrados'][0]['nombre'] == 'Grand Bell'
+

@@ -81,6 +81,29 @@ async def test_a_portal_without_a_parser_keeps_the_generic_harvest(
     assert len(gallery) == 6
 
 
+async def test_an_inmobusqueda_ficha_stuck_on_one_photo_reaches_the_harvest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El caso reportado: "preparar y enviar" regeneraba la ficha con 1 sola foto
+    pixelada. `inmobusqueda` no caía en ningún despacho de `_fetch_full_gallery`
+    (ni parser propio, ni harvest genérico) y `[]` volvía sin intentar nada — la
+    galería se quedaba clavada para siempre en la miniatura del listado.
+    """
+    from app.services import apify
+
+    url = 'https://www.inmobusqueda.com.ar/ficha-512291'
+
+    async def fake_harvest(urls: list[str], render_budget: int = 8) -> dict[str, list[str]]:
+        return {urls[0]: [f'h{i}.jpg' for i in range(9)]}
+
+    monkeypatch.setattr(apify, 'harvest_page_images', fake_harvest)
+
+    gallery = await ficha._fetch_full_gallery(
+        {'fuente': 'inmobusqueda', 'url_origen': url}
+    )
+    assert len(gallery) == 9, 'la ficha de InmoBúsqueda no llegó al harvest genérico'
+
+
 async def test_the_generic_harvest_still_rescues_a_dead_portal_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -226,3 +226,4 @@ def barrio_probe_forms(nombre: str, localidad: str) -> list[str]:
         if forma not in formas:
             formas.append(forma)
     return formas
+

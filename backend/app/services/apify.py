@@ -683,6 +683,107 @@ def _is_cloudflare_challenge(body: str) -> bool:
     return 'just a moment' in body[:2000].lower()
 
 
+# ── Argenprop: telling a block apart from an empty listing ────────────────────
+#
+# Measured 2026-09-18: EVERY Argenprop search returned 0 — City Bell included,
+# so nothing to do with gated communities — while paying for the actor run. The
+# raw dataset item said why:
+#
+#   crawl.httpStatusCode : 405
+#   html (3045 bytes)    : <title>Human Verification</title>
+#                          <div id="captcha-container" ...
+#
+# The portal served a captcha to Apify's datacenter IP. `_scrape_argenprop`
+# handed that 3 KB of challenge markup to the card parser, got no cards, and
+# reported `done count=0` — indistinguishable from an honest empty listing, and
+# silent in the log. A block says NOTHING about whether listings exist, which is
+# the line `importer.PortalBlocked` already draws for the ficha path.
+
+# Statuses where the portal rejects US, not the URL. Same set as
+# `importer._BLOCKED_STATUS`; 405 is the one Argenprop actually returns.
+_ARGENPROP_BLOCKED_STATUS = frozenset({401, 403, 405, 429, 503})
+
+# A WAF challenge often comes back 200 with valid HTML, so the body has to be
+# judged too — and NOT by vendor name. Verified live (see `importer.py`):
+# argenprop.com injects `captcha-sdk.awswaf.com/challenge.js` into EVERY page,
+# real listings included, so matching the vendor flags perfectly good pages and
+# sends every search to pay for a run it does not need.
+#
+# The honest signal is VISIBLE TEXT: the challenge is kilobytes of script that
+# says almost nothing (measured: 514 characters), while a listing page carries
+# thousands of characters of description. The threshold is deliberately loose —
+# erring high means escalating and spending for nothing.
+_ARGENPROP_MIN_VISIBLE_TEXT = 500
+
+_BROWSER_UA = (
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+)
+
+
+def _visible_text_len(html: str) -> int:
+    """How much a human would actually READ on this page."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, 'html.parser')
+    for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
+        tag.decompose()
+    return len(soup.get_text(separator=' ').strip())
+
+
+def _argenprop_usable_html(page: Mapping[str, Any]) -> str | None:
+    """One actor item → its HTML, or None when the portal blocked us.
+
+    None is not "this page was empty": it is "we never saw this page". The
+    caller escalates instead of reporting a count.
+    """
+    html = str(page.get('html') or '')
+    if not html:
+        return None
+    status = int(((page.get('crawl') or {}).get('httpStatusCode')) or 200)
+    if status in _ARGENPROP_BLOCKED_STATUS:
+        return None
+    if _visible_text_len(html) < _ARGENPROP_MIN_VISIBLE_TEXT:
+        return None
+    return html
+
+
+async def _argenprop_html_directo(url: str) -> str | None:
+    """Last-resort fetch: plain httpx with a browser User-Agent.
+
+    Not speculative — measured 2026-09-18, this pulls 673 KB for
+    `casas/venta/miralagos` (6 properties through the existing card parser)
+    while the actor got 3 KB of captcha. The header is the whole difference.
+
+    Goes out through `SCRAPER_PROXY_URL` when configured, for the same reason
+    the ZonaProp browser fallback does: a bare request uses the container's own
+    datacenter IP, which is exactly the address the portal just refused.
+
+    Returns None on a challenge or any failure, never a partial page — a caller
+    that cannot tell "blocked" from "empty" is the bug this exists to fix.
+    """
+    from app.core.config import settings
+
+    proxy = getattr(settings, 'SCRAPER_PROXY_URL', None) or None
+    try:
+        async with httpx.AsyncClient(
+            headers={
+                'User-Agent': _BROWSER_UA,
+                'Accept': 'text/html,application/xhtml+xml',
+                'Accept-Language': 'es-AR,es;q=0.9',
+            },
+            timeout=25, follow_redirects=True, proxy=proxy,
+        ) as client:
+            resp = await client.get(url)
+        if resp.status_code in _ARGENPROP_BLOCKED_STATUS:
+            return None
+        resp.raise_for_status()
+    except Exception:
+        return None
+    html = resp.text
+    return html if _visible_text_len(html) >= _ARGENPROP_MIN_VISIBLE_TEXT else None
+
+
 def _playwright_proxy(proxy_url: str | None) -> dict[str, str] | None:
     """`SCRAPER_PROXY_URL` in the shape Playwright wants.
 
@@ -4964,14 +5065,59 @@ class ApifyService(BaseApifyService):
             # the full gallery rendered, so no per-ficha fetch is needed.
             'htmlTransformer': 'none',
         }
-        raw_pages = await self._run_actor('argenprop', _ACTORS['argenprop'], input_data)
+        async def _por_actor() -> list[str]:
+            raw_pages = await self._run_actor(
+                'argenprop', _ACTORS['argenprop'], input_data)
+            paginas = [h for page in raw_pages if (h := _argenprop_usable_html(page))]
+            if raw_pages and not paginas:
+                logger.warning(
+                    'argenprop: el actor comio bloqueo en las %d paginas '
+                    '(captcha/WAF) - esto NO es "0 propiedades".', len(raw_pages),
+                )
+            return paginas
+
+        async def _directo() -> list[str]:
+            paginas = [h for u in urls if (h := await _argenprop_html_directo(u))]
+            if not paginas:
+                logger.warning(
+                    'argenprop: el pedido directo comio bloqueo en las %d paginas '
+                    '(captcha/WAF) - esto NO es "0 propiedades".', len(urls),
+                )
+            return paginas
+
+        # BARATO PRIMERO, y el barato ademas mide mejor. El actor come captcha
+        # en 10 de 10 paginas (HTTP 405 + "Human Verification", medido
+        # 2026-09-18) porque Argenprop rechaza la IP de datacenter de Apify:
+        # ponerlo primero facturaba ~US$0.0066 por nada y despues hacia el
+        # pedido directo igual. `ARGENPROP_USE_APIFY=true` lo devuelve al
+        # frente, porque el bloqueo sigue a la IP de SALIDA y en otro deploy
+        # puede quemarse el directo antes. Misma forma que `ZONAPROP_USE_APIFY`.
+        #
+        # Un bloqueo PARCIAL no escala: las paginas que pasaron son resultados
+        # reales, y re-pedir el resto paga latencia por algo que el parser ya
+        # tiene.
+        primero, segundo = (
+            (_por_actor, _directo) if settings.ARGENPROP_USE_APIFY
+            else (_directo, _por_actor)
+        )
+        usable = await primero()
+        if not usable:
+            usable = await segundo()
+            if usable:
+                logger.info(
+                    'argenprop: rescatado por el camino alternativo (%d paginas)',
+                    len(usable),
+                )
+            else:
+                logger.warning(
+                    'argenprop bloqueado por los DOS caminos - la busqueda sigue '
+                    'sin este portal. 0 propiedades de argenprop NO significa que '
+                    'no haya avisos publicados.',
+                )
 
         results: list[RawProperty] = []
         seen: set[str] = set()
-        for page in raw_pages:
-            html = page.get('html')
-            if not html:
-                continue
+        for html in usable:
             for prop in _parse_argenprop_page(html, filters):
                 key = str(prop.url_origen or '')
                 if key in seen:

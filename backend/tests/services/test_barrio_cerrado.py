@@ -266,3 +266,4 @@ class TestBarrioProbeForms:
 
         formas = barrio_probe_forms('Grand Bell', 'La Plata, La Plata')
         assert len(formas) == len(set(formas))
+

@@ -206,6 +206,23 @@ def test_remax_stuck_on_the_og_image_is_retried() -> None:
     assert _gallery_looks_incomplete(prop) is True
 
 
+def test_inmobusqueda_stuck_on_the_listing_thumbnails_is_retried() -> None:
+    """El listado sólo trae las 2 miniaturas de `img.FotoBox`; la ficha tiene más."""
+    prop = {
+        'url_origen': 'https://www.inmobusqueda.com.ar/ficha-512291',
+        'imagenes': ['a.jpg', 'b.jpg'],
+    }
+    assert _gallery_looks_incomplete(prop) is True
+
+
+def test_a_healthy_inmobusqueda_gallery_is_left_alone() -> None:
+    prop = {
+        'url_origen': 'https://www.inmobusqueda.com.ar/ficha-512291',
+        'imagenes': [f'i{i}.jpg' for i in range(9)],
+    }
+    assert _gallery_looks_incomplete(prop) is False
+
+
 def test_a_portal_without_its_own_parser_is_not_retried() -> None:
     """Argenprop o la web de una inmobiliaria no tienen fuente de verdad barata:
     reintentar sería pagar harvest headless sin saber si falta algo."""

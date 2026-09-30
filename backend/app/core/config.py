@@ -108,6 +108,17 @@ class Settings(BaseSettings):
     # tope, una búsqueda de La Plata son 67 páginas ≈ 87 MB y 4½ minutos sólo
     # de este portal, en paralelo con los otros seis. 0 = sin tope.
     ZONAPROP_MAX_RESULTS: int = 800
+    # Argenprop se pide DIRECTO por httpx con UA de browser, y el actor de
+    # Apify quedó como marcha atrás — misma inversión que ZonaProp, por el
+    # mismo motivo: el camino barato mide mejor. Medido 2026-09-18, el actor
+    # come captcha en 10 de 10 páginas (HTTP 405 + "Human Verification") porque
+    # Argenprop rechaza la IP de datacenter de Apify, así que cada búsqueda
+    # pagaba ~US$0.0066 por un run inservible y después hacía el fetch directo
+    # igual. El mismo pedido con UA de browser trae 673 KB de listado real.
+    #
+    # `true` vuelve a poner el actor primero: el bloqueo depende de la IP de
+    # SALIDA, así que en otro deploy puede quemarse el directo antes.
+    ARGENPROP_USE_APIFY: bool = False
     ARGENPROP_MAX_PAGES: int = 0         # 0 = the robots.txt ceiling (Allow: pagina-1..pagina-10)
     REMAX_MAX_PAGES: int = 0             # pages per RE/MAX search (API serves 3300+; verified live)
     REMAX_PAGE_SIZE: int = 200           # items per RE/MAX API page — 200 is the max the API honours

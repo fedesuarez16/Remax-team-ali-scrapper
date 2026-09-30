@@ -412,7 +412,13 @@ async def _alvira_gallery(url_origen: str, allow_escalation: bool = True) -> lis
 # Portales con parser propio, por host. La clave es un fragmento del dominio
 # porque MercadoLibre reparte los avisos entre subdominios por tipo de
 # propiedad (`casa.`, `departamento.`, `ph.`, `terreno.`, `articulo.`).
-_PORTAL_HOSTS = ('mercadolibre', 'zonaprop', 'remax', 'century21', *_ALVIRA_HOSTS)
+#
+# `inmobusqueda` entra por el mismo motivo que zonaprop/mercadolibre: el
+# listado sólo trae las 2 miniaturas de la tarjeta (`img.FotoBox`), mientras
+# que la ficha del aviso tiene la galería completa. Sin esto una propiedad con
+# 2 fotos en `imagenes` se leía como "galería sana" y `_enrich_gallery` nunca
+# la completaba.
+_PORTAL_HOSTS = ('mercadolibre', 'zonaprop', 'remax', 'century21', 'inmobusqueda', *_ALVIRA_HOSTS)
 
 
 async def portal_gallery_from_url(url: str, allow_escalation: bool = True) -> list[str]:
@@ -460,6 +466,15 @@ async def _fetch_full_gallery(
       so its harvested images belong to it unambiguously.
     - argenprop → generic Playwright harvest of the listing's own ficha page
       (same reasoning as googlemaps: one property per URL).
+    - inmobusqueda → same generic harvest, on the ficha's OWN url_origen (not
+      the listing card). `harvest_page_images` already calls
+      `_extract_images_from_html(anchor_to_og=True)`, which normalizes the
+      `/x<N>/` thumbnail segment on `fotosNN.inmobusqueda.com` to the CDN
+      original (`_full_size_image_url`) — the same fix already applied to the
+      search-listing parser, now reused for the ficha detail page. Sin esta
+      rama la ficha se quedaba pegada en la miniatura de 2 KB de la tarjeta:
+      `fuente == 'inmobusqueda'` no caía en ningún despacho y `[]` volvía sin
+      intentar nada.
     Instagram keeps the images captured at scrape time: re-harvesting pulls
     unrelated posts. Returns [] on any failure so the caller keeps the
     search-time images.
@@ -483,7 +498,7 @@ async def _fetch_full_gallery(
     portal = await portal_gallery_from_url(url_origen, allow_escalation)
     if portal:
         return portal
-    if fuente in ('googlemaps', 'argenprop', 'remax'):
+    if fuente in ('googlemaps', 'argenprop', 'remax', 'inmobusqueda'):
         from app.services.apify import harvest_page_images
         galleries = await harvest_page_images([url_origen])
         return galleries.get(url_origen, [])
