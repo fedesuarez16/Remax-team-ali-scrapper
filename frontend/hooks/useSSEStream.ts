@@ -229,10 +229,13 @@ export function useSSEStream() {
       if (!me.data) { close(); return }
       let d: { message?: string; recoverable?: boolean } = {}
       try { d = JSON.parse(me.data) } catch { close(); return }
+      // Un error recuperable es una fuente caída: se omite en silencio, la
+      // búsqueda sigue con el resto. Sólo el terminal llega al usuario.
+      if (d.recoverable !== false) return
       setMessages((p) => [...p, {
         id: crypto.randomUUID(), type: 'agent', text: `Error: ${d.message}`,
       }])
-      if (d.recoverable === false) close()
+      close()
     })
 
     return es
@@ -351,7 +354,7 @@ export function useSSEStream() {
           setLastJobId(resolvedJobId)
           setMessages((p) => [...p, doneMessage(resolvedJobId, d)])
           setIsStreaming(false)
-        } else if (d.event === 'error')
+        } else if (d.event === 'error' && d.recoverable === false)
           setMessages((p) => [...p, { id: crypto.randomUUID(), type: 'agent', text: `Error: ${d.message}` }])
       } catch { /* ignore parse errors */ }
     }

@@ -44,7 +44,7 @@ function StatusIcon({ status }: { status: SourceStatus }) {
 }
 
 function StatusBar({ progress }: { progress: ProgressMap }) {
-  const entries = Object.values(progress)
+  const entries = Object.values(progress).filter((s) => s.status !== 'error')
   const done = entries.filter((s) => s.status === 'done').length
   const pct = entries.length ? (done / entries.length) * 100 : 0
   return (
@@ -108,8 +108,10 @@ export function ProgressBubble({
 
   // Las fuentes con barra propia salen de la lista de abajo: repetirlas sería
   // mostrar el mismo dato dos veces con menos información.
+  // Una fuente caída se omite: no aporta nada que el usuario pueda accionar.
   const rows = Object.entries(progress).filter(
-    ([src, s]) => !(COUNTED_SOURCES as readonly string[]).includes(src) || !s.total
+    ([src, s]) => s.status !== 'error'
+      && (!(COUNTED_SOURCES as readonly string[]).includes(src) || !s.total)
   )
 
   return (
