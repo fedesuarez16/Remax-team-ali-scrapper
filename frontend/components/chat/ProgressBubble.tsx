@@ -20,6 +20,13 @@ const LABEL: Record<string, string> = {
   feysulaj: 'Feysulaj Propiedades',
   arraras: 'Arrarás Propiedades',
   prado: 'Prado Propiedades',
+  reyesaversa: 'Reyes Aversa Propiedades',
+  doorotero: 'Door Otero Rossi CB',
+  oterorossilp: 'Otero Rossi LP',
+  peterspuhl: 'Peter Puhl Company',
+  pabloamado: 'Pablo Amado Propiedades',
+  jeronimoponce: 'Jerónimo Ponce Propiedades',
+  manuelponce: 'Manuel Ponce Propiedades',
   inmobusqueda: 'InmoBúsqueda',
   extraccion: 'Analizando páginas',
 }

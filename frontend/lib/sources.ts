@@ -39,6 +39,13 @@ export type InmobiliariaId =
   | 'feysulaj'
   | 'arraras'
   | 'prado'
+  | 'reyesaversa'
+  | 'doorotero'
+  | 'oterorossilp'
+  | 'peterspuhl'
+  | 'pabloamado'
+  | 'jeronimoponce'
+  | 'manuelponce'
 
 /** Inmobiliarias con integración revisada y filtro por ubicación.
  * Vacío en SourceSelection significa todas las configuradas, igual que en portales. */
@@ -57,6 +64,13 @@ export const INMOBILIARIAS: { id: InmobiliariaId; label: string }[] = [
   { id: 'feysulaj', label: 'Feysulaj Propiedades' },
   { id: 'arraras', label: 'Arrarás Propiedades' },
   { id: 'prado', label: 'Prado Propiedades' },
+  { id: 'reyesaversa', label: 'Reyes Aversa Propiedades' },
+  { id: 'doorotero', label: 'Door Otero Rossi CB' },
+  { id: 'oterorossilp', label: 'Otero Rossi LP' },
+  { id: 'peterspuhl', label: 'Peter Puhl Company' },
+  { id: 'pabloamado', label: 'Pablo Amado Propiedades' },
+  { id: 'jeronimoponce', label: 'Jerónimo Ponce Propiedades' },
+  { id: 'manuelponce', label: 'Manuel Ponce Propiedades' },
 ]
 
 export type SourceSelection = {

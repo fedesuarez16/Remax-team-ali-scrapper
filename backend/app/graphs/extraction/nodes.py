@@ -14,7 +14,7 @@ from langgraph.types import Send, interrupt
 
 from app.core.config import settings
 from app.core.database import chunk_for_in_filter
-from app.models.property import Agency, NormalizedProperty, ScrapingFilters
+from app.models.property import Agency, NormalizedProperty, RawProperty, ScrapingFilters
 from app.graphs.extraction.state import ScrapingState
 from app.graphs.extraction.tools import (
     EXTRACT_FILTERS_TOOL, INSTAGRAM_EXTRACT_TOOL, INSTAGRAM_SYSTEM_PROMPT, SYSTEM_PROMPT,
@@ -27,7 +27,9 @@ from app.services.apify import (
     harvest_page_images,
 )
 from app.services.dedup import collapse_duplicates
-from app.services.source_registry import AGENCY_SEARCH_SOURCES, SEARCH_SOURCES, source_for_url
+from app.services.source_registry import (
+    AGENCY_SEARCH_SOURCES, SEARCH_SOURCES, source_by_id, source_for_url,
+)
 from app.services.ficha import portal_gallery_from_url
 from app.services.llm_costs import (
     SCOPE_EXTRACT_INSTAGRAM,
@@ -441,22 +443,53 @@ async def run_portal_scraper(state: dict[str, Any], config: RunnableConfig) -> d
     source = state['__source']
     filters: ScrapingFilters = state['filters']
     service = get_apify_service()
+    registered = source_by_id(source)
 
     async def on_progress(src: str, status: str, count: int) -> None:
+        label = registered.name if registered else src
         await adispatch_custom_event('progress', {
-            'event': 'progress', 'source': src, 'status': status, 'count': count,
+            'event': 'progress', 'source': registered.id if registered else src,
+            'status': status, 'count': count,
             'message': {
-                'running': f'Buscando en {src}...',
-                'done': f'{count} propiedades en {src}',
-                'error': f'Error en {src}',
+                'running': f'Buscando en {label}...',
+                'done': f'{count} propiedades en {label}',
+                'error': f'Error en {label}',
             }.get(status, ''),
         }, config=config)
 
     try:
-        raws = await service.scrape_source(source, filters, on_progress)
+        if registered and registered.adapter == 'website':
+            # These sources do not expose the reviewed Tokko/API catalogue
+            # contract. Reuse the generic site crawler and page extractor, but
+            # keep each listing attributed to its selected agency.
+            pages = await service.scrape_website(registered.base_url, on_progress)
+            sb = config['configurable'].get('supabase')
+            extracted: list[NormalizedProperty] = []
+            for page in pages:
+                if not page_is_worth_extracting(page.get('text')):
+                    continue
+                if llm_budget_exhausted():
+                    await _announce_llm_budget_stop(state.get('job_id'), config)
+                    break
+                extracted.extend(await _extract_page_properties(
+                    {**page, 'source_id': source}, sb, state.get('job_id'),
+                ))
+            raws = [
+                RawProperty.model_validate(prop.model_dump(exclude={
+                    'direccion_norm', 'lat', 'lng', 'confianza_extraccion',
+                }))
+                for prop in extracted
+            ]
+            await on_progress(source, 'done', len(raws))
+        else:
+            raws = await service.scrape_source(source, filters, on_progress)
+    except ApifyBudgetExceeded as exc:
+        await _announce_budget_stop(exc, state.get('job_id'), config)
+        return {'collected_properties': []}
     except Exception as exc:
         await adispatch_custom_event('error', {
-            'event': 'error', 'source': source, 'message': str(exc), 'recoverable': True,
+            'event': 'error', 'source': source,
+            'message': f'{registered.name if registered else source}: {exc}', 'recoverable': True,
         }, config=config)
         return {'collected_properties': [], 'errors': [f'{source}: {exc}']}
     return {'collected_properties': raws}
@@ -550,7 +583,7 @@ def normalize_properties(state: ScrapingState) -> dict[str, Any]:
         point = None
         if r.fuente in {
             'remax', 'remaxroble', 'urquiza', 'kwsuma', 'mauroperri', 'keymex',
-            'dacalbr', 'albertodacal',
+            'dacalbr', 'albertodacal', 'doorotero', 'oterorossilp', 'pabloamado',
         }:
             point = valid_coordinates(r.raw.get('latitude'), r.raw.get('longitude'))
             viewbox = _viewbox_for_properties({'direccion': r.direccion, 'titulo': r.titulo})
@@ -1391,7 +1424,7 @@ async def run_website_scraper(state: dict[str, Any], config: RunnableConfig) -> 
     try:
         # Los N `Send` ya existen todos; el semáforo decide cuántos corren.
         async with _get_website_semaphore():
-            if registered:
+            if registered and registered.adapter != 'website':
                 units = state.get('source_filters')
                 if not units:
                     raise ValueError('Faltan los filtros para buscar en la fuente configurada.')
@@ -1425,6 +1458,8 @@ async def run_website_scraper(state: dict[str, Any], config: RunnableConfig) -> 
                     output['errors'] = unit_errors
             else:
                 pages = await service.scrape_website(url, on_progress)
+                if registered:
+                    pages = [{**page, 'source_id': registered.id} for page in pages]
                 output = {'website_pages': pages}
     except Exception as exc:
         await adispatch_custom_event('error', {
@@ -1656,7 +1691,7 @@ async def _extract_page_properties(
                 expensas=_llm_float(prop.get('expensas')),
                 amenities=prop.get('amenities') or [],
                 m2_total=_llm_float(prop.get('m2')),
-                fuente='googlemaps',
+                fuente=page.get('source_id') or 'googlemaps',
                 url_origen=prop.get('url_ficha') or page.get('url'),
                 confianza_extraccion=confianza,
             ))

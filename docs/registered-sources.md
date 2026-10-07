@@ -104,8 +104,8 @@ ambientes, tres dormitorios y 20 fotos.
 ## Yacoub, Piazza, Feysulaj, Arrarás y Prado (28 de septiembre de 2026)
 
 Las cinco están disponibles en el selector de inmobiliarias, los indicadores
-de progreso y los filtros de propiedades. Se agregan al catálogo predeterminado
-(14 inmobiliarias) y pueden seleccionarse individualmente.
+de progreso y los filtros de propiedades. En esa incorporación, el catálogo
+predeterminado pasó a tener 14 inmobiliarias, seleccionables individualmente.
 
 | Fuente | `scrape_source` | Catálogo consultado |
 | --- | --- | --- |
@@ -164,3 +164,29 @@ en La Plata hasta 100.000 USD. Son consultas de verificación independientes,
 no totales de inventario: en las tres fuentes Tokko se limitó esta prueba a
 una página; Yacoub y Prado recorrieron toda la paginación de esas consultas.
 No se guardaron propiedades de prueba ni páginas capturadas en el repositorio.
+
+## Reyes Aversa, Otero Rossi, Peter Puhl, Pablo Amado y Ponce (7 de octubre de 2026)
+
+Las siete fuentes se agregan al selector inicial de `/chat` y al filtro de
+fuente de las propiedades, que pasa de 14 a 21 opciones. Las tres webs Tokko
+usan el adaptador estructurado;
+Reyes Aversa, Peter Puhl, Jerónimo Ponce y Manuel Ponce usan el rastreo web
+genérico con extracción por página y guardan los avisos bajo su propio
+identificador de fuente.
+
+| Fuente | `scrape_source` | Integración |
+| --- | --- | --- |
+| [Reyes Aversa](https://www.reyesaversabienesraices.com.ar/) | `reyesaversa` | Sitio Inmovar; crawler web y extracción por página. |
+| [Door Otero Rossi CB](https://www.oterorossi.com.ar/) | `doorotero` | Tokko. |
+| [Otero Rossi LP](https://oterorossi.com/) | `oterorossilp` | Tokko. |
+| [Peter Puhl Company](https://peterspuhlcompany.com/) | `peterspuhl` | Crawler web y extracción por página. |
+| [Pablo Amado](https://www.pabloamado.com/) | `pabloamado` | Tokko. |
+| [Jerónimo Ponce](https://jeronimoponcepropiedades.com.ar/) | `jeronimoponce` | Crawler web y extracción por página. |
+| [Manuel Ponce](https://manuelponce.com.ar/) | `manuelponce` | Crawler web y extracción por página. |
+
+La migración `supabase/migrations/20261007120000_add_seven_agency_sources.sql`
+habilita los siete valores de `properties.fuente` y crea las filas de
+`manual_sources` que aún no estén cargadas. No cambia nombres, zonas ni estados
+de filas existentes. El rastreo genérico puede devolver cero avisos si el sitio
+no expone páginas de propiedades en el HTML que recibe el crawler; Peter Puhl
+publica principalmente desarrollos y casas container.

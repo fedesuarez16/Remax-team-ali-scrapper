@@ -141,7 +141,8 @@ export function SourceSelector({
             )}
           </div>
           <p className="text-xs text-muted-foreground">
-            Se usan sus rutas y ubicaciones configuradas. No se agregan inmobiliarias de Google Maps.
+            Se consultan las propiedades públicas de cada sitio. No se agregan
+            inmobiliarias de Google Maps.
           </p>
         </div>
       )}

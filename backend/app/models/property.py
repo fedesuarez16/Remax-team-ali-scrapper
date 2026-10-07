@@ -9,7 +9,8 @@ Fuente = Literal[
     'zonaprop', 'mercadolibre', 'googlemaps', 'instagram', 'argenprop', 'remax',
     'inmobusqueda', 'mudafy', 'century21', 'mauroperri', 'urquiza', 'kwsuma',
     'dacalbr', 'keymex', 'albertodacal', 'remaxroble', 'axion', 'sabella',
-    'yacoub', 'piazza', 'feysulaj', 'arraras', 'prado', 'manual',
+    'yacoub', 'piazza', 'feysulaj', 'arraras', 'prado', 'reyesaversa', 'doorotero',
+    'oterorossilp', 'peterspuhl', 'pabloamado', 'jeronimoponce', 'manuelponce', 'manual',
 ]
 TipoOperacion = Literal['venta', 'alquiler', 'alquiler_temp']
 TipoPropiedad = Literal['departamento', 'casa', 'ph', 'local', 'oficina', 'terreno', 'otro']

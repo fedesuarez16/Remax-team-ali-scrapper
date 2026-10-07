@@ -92,6 +92,21 @@ SEARCH_SOURCES = (
     SearchSource('arraras', 'Arrarás Propiedades', 'https://www.japropiedades.com.ar', 'tokko'),
     # The agency links this public InmoBúsqueda profile from its own website.
     SearchSource('prado', 'Prado Propiedades', 'http://www.pradopropiedades.com.ar', 'prado'),
+    SearchSource(
+        'reyesaversa', 'Reyes Aversa Propiedades',
+        'https://www.reyesaversabienesraices.com.ar', 'website',
+    ),
+    SearchSource('doorotero', 'Door Otero Rossi CB', 'https://www.oterorossi.com.ar', 'tokko'),
+    SearchSource('oterorossilp', 'Otero Rossi LP', 'https://oterorossi.com', 'tokko'),
+    SearchSource('peterspuhl', 'Peter Puhl Company', 'https://peterspuhlcompany.com', 'website'),
+    SearchSource('pabloamado', 'Pablo Amado Propiedades', 'https://www.pabloamado.com', 'tokko'),
+    SearchSource(
+        'jeronimoponce', 'Jerónimo Ponce Propiedades',
+        'https://jeronimoponcepropiedades.com.ar', 'website',
+    ),
+    SearchSource(
+        'manuelponce', 'Manuel Ponce Propiedades', 'https://manuelponce.com.ar', 'website',
+    ),
 )
 
 # InmoBúsqueda usa el mismo registro técnico para resolver su catálogo, pero

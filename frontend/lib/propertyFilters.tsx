@@ -60,6 +60,13 @@ export const FUENTES = [
   { value: 'feysulaj', label: 'Feysulaj Propiedades' },
   { value: 'arraras', label: 'Arrarás Propiedades' },
   { value: 'prado', label: 'Prado Propiedades' },
+  { value: 'reyesaversa', label: 'Reyes Aversa Propiedades' },
+  { value: 'doorotero', label: 'Door Otero Rossi CB' },
+  { value: 'oterorossilp', label: 'Otero Rossi LP' },
+  { value: 'peterspuhl', label: 'Peter Puhl Company' },
+  { value: 'pabloamado', label: 'Pablo Amado Propiedades' },
+  { value: 'jeronimoponce', label: 'Jerónimo Ponce Propiedades' },
+  { value: 'manuelponce', label: 'Manuel Ponce Propiedades' },
   { value: 'googlemaps', label: 'Sitios web' },
 ]
 
