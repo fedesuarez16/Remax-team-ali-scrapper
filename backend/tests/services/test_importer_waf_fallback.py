@@ -278,7 +278,7 @@ async def test_a_probabilistic_block_retries_on_a_fresh_exit_ip(
 ) -> None:
     """Un bloqueo aislado se resuelve con otra IP, no con un browser.
 
-    Éste es EL caso de InmoBúsqueda. Antes se rendía en el primer challenge y
+    Fue el caso de InmoBúsqueda (hoy con rotación propia). Antes se rendía en el primer challenge y
     mandaba el import a gastar Playwright y un run de Apify para nada.
     """
     tier1 = _FlakySpy(fail_times=1, result=_FICHA_HTML)
@@ -287,7 +287,7 @@ async def test_a_probabilistic_block_retries_on_a_fresh_exit_ip(
     monkeypatch.setattr(importer, 'render_page_html', browser)
     monkeypatch.setattr(importer, 'fetch_page_html_via_actor', actor)
 
-    assert await importer._fetch_html('https://www.inmobusqueda.com.ar/fib-x.html') == _FICHA_HTML
+    assert await importer._fetch_html('https://www.portal-con-muro.com.ar/ficha-x.html') == _FICHA_HTML
     assert tier1.calls == [True, True]  # dos IPs residenciales distintas
     assert browser.calls == []
     assert actor.calls == []
@@ -301,7 +301,7 @@ async def test_the_proxied_retries_are_bounded(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(importer, 'render_page_html', browser)
     monkeypatch.setattr(importer, 'fetch_page_html_via_actor', actor)
 
-    await importer._fetch_html('https://www.inmobusqueda.com.ar/fib-x.html')
+    await importer._fetch_html('https://www.portal-con-muro.com.ar/ficha-x.html')
     assert tier1.calls.count(True) == importer._HTTPX_PROXY_ATTEMPTS
 
 
@@ -318,7 +318,7 @@ async def test_a_direct_attempt_runs_before_paying_for_a_browser(
     monkeypatch.setattr(importer, 'render_page_html', browser)
     monkeypatch.setattr(importer, 'fetch_page_html_via_actor', actor)
 
-    assert await importer._fetch_html('https://www.inmobusqueda.com.ar/fib-x.html') == _FICHA_HTML
+    assert await importer._fetch_html('https://www.portal-con-muro.com.ar/ficha-x.html') == _FICHA_HTML
     assert tier1.calls[-1] is False  # el último intento salió sin proxy
     assert browser.calls == []
     assert actor.calls == []
@@ -397,7 +397,7 @@ async def test_the_blocked_error_names_the_antibot_check(
     monkeypatch.setattr(importer, 'fetch_page_html_via_actor', _Spy(None))
 
     with pytest.raises(importer.PortalBlocked) as exc:
-        await importer._fetch_html('https://www.inmobusqueda.com.ar/fib-x.html')
+        await importer._fetch_html('https://www.portal-con-muro.com.ar/ficha-x.html')
     mensaje = str(exc.value).lower()
     assert 'verificaci' in mensaje  # "verificación antibot"
     assert 'reintent' in mensaje

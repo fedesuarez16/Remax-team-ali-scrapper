@@ -1699,6 +1699,87 @@ def _check_inmobusqueda_access(response: Any) -> None:
             'InmoBúsqueda solicitó verificación antibot; no se pudo consultar su catálogo.'
         )
 
+
+# The wall is decided by the exit IP alone. Measured 2026-10-07 against
+# `groups-RESIDENTIAL,country-AR`: 7 of 8 exit IPs ate it — ficha and listing
+# alike — a second GET with the wall's cookies from the same IP ate it again,
+# and the one IP that passed passed for everything. So: rotate sessions (the
+# wall is 7 KB, cheap) and REMEMBER the session that passed, so the next page
+# and the next ficha don't roll the dice again. Measured 7–13% clean IPs per
+# run; 15 tries passed 3 of 5 cold runs, 30 (six parallel batches) ≈ 89%.
+_INMOBUSQUEDA_EXIT_IP_ATTEMPTS = 30
+_INMOBUSQUEDA_PARALLEL_EXITS = 5
+_inmobusqueda_sticky_session: str | None = None
+
+
+async def _inmobusqueda_attempt(url: str, params: Any, session: str | None) -> httpx.Response:
+    from app.core.config import settings
+
+    async with httpx.AsyncClient(
+        timeout=10, follow_redirects=True,
+        headers={'User-Agent': _BROWSER_UA},
+        proxy=_proxy_with_session(settings.SCRAPER_PROXY_URL, session) if session else None,
+        trust_env=False,
+    ) as client:
+        resp = await client.get(url, params=params)
+    resp.raise_for_status()
+    return resp
+
+
+async def inmobusqueda_get(url: str, *, params: Any = None) -> httpx.Response:
+    """GET through an exit IP InmoBúsqueda currently serves.
+
+    Raises `InmoBusquedaBlocked` when every exit IP tried got the wall.
+    Transport/HTTP errors on one exit IP just move on to the next one.
+    """
+    global _inmobusqueda_sticky_session
+    from app.core.config import settings
+
+    if not settings.SCRAPER_PROXY_URL:
+        resp = await _inmobusqueda_attempt(url, params, None)
+        _check_inmobusqueda_access(resp)
+        return resp
+
+    async def attempt(session: str) -> tuple[str, httpx.Response | Exception]:
+        try:
+            resp = await _inmobusqueda_attempt(url, params, session)
+            _check_inmobusqueda_access(resp)
+        except (InmoBusquedaBlocked, httpx.HTTPError) as exc:
+            return session, exc
+        return session, resp
+
+    last_error: Exception | None = None
+    tried = 0
+    if _inmobusqueda_sticky_session:
+        tried = 1
+        _, outcome = await attempt(_inmobusqueda_sticky_session)
+        if not isinstance(outcome, Exception):
+            return outcome
+        last_error = outcome
+        _inmobusqueda_sticky_session = None
+
+    # Serial tries cost ~3 s each through the proxy (measured: 46 s for 15),
+    # so each batch races its exit IPs and keeps the first one that passes.
+    while tried < _INMOBUSQUEDA_EXIT_IP_ATTEMPTS:
+        size = min(_INMOBUSQUEDA_PARALLEL_EXITS, _INMOBUSQUEDA_EXIT_IP_ATTEMPTS - tried)
+        tried += size
+        tasks = [asyncio.create_task(attempt(_next_proxy_session('ib'))) for _ in range(size)]
+        try:
+            for done in asyncio.as_completed(tasks):
+                session, outcome = await done
+                if not isinstance(outcome, Exception):
+                    _inmobusqueda_sticky_session = session
+                    return outcome
+                last_error = outcome
+        finally:
+            for task in tasks:
+                task.cancel()
+    if isinstance(last_error, httpx.HTTPError):
+        raise last_error
+    raise InmoBusquedaBlocked(
+        'InmoBúsqueda solicitó verificación antibot; no se pudo consultar su catálogo.'
+    )
+
 # Operation and property-type segments of the URL, read off the portal's own
 # search form. A type it doesn't model falls back to the untyped
 # `propiedades-{zona}` listing rather than 404ing the whole search.
@@ -1743,22 +1824,13 @@ async def _inmobusqueda_resolve_zona_slug(zona: str) -> str | None:
     if cache_key in _INMOBUSQUEDA_SLUG_CACHE:
         return _INMOBUSQUEDA_SLUG_CACHE[cache_key]
 
-    from app.core.config import settings
-
     slug: str | None = None
     try:
-        async with httpx.AsyncClient(
-            timeout=8,
-            headers={'User-Agent': _BROWSER_UA},
-            proxy=_proxy_with_session(settings.SCRAPER_PROXY_URL, _next_proxy_session('inmobusqueda')),
-        ) as client:
-            resp = await client.get(
-                _INMOBUSQUEDA_AUTOCOMPLETE_URL,
-                params={'partido': 1, 'valor': query_parts[0]},
-            )
-            resp.raise_for_status()
-            _check_inmobusqueda_access(resp)
-            results = resp.json()
+        resp = await inmobusqueda_get(
+            _INMOBUSQUEDA_AUTOCOMPLETE_URL,
+            params={'partido': 1, 'valor': query_parts[0]},
+        )
+        results = resp.json()
         wanted = [_slugify(p) for p in query_parts]
         fallback: str | None = None
         for entry in results or []:
@@ -2026,46 +2098,40 @@ async def _scrape_inmobusqueda(
     seen: set[str] = set()
     seen_pages: set[tuple[str, ...]] = set()
     failed = False
-    async with httpx.AsyncClient(
-        timeout=20, follow_redirects=True,
-        headers={'User-Agent': _BROWSER_UA},
-        proxy=_proxy_with_session(settings.SCRAPER_PROXY_URL, _next_proxy_session('inmobusqueda')),
-    ) as client:
-        for url in urls:
-            try:
-                resp = await client.get(url)
-                resp.raise_for_status()
-            except httpx.HTTPError as exc:
-                if not results:
-                    raise RuntimeError('InmoBúsqueda: no se pudo leer el listado.') from exc
-                failed = True
-                break
+    for url in urls:
+        try:
+            resp = await inmobusqueda_get(url)
+        except (httpx.HTTPError, InmoBusquedaBlocked) as exc:
+            if not results:
+                if isinstance(exc, InmoBusquedaBlocked):
+                    raise
+                raise RuntimeError('InmoBúsqueda: no se pudo leer el listado.') from exc
+            failed = True
+            break
 
-            _check_inmobusqueda_access(resp)
+        # Pagination is determined by the unfiltered page, never by the
+        # number of matches: page one can have zero matches and page two
+        # still contain the requested properties.
+        cards = BeautifulSoup(resp.text, 'html.parser').select('div.ResultadoCaja')
+        page_key = tuple(str(card.get('id') or card.get_text(' ', strip=True)) for card in cards)
+        if not cards or page_key in seen_pages:
+            break
+        seen_pages.add(page_key)
+        page_props = _parse_inmobusqueda_page(resp.text, filters)
+        new = 0
+        for prop in page_props:
+            key = str(prop.url_origen or '')
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            if matches_source_filters(prop, filters):
+                results.append(prop)
+            new += 1
 
-            # Pagination is determined by the unfiltered page, never by the
-            # number of matches: page one can have zero matches and page two
-            # still contain the requested properties.
-            cards = BeautifulSoup(resp.text, 'html.parser').select('div.ResultadoCaja')
-            page_key = tuple(str(card.get('id') or card.get_text(' ', strip=True)) for card in cards)
-            if not cards or page_key in seen_pages:
-                break
-            seen_pages.add(page_key)
-            page_props = _parse_inmobusqueda_page(resp.text, filters)
-            new = 0
-            for prop in page_props:
-                key = str(prop.url_origen or '')
-                if key and key in seen:
-                    continue
-                if key:
-                    seen.add(key)
-                if matches_source_filters(prop, filters):
-                    results.append(prop)
-                new += 1
-
-            if page_props and new == 0:
-                break
-            await on_progress('inmobusqueda', 'running', len(results))
+        if page_props and new == 0:
+            break
+        await on_progress('inmobusqueda', 'running', len(results))
 
     await on_progress('inmobusqueda', 'error' if failed else 'done', len(results))
     return results

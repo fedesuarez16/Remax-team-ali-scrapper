@@ -22,12 +22,14 @@ from anthropic import AsyncAnthropic
 from app.core.config import settings
 from app.models.property import NormalizedProperty
 from app.services.apify import (
+    InmoBusquedaBlocked,
     _extract_images_from_html,
     _next_proxy_session,
     _playwright_proxy,
     _proxy_with_session,
     fetch_page_html_via_actor,
     harvest_page_images,
+    inmobusqueda_get,
     render_page_html,
 )
 from app.services.ficha import _parse_zonaprop_pictures, is_zonaprop_url, portal_gallery_from_url
@@ -200,6 +202,26 @@ async def _fetch_html(url: str) -> str:
     """La ficha en HTML, escalando sólo lo necesario. Ver el bloque de arriba."""
     if is_zonaprop_url(url):
         return await _fetch_zonaprop_html(url)
+
+    # InmoBúsqueda quema ~7 de cada 8 IPs del pool: tres intentos no alcanzan.
+    # Su rotación propia prueba más IPs y recuerda la que pasó (ver apify.py).
+    # El browser y el actor comen el mismo muro, así que tras ella sólo queda
+    # la IP del server.
+    if 'inmobusqueda.com' in url:
+        try:
+            resp = await inmobusqueda_get(url)
+            if not _looks_blocked(resp.text):
+                return resp.text
+        except (InmoBusquedaBlocked, httpx.HTTPError):
+            pass
+        try:
+            return await _fetch_html_httpx(url, use_proxy=False)
+        except (PortalBlocked, httpx.TransportError):
+            pass
+        raise PortalBlocked(
+            'InmoBúsqueda nos pidió verificación antibot desde todas las IPs que '
+            'probamos. La propiedad existe igual: reintentá en un minuto.'
+        )
 
     # Tier 1a — varias IPs residenciales. Cada llamada pide una sesión nueva a
     # Apify, así que reintentar YA significa salir por otra IP.
