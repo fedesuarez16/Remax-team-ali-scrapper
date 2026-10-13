@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   Check, ChevronDown, ChevronUp, Copy, ExternalLink, FileText, Folder as FolderIcon, Link2, Loader2,
-  Pencil, RotateCcw, Send, Sparkles,
+  Pencil, RotateCcw, Search, Send, Sparkles, X,
 } from 'lucide-react'
 import type { Property } from '@/hooks/useSSEStream'
 import { useFichaFolders } from '@/hooks/useFichaFolders'
@@ -28,6 +28,13 @@ type Stats = { total_fichas: number; gasto_usd: number; llamadas: number }
 type Estado = 'pendientes' | 'enviadas' | 'todas'
 
 const esEnviada = (p: Property) => !!p.enviada_at
+
+/** Saca el id de una ficha de lo que el usuario pegue: el link entero
+ *  (`https://…/p/{uuid}?algo`) o directamente el uuid. El id es la ÚNICA
+ *  parte del link que identifica la ficha — el dominio puede cambiar entre
+ *  local y producción, así que comparar URLs enteras fallaría. */
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+const idDeFicha = (texto: string) => texto.match(UUID_RE)?.[0].toLowerCase() ?? null
 
 const FILTROS: { id: Estado; label: string }[] = [
   { id: 'pendientes', label: 'Faltan enviar' },
@@ -316,6 +323,12 @@ export default function FichaPropioPage() {
   const { folders, create: crearCarpeta, remove: borrarCarpeta, assign: moverACarpeta } = useFichaFolders()
   const [carpeta, setCarpeta] = useState<CarpetaFiltro>('todas')
   const folderName = (id?: string | null) => folders.find((f) => f.id === id)?.name ?? null
+  // Buscador por link generado: cuando hay `buscadaId`, la lista muestra sólo
+  // esa ficha (ignorando carpeta y estado) para ver de un vistazo el original.
+  const [busqueda, setBusqueda] = useState('')
+  const [buscadaId, setBuscadaId] = useState<string | null>(null)
+  const [buscando, setBuscando] = useState(false)
+  const [busquedaError, setBusquedaError] = useState<string | null>(null)
 
   // Se llama al montar y después de cada generación: así los contadores se
   // actualizan solos, sin que el usuario tenga que refrescar.
@@ -363,10 +376,48 @@ export default function FichaPropioPage() {
     enviadas: deCarpeta.filter(esEnviada).length,
     todas: deCarpeta.length,
   }
-  const visibles =
-    estado === 'todas'
+  const visibles = buscadaId
+    ? items.filter((p) => p.id === buscadaId)
+    : estado === 'todas'
       ? deCarpeta
       : deCarpeta.filter((p) => (estado === 'enviadas' ? esEnviada(p) : !esEnviada(p)))
+
+  // Primero en lo ya cargado; si no está (la lista trae las últimas 100), se
+  // pide al backend. Sólo cuentan fichas propias: un id de otra fuente no es
+  // un link generado acá y mostrarlo confundiría.
+  const buscarFicha = async () => {
+    const id = idDeFicha(busqueda)
+    setBusquedaError(null)
+    if (!id) {
+      setBusquedaError('Pegá el link de una ficha generada (…/p/…).')
+      return
+    }
+    if (items.some((p) => p.id === id)) {
+      setBuscadaId(id)
+      return
+    }
+    setBuscando(true)
+    try {
+      const res = await fetch(`${API}/api/v1/properties/${id}`)
+      const prop = res.ok ? ((await res.json()).property as Property | null) : null
+      if (!prop || prop.fuente !== 'manual') {
+        setBusquedaError('No encontramos ninguna ficha propia con ese link.')
+        return
+      }
+      setItems((prev) => (prev.some((p) => p.id === prop.id) ? prev : [...prev, prop]))
+      setBuscadaId(id)
+    } catch {
+      setBusquedaError('No se pudo conectar con el servidor.')
+    } finally {
+      setBuscando(false)
+    }
+  }
+
+  const limpiarBusqueda = () => {
+    setBusqueda('')
+    setBuscadaId(null)
+    setBusquedaError(null)
+  }
 
   // Sólo se puede borrar lo que está guardado Y a la vista: si el usuario
   // cambia de solapa, lo que dejó marcado en la otra no se lleva puesto.
@@ -515,7 +566,48 @@ export default function FichaPropioPage() {
 
         {/* Fichas generadas */}
         <div>
-          {!loading && (items.length > 0 || folders.length > 0) && (
+          {!loading && items.length > 0 && (
+            <div className="mb-3">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  void buscarFicha()
+                }}
+                className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2"
+              >
+                <Search className="size-4 shrink-0 text-muted-foreground" />
+                <input
+                  value={busqueda}
+                  onChange={(e) => {
+                    setBusqueda(e.target.value)
+                    setBusquedaError(null)
+                  }}
+                  placeholder="Pegá el link de una ficha generada para encontrar el original"
+                  className="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
+                />
+                {(busqueda || buscadaId) && (
+                  <button
+                    type="button"
+                    onClick={limpiarBusqueda}
+                    title="Limpiar búsqueda"
+                    className="shrink-0 rounded-md p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  disabled={buscando || !busqueda.trim()}
+                  className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground transition hover:bg-muted disabled:opacity-40"
+                >
+                  {buscando ? <Loader2 className="size-3.5 animate-spin" /> : <Search className="size-3.5" />}
+                  Buscar
+                </button>
+              </form>
+              {busquedaError && <p className="mt-1.5 text-xs text-destructive">{busquedaError}</p>}
+            </div>
+          )}
+          {!loading && !buscadaId && (items.length > 0 || folders.length > 0) && (
             <div className="mb-3">
               <CarpetaChips
                 folders={folders}
@@ -531,9 +623,11 @@ export default function FichaPropioPage() {
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               {loading
                 ? 'Cargando...'
-                : `${visibles.length} ficha${visibles.length === 1 ? '' : 's'} propia${visibles.length === 1 ? '' : 's'}`}
+                : buscadaId
+                  ? 'Resultado de la búsqueda'
+                  : `${visibles.length} ficha${visibles.length === 1 ? '' : 's'} propia${visibles.length === 1 ? '' : 's'}`}
             </p>
-            {!loading && items.length > 0 && (
+            {!loading && !buscadaId && items.length > 0 && (
               <FiltroEstado value={estado} onChange={setEstado} counts={counts} />
             )}
           </div>
@@ -589,6 +683,7 @@ export default function FichaPropioPage() {
               const gone = new Set(ids)
               setItems((prev) => prev.filter((it) => !it.id || !gone.has(it.id)))
               setSelected(new Set())
+              if (buscadaId && gone.has(buscadaId)) limpiarBusqueda()
               // El contador de "Fichas Propio generadas" lo deriva el backend
               // de las propiedades `fuente='manual'`: si borramos, hay que
               // volver a pedirlo o queda mostrando fichas que ya no existen.
