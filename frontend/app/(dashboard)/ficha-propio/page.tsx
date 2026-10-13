@@ -344,16 +344,24 @@ export default function FichaPropioPage() {
   }, [])
 
   useEffect(() => {
+    // Se traen TODAS las fichas, de a páginas: con un solo `limit` la lista,
+    // los contadores por carpeta/estado y el buscador quedaban ciegos a todo
+    // lo que pasara de la primera página. Corta con la primera página corta.
+    const PAGE = 100
     const load = async () => {
+      const todas: Property[] = []
       try {
-        const res = await fetch(`${API}/api/v1/properties?fuente=manual&limit=100`)
-        if (res.ok) {
-          const data = await res.json()
-          setItems((data.properties as Property[]) ?? [])
+        for (let offset = 0; ; offset += PAGE) {
+          const res = await fetch(`${API}/api/v1/properties?fuente=manual&limit=${PAGE}&offset=${offset}`)
+          if (!res.ok) break
+          const page = ((await res.json()).properties as Property[]) ?? []
+          todas.push(...page)
+          if (page.length < PAGE) break
         }
       } catch {
-        /* backend no disponible */
+        /* backend no disponible — se muestra lo que haya llegado */
       } finally {
+        setItems(todas)
         setLoading(false)
       }
     }
@@ -382,8 +390,8 @@ export default function FichaPropioPage() {
       ? deCarpeta
       : deCarpeta.filter((p) => (estado === 'enviadas' ? esEnviada(p) : !esEnviada(p)))
 
-  // Primero en lo ya cargado; si no está (la lista trae las últimas 100), se
-  // pide al backend. Sólo cuentan fichas propias: un id de otra fuente no es
+  // Primero en lo ya cargado; si no está (p. ej. una página falló al cargar),
+  // se pide al backend. Sólo cuentan fichas propias: un id de otra fuente no es
   // un link generado acá y mostrarlo confundiría.
   const buscarFicha = async () => {
     const id = idDeFicha(busqueda)
