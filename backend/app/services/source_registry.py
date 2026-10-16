@@ -15,6 +15,9 @@ class SearchSource:
     adapter: str
     locations: tuple[tuple[int, str, int, str], ...] = ()
     office_ids: tuple[str, ...] = ()
+    # Keep the official domain for URL resolution when the inventory has its
+    # own catalogue host.
+    catalog_url: str | None = None
 
 
 SEARCH_SOURCES = (
@@ -106,6 +109,23 @@ SEARCH_SOURCES = (
     ),
     SearchSource(
         'manuelponce', 'Manuel Ponce Propiedades', 'https://manuelponce.com.ar', 'website',
+    ),
+    SearchSource(
+        'babenco', 'Babenco Propiedades', 'https://www.babencopropiedades.com.ar', 'website',
+    ),
+    SearchSource(
+        'nbabenco', 'N Babenco Propiedades', 'https://www.nbabencopropiedades.com.ar', 'website',
+    ),
+    SearchSource('menacho', 'Menacho', 'https://www.menacho.com.ar', 'website'),
+    SearchSource(
+        'menachocanale', 'Menacho Canale', 'https://www.menachocanale.com.ar', 'website',
+        catalog_url='https://propiedades.menachocanale.com.ar/Propiedades',
+    ),
+    SearchSource(
+        'matiasgalan', 'Matias Galan Propiedades', 'https://www.matiasgalan.com.ar', 'tokko',
+    ),
+    SearchSource(
+        'gesino', 'Gesino Propiedades', 'https://gesinonegociosinmobiliarios.com', 'tokko',
     ),
 )
 

@@ -190,3 +190,26 @@ habilita los siete valores de `properties.fuente` y crea las filas de
 de filas existentes. El rastreo genérico puede devolver cero avisos si el sitio
 no expone páginas de propiedades en el HTML que recibe el crawler; Peter Puhl
 publica principalmente desarrollos y casas container.
+
+## Babenco, N Babenco, Menacho, Menacho Canale, Matias Galan y Gesino (16 de octubre de 2026)
+
+Estas seis fuentes se agregan al selector de `/chat` y al filtro de fuente de
+las propiedades, que pasa de 21 a 27 opciones.
+
+| Fuente | `scrape_source` | Integración |
+| --- | --- | --- |
+| [Babenco Propiedades](https://www.babencopropiedades.com.ar/) | `babenco` | Rastreo de su sitio y extracción por página. |
+| [N Babenco Propiedades](https://www.nbabencopropiedades.com.ar/) | `nbabenco` | Rastreo de su sitio público, que publica sus fichas en un perfil de InmoBúsqueda. |
+| [Menacho](https://www.menacho.com.ar/) | `menacho` | Rastreo de sus catálogos de compra y alquiler y extracción por página. |
+| [Menacho Canale](https://www.menachocanale.com.ar/) | `menachocanale` | Rastreo del catálogo en `propiedades.menachocanale.com.ar/Propiedades`. |
+| [Matias Galan Propiedades](https://www.matiasgalan.com.ar/) | `matiasgalan` | Catálogo Tokko. |
+| [Gesino Propiedades](https://gesinonegociosinmobiliarios.com/) | `gesino` | Catálogo Tokko. |
+
+Las cuatro fuentes con rastreo web guardan sus propiedades con el identificador
+de la inmobiliaria. Menacho Canale conserva la web oficial como dominio de
+resolución de fuentes manuales y apunta el rastreo a su subdominio de catálogo.
+La migración `supabase/migrations/20261016120000_add_six_agency_sources.sql`
+habilita los seis valores en `properties.fuente` y agrega las fuentes manuales
+que aún no existan, sin modificar filas existentes. El rastreo web depende de
+que el sitio entregue sus listados al crawler; si una página no es accesible o
+no incluye avisos en el HTML, puede producir cero resultados.

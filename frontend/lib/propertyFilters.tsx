@@ -67,6 +67,12 @@ export const FUENTES = [
   { value: 'pabloamado', label: 'Pablo Amado Propiedades' },
   { value: 'jeronimoponce', label: 'Jerónimo Ponce Propiedades' },
   { value: 'manuelponce', label: 'Manuel Ponce Propiedades' },
+  { value: 'babenco', label: 'Babenco Propiedades' },
+  { value: 'nbabenco', label: 'N Babenco Propiedades' },
+  { value: 'menacho', label: 'Menacho' },
+  { value: 'menachocanale', label: 'Menacho Canale' },
+  { value: 'matiasgalan', label: 'Matias Galan Propiedades' },
+  { value: 'gesino', label: 'Gesino Propiedades' },
   { value: 'googlemaps', label: 'Sitios web' },
 ]
 

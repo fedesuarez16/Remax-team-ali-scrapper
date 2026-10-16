@@ -46,6 +46,12 @@ export type InmobiliariaId =
   | 'pabloamado'
   | 'jeronimoponce'
   | 'manuelponce'
+  | 'babenco'
+  | 'nbabenco'
+  | 'menacho'
+  | 'menachocanale'
+  | 'matiasgalan'
+  | 'gesino'
 
 /** Inmobiliarias con integración revisada y filtro por ubicación.
  * Vacío en SourceSelection significa todas las configuradas, igual que en portales. */
@@ -71,6 +77,12 @@ export const INMOBILIARIAS: { id: InmobiliariaId; label: string }[] = [
   { id: 'pabloamado', label: 'Pablo Amado Propiedades' },
   { id: 'jeronimoponce', label: 'Jerónimo Ponce Propiedades' },
   { id: 'manuelponce', label: 'Manuel Ponce Propiedades' },
+  { id: 'babenco', label: 'Babenco Propiedades' },
+  { id: 'nbabenco', label: 'N Babenco Propiedades' },
+  { id: 'menacho', label: 'Menacho' },
+  { id: 'menachocanale', label: 'Menacho Canale' },
+  { id: 'matiasgalan', label: 'Matias Galan Propiedades' },
+  { id: 'gesino', label: 'Gesino Propiedades' },
 ]
 
 export type SourceSelection = {

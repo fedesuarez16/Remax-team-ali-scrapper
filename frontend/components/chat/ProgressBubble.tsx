@@ -27,6 +27,12 @@ const LABEL: Record<string, string> = {
   pabloamado: 'Pablo Amado Propiedades',
   jeronimoponce: 'Jerónimo Ponce Propiedades',
   manuelponce: 'Manuel Ponce Propiedades',
+  babenco: 'Babenco Propiedades',
+  nbabenco: 'N Babenco Propiedades',
+  menacho: 'Menacho',
+  menachocanale: 'Menacho Canale',
+  matiasgalan: 'Matias Galan Propiedades',
+  gesino: 'Gesino Propiedades',
   inmobusqueda: 'InmoBúsqueda',
   extraccion: 'Analizando páginas',
 }

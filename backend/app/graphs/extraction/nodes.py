@@ -462,7 +462,9 @@ async def run_portal_scraper(state: dict[str, Any], config: RunnableConfig) -> d
             # These sources do not expose the reviewed Tokko/API catalogue
             # contract. Reuse the generic site crawler and page extractor, but
             # keep each listing attributed to its selected agency.
-            pages = await service.scrape_website(registered.base_url, on_progress)
+            pages = await service.scrape_website(
+                registered.catalog_url or registered.base_url, on_progress,
+            )
             sb = config['configurable'].get('supabase')
             extracted: list[NormalizedProperty] = []
             for page in pages:
@@ -1457,7 +1459,8 @@ async def run_website_scraper(state: dict[str, Any], config: RunnableConfig) -> 
                 if unit_errors:
                     output['errors'] = unit_errors
             else:
-                pages = await service.scrape_website(url, on_progress)
+                crawl_url = registered.catalog_url if registered else None
+                pages = await service.scrape_website(crawl_url or url, on_progress)
                 if registered:
                     pages = [{**page, 'source_id': registered.id} for page in pages]
                 output = {'website_pages': pages}
