@@ -209,7 +209,7 @@ export function PropertyCard({ p }: { p: Property }) {
 
         {/* Description */}
         {p.descripcion && (
-          <p className="mt-2 line-clamp-2 text-sm text-gray-500">{p.descripcion}</p>
+          <p className="mt-2 line-clamp-2 text-sm text-muted-foreground">{p.descripcion}</p>
         )}
 
         {/* Amenities */}

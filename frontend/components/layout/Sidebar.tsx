@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { BarChart3, Building2, ChevronDown, Database, Fence, FileText, Folder, Globe, MapPin, Plus, Search, Sparkles, Users } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import SearchHistoryList from '@/components/layout/SearchHistoryList'
+import { ThemeToggle } from '@/components/layout/ThemeToggle'
 
 const AGENCY_KEY = 'prop_agency_config'
 const CRM_BASE_URL = 'https://demo-ali-crm.vercel.app'
@@ -208,12 +209,12 @@ export default function Sidebar() {
           type="button"
           onClick={() => setCrmOpen((open) => !open)}
           aria-expanded={crmOpen}
-          className="flex w-full items-center gap-2 rounded-xl bg-black px-3 py-2 text-sm font-medium text-white transition hover:bg-black/85"
+          className="flex w-full items-center gap-2 rounded-xl bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/85"
         >
           <Users className="size-4" />
           CRM
           <ChevronDown
-            className={`ml-auto size-4 text-white/60 transition-transform ${crmOpen ? 'rotate-180' : ''}`}
+            className={`ml-auto size-4 text-primary-foreground/60 transition-transform ${crmOpen ? 'rotate-180' : ''}`}
           />
         </button>
         {crmOpen && (
@@ -277,6 +278,7 @@ export default function Sidebar() {
             className="w-full rounded-lg border border-sidebar-border bg-sidebar-accent/50 px-2.5 py-1.5 text-xs text-sidebar-foreground placeholder:text-sidebar-foreground/40 focus:outline-none focus:ring-1 focus:ring-foreground/20 focus:border-foreground/30"
           />
         </div>
+        <ThemeToggle className="mt-3" />
       </div>
     </aside>
   )

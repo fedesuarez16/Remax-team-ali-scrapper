@@ -172,7 +172,7 @@ function EntryRow({
         <button
           onClick={() => onDelete(entry.id)}
           title="Eliminar"
-          className="rounded p-1 text-sidebar-foreground/40 hover:bg-sidebar-accent hover:text-red-500"
+          className="rounded p-1 text-sidebar-foreground/40 hover:bg-sidebar-accent hover:text-red-500 dark:hover:text-red-400"
         >
           <Trash2 className="size-3" />
         </button>

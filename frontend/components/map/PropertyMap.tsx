@@ -13,6 +13,7 @@ import {
   useMapEvents,
 } from 'react-leaflet'
 import { BaseTiles } from '@/components/map/BaseTiles'
+import { useResolvedTheme } from '@/lib/theme'
 import { pointInPolygon } from '@/lib/geo'
 import { operacionLabel, sortVentaFirst } from '@/lib/operacion'
 import { EMPTY_FILTER, matchesFilter, type Filter } from '@/lib/propertyFilters'
@@ -80,8 +81,16 @@ const ALQUILER_STYLE = { color: '#a16207', fillColor: '#eab308', fillOpacity: 0.
 const CARTERA_STYLE = { color: '#991b1b', fillColor: '#dc2626', fillOpacity: 0.9, weight: 1 }
 const DIMMED_STYLE = { color: '#15803d', fillColor: '#16a34a', fillOpacity: 0.12, weight: 1, opacity: 0.25 }
 const CARTERA_DIMMED_STYLE = { color: '#991b1b', fillColor: '#dc2626', fillOpacity: 0.12, weight: 1, opacity: 0.25 }
-const ZONE_STYLE = { color: '#111', weight: 2, fillColor: '#111', fillOpacity: 0.06, dashArray: '6 4' }
-const VERTEX_STYLE = { color: '#111', fillColor: '#fff', fillOpacity: 1, weight: 2 }
+// La zona dibujada es tinta sobre el fondo: casi negra en claro, casi blanca
+// en oscuro. Con un solo color uno de los dos temas la pierde.
+const ZONE_STYLES = {
+  light: { color: '#111', weight: 2, fillColor: '#111', fillOpacity: 0.06, dashArray: '6 4' },
+  dark: { color: '#f5f5f5', weight: 2, fillColor: '#f5f5f5', fillOpacity: 0.08, dashArray: '6 4' },
+}
+const VERTEX_STYLES = {
+  light: { color: '#111', fillColor: '#fff', fillOpacity: 1, weight: 2 },
+  dark: { color: '#f5f5f5', fillColor: '#171717', fillOpacity: 1, weight: 2 },
+}
 
 function fmtPrice(p: MapProperty) {
   if (p.precio == null) return 'Consultar'
@@ -246,6 +255,10 @@ export default function PropertyMap({
     void savedZones.deleteZone(id)
     if (id === activeZoneId) setActiveZoneId(null)
   }
+
+  const theme = useResolvedTheme()
+  const ZONE_STYLE = ZONE_STYLES[theme]
+  const VERTEX_STYLE = VERTEX_STYLES[theme]
 
   return (
     <div className="relative h-full w-full">

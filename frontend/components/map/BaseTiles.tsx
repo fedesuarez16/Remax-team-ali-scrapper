@@ -1,5 +1,6 @@
 'use client'
 import { TileLayer } from 'react-leaflet'
+import { useResolvedTheme } from '@/lib/theme'
 
 /**
  * El fondo del mapa, en UN solo lugar.
@@ -21,13 +22,26 @@ import { TileLayer } from 'react-leaflet'
  * operación por color (verde = venta, amarillo = alquiler) y sobre un fondo
  * de calles coloreadas esa señal se pierde.
  *
+ * En dark se usa el Dark Gray Canvas del mismo servicio (misma grilla, sin
+ * key, verificado con un tile real de La Plata y no solo con el status). Un
+ * fondo claro dentro de la app oscura encandila, y el verde/amarillo de los
+ * marcadores se lee igual de bien sobre gris oscuro.
+ *
  * Si Esri también se cierra algún día, este archivo es el único que se toca.
  */
 const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas'
 // Esri ordena la ruta {z}/{y}/{x} — al revés que el {z}/{x}/{y} de CARTO/OSM.
 // Invertirlo devuelve tiles de "Map data not yet available", no un error.
-const BASE = `${ESRI}/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}`
-const LABELS = `${ESRI}/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}`
+const TILES = {
+  light: {
+    base: `${ESRI}/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}`,
+    labels: `${ESRI}/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}`,
+  },
+  dark: {
+    base: `${ESRI}/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}`,
+    labels: `${ESRI}/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}`,
+  },
+}
 
 const ATTRIBUTION = '&copy; Esri, HERE, Garmin, &copy; OpenStreetMap contributors'
 
@@ -45,15 +59,20 @@ const MAX_NATIVE_ZOOM = 16
 const MAX_ZOOM = 19
 
 export function BaseTiles() {
+  const theme = useResolvedTheme()
+  const { base, labels } = TILES[theme]
+  // `key` por tema: react-leaflet no re-pide tiles cuando cambia `url` en una
+  // capa montada de forma confiable; remontarla sí.
   return (
     <>
       <TileLayer
-        url={BASE}
+        key={`base-${theme}`}
+        url={base}
         attribution={ATTRIBUTION}
         maxZoom={MAX_ZOOM}
         maxNativeZoom={MAX_NATIVE_ZOOM}
       />
-      <TileLayer url={LABELS} maxZoom={MAX_ZOOM} maxNativeZoom={MAX_NATIVE_ZOOM} />
+      <TileLayer key={`labels-${theme}`} url={labels} maxZoom={MAX_ZOOM} maxNativeZoom={MAX_NATIVE_ZOOM} />
     </>
   )
 }

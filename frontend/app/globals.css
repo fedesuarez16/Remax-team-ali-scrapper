@@ -2,7 +2,17 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-@custom-variant dark (&:is(.dark *));
+/* Dark es solo de pantalla: el papel es blanco. Sin este `not print`, imprimir la
+ * ficha con el tema oscuro activo saca texto casi blanco sobre hoja blanca
+ * (los navegadores no imprimen fondos por defecto). Ojo: `@media screen` NO
+ * sirve — Lightning CSS lo considera siempre verdadero y lo desenvuelve. */
+@custom-variant dark {
+  @media not print {
+    &:is(.dark *) {
+      @slot;
+    }
+  }
+}
 
 @theme inline {
   --color-background: var(--background);
@@ -100,46 +110,49 @@
   --serie-grid: oklch(0.922 0 0);
 }
 
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+@media not print {
+  .dark {
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --secondary: oklch(0.269 0 0);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: oklch(0.269 0 0);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.556 0 0);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    /* El default de shadcn acá es azul; el sistema es acromático en los dos temas. */
+    --sidebar-primary: oklch(0.922 0 0);
+    --sidebar-primary-foreground: oklch(0.205 0 0);
+    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.556 0 0);
 
-  /* Pasos ELEGIDOS para dark, no un flip automático del set claro. Los --chart-*
-   * de arriba son idénticos en ambos temas, así que sobre la card oscura   * del dashboard tienen sus propios valores acá, revalidados contra la
-   * superficie oscura: ΔE 20.6 en deuteranopía y tritanopía. */
-  --serie-apify: oklch(0.922 0 0);
-  --serie-llm: oklch(0.715 0 0);
-  --serie-track: oklch(0.32 0 0);
-  --serie-grid: oklch(1 0 0 / 12%);
+    /* Pasos ELEGIDOS para dark, no un flip automático del set claro. Los --chart-*
+     * de arriba son idénticos en ambos temas, así que sobre la card oscura   * del dashboard tienen sus propios valores acá, revalidados contra la
+     * superficie oscura: ΔE 20.6 en deuteranopía y tritanopía. */
+    --serie-apify: oklch(0.922 0 0);
+    --serie-llm: oklch(0.715 0 0);
+    --serie-track: oklch(0.32 0 0);
+    --serie-grid: oklch(1 0 0 / 12%);
+  }
 }
 
 @layer base {
@@ -151,5 +164,58 @@
   }
   html {
     @apply font-sans;
+    /* Scrollbars, inputs nativos y selects siguen al tema. */
+    color-scheme: light;
   }
+  @media not print {
+    html.dark {
+      color-scheme: dark;
+    }
+  }
+}
+/* Leaflet trae su chrome en blanco hardcodeado (popups, zoom, atribución) y no
+ * sabe nada de nuestros tokens. Se lo damos acá, para los dos temas: así el
+ * popup se ve como una card del sistema y no como un parche del navegador.
+ * Va fuera de @layer para ganarle a `leaflet.css`, que también está sin capa. */
+.leaflet-container {
+  background: var(--muted);
+  font-family: inherit;
+}
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 4px 16px oklch(0 0 0 / 0.18);
+}
+.leaflet-popup-content-wrapper {
+  border: 1px solid var(--border);
+}
+.leaflet-container a.leaflet-popup-close-button {
+  color: var(--muted-foreground);
+}
+.leaflet-container a.leaflet-popup-close-button:hover {
+  color: var(--foreground);
+}
+.leaflet-bar a,
+.leaflet-bar a:hover {
+  background-color: var(--popover);
+  color: var(--popover-foreground);
+  border-bottom-color: var(--border);
+}
+.leaflet-bar a:hover {
+  background-color: var(--accent);
+}
+.leaflet-bar a.leaflet-disabled {
+  background-color: var(--muted);
+  color: var(--muted-foreground);
+}
+.leaflet-touch .leaflet-bar {
+  border-color: var(--border);
+}
+.leaflet-container .leaflet-control-attribution {
+  background: color-mix(in oklch, var(--background) 80%, transparent);
+  color: var(--muted-foreground);
+}
+.leaflet-container .leaflet-control-attribution a {
+  color: var(--foreground);
 }

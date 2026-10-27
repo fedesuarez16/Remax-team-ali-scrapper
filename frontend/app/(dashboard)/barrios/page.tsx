@@ -449,7 +449,7 @@ function BarrioCard({
         <button
           onClick={onDelete}
           title="Borrar"
-          className="shrink-0 rounded-lg p-1.5 text-muted-foreground transition hover:text-red-600"
+          className="shrink-0 rounded-lg p-1.5 text-muted-foreground transition hover:text-red-600 dark:hover:text-red-400"
         >
           <Trash2 className="size-3.5" />
         </button>
