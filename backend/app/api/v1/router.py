@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     properties, leads, scraping, agents, geo, search_history, saved_zones, manual_sources,
     portals, cleanup, ficha_settings, metrics, ficha_folders, barrios_cerrados,
+    ficha_colecciones,
 )
 
 api_router = APIRouter()
@@ -21,3 +22,6 @@ api_router.include_router(ficha_settings.router, prefix="/ficha-settings", tags=
 api_router.include_router(metrics.router, prefix="/metrics", tags=["metrics"])
 api_router.include_router(ficha_folders.router, prefix="/ficha-folders", tags=["ficha-folders"])
 api_router.include_router(barrios_cerrados.router, prefix="/barrios-cerrados", tags=["barrios-cerrados"])
+api_router.include_router(
+    ficha_colecciones.router, prefix="/ficha-colecciones", tags=["ficha-colecciones"],
+)

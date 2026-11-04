@@ -13,6 +13,8 @@ import { FichaEditor } from '@/components/ficha/FichaEditor'
 import { AgenteSelector } from '@/components/ficha/AgenteSelector'
 import { CarpetaChips, MoverACarpeta, type CarpetaFiltro } from '@/components/ficha/FichaFolders'
 import { SelectionBar } from '@/components/properties/SelectionBar'
+import { CrearSeleccion } from '@/components/ficha/coleccion/CrearSeleccion'
+import { SeleccionesLista } from '@/components/ficha/coleccion/SeleccionesLista'
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
@@ -530,7 +532,8 @@ export default function FichaPropioPage() {
           <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Fichas propias</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Pegá links de propiedades de cualquier portal (Zonaprop, Argenprop, MercadoLibre,
-            RE/MAX…) y generá fichas con tu marca y tus datos, listas para compartir.
+            RE/MAX…) y generá fichas con tu marca y tus datos. Seleccioná varias para armar una
+            sola ficha de selección para tu cliente.
           </p>
         </div>
       </header>
@@ -571,6 +574,9 @@ export default function FichaPropioPage() {
               : `Generar Ficha Propio${urls.length > 1 ? ` (${urls.length})` : ''} · ${agenteByEmail(agenteEmail).nombre}`}
           </button>
         </div>
+
+        {/* Fichas de selección: varias fichas en un solo link para un cliente */}
+        <SeleccionesLista />
 
         {/* Fichas generadas */}
         <div>
@@ -704,6 +710,7 @@ export default function FichaPropioPage() {
               onAssign={moverSeleccion}
               onCreate={crearCarpeta}
             />
+            <CrearSeleccion ids={selectedIds} />
           </SelectionBar>
         </div>
       )}

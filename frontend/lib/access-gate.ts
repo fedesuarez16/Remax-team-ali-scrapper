@@ -6,9 +6,9 @@
 export const ACCESS_COOKIE = 'app_access'
 
 /** Rutas que tienen que seguir abiertas sin contraseña: la pantalla de
- * desbloqueo, las fichas públicas que se comparten con clientes y los webhooks
- * que llaman servicios externos. */
-const PUBLIC_PREFIXES = ['/unlock', '/p/', '/api/webhooks/']
+ * desbloqueo, las fichas públicas que se comparten con clientes (individuales
+ * en /p/ y de selección en /s/) y los webhooks que llaman servicios externos. */
+const PUBLIC_PREFIXES = ['/unlock', '/p/', '/s/', '/api/webhooks/']
 
 export function isPublicPath(pathname: string): boolean {
   return PUBLIC_PREFIXES.some((prefix) => pathname.startsWith(prefix))
