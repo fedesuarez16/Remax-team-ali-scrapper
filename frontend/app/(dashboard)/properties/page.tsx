@@ -1,11 +1,13 @@
 'use client'
-import { Suspense, useEffect, useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
-import { Check, ChevronLeft, ChevronRight, Database, Loader2, MapPin, RefreshCw } from 'lucide-react'
+import { Suspense, useEffect, useRef, useState } from 'react'
+import dynamic from 'next/dynamic'
+import { useSearchParams } from 'next/navigation'
+import { Check, ChevronLeft, ChevronRight, Database, Loader2, MapPinOff, RefreshCw } from 'lucide-react'
 import { PropertyCard } from '@/components/chat/PropertyCard'
 import { SelectCheckbox } from '@/components/properties/SelectCheckbox'
 import { EnviarFichasBar } from '@/components/properties/EnviarFichasBar'
 import type { Property } from '@/hooks/useSSEStream'
+import { estaUbicada } from '@/lib/geo'
 import { sortVentaFirst } from '@/lib/operacion'
 import { EMPTY_FILTER, FilterBar, matchesFilter, type Filter } from '@/lib/propertyFilters'
 import { cn } from '@/lib/utils'
@@ -16,8 +18,17 @@ const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
 const PAGE_SIZE = 50
 
+// Leaflet toca `window` al cargar el módulo: sólo cliente.
+const ResultsMap = dynamic(() => import('@/components/map/ResultsMap'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-full items-center justify-center">
+      <Loader2 className="size-6 animate-spin text-muted-foreground" />
+    </div>
+  ),
+})
+
 function PropertiesPage() {
-  const router = useRouter()
   const searchParams = useSearchParams()
   const jobId = searchParams.get('job_id')
 
@@ -28,6 +39,15 @@ function PropertiesPage() {
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<Filter>(EMPTY_FILTER)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+
+  // Propiedad resaltada en lista + mapa. NO es lo mismo que `selected` (la
+  // selección múltiple para fichas): esta es una sola y sólo sirve para ubicar.
+  const [activeId, setActiveId] = useState<string | null>(null)
+  // De dónde vino la última activación: si vino del mapa hay que traer la
+  // tarjeta a la vista; si vino de la lista, el usuario ya la está mirando.
+  const activeFrom = useRef<'map' | 'list'>('list')
+  const cardRefs = useRef(new Map<string, HTMLDivElement>())
+  const [fueraOpen, setFueraOpen] = useState(false)
 
   const toggle = (key: string) =>
     setSelected((prev) => {
@@ -55,6 +75,27 @@ function PropertiesPage() {
   const coinciden = conIndice.filter(({ p }) => p.matches_criteria !== false)
   const fuera = conIndice.filter(({ p }) => p.matches_criteria === false)
 
+  const ubicadas = shown.filter(estaUbicada)
+  const showMap = !error && ubicadas.length > 0
+
+  const selectFromList = (id: string) => {
+    activeFrom.current = 'list'
+    setActiveId(id)
+  }
+
+  const selectFromMap = (id: string) => {
+    activeFrom.current = 'map'
+    setActiveId(id)
+    // Si la propiedad está en el desplegable "fuera de criterios", abrirlo:
+    // si no, la tarjeta a la que hay que scrollear no existe en pantalla.
+    if (fuera.some(({ p }) => p.id === id)) setFueraOpen(true)
+  }
+
+  useEffect(() => {
+    if (!activeId || activeFrom.current !== 'map') return
+    cardRefs.current.get(activeId)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }, [activeId, fueraOpen])
+
   /** Una tarjeta del listado. Vive acá porque las dos secciones — las que
    *  coinciden y el desplegable — muestran exactamente la misma tarjeta, y
    *  duplicar el JSX garantizaba que una de las dos se quedara sin el
@@ -62,29 +103,32 @@ function PropertiesPage() {
   const renderCard = (p: Property, i: number) => {
     const key = keyFor(p, i)
     const isSel = selected.has(key)
+    const ubicada = estaUbicada(p)
+    const isActive = ubicada && p.id === activeId
     return (
       <div
         key={key}
+        ref={(el) => {
+          if (!p.id) return
+          if (el) cardRefs.current.set(p.id, el)
+          else cardRefs.current.delete(p.id)
+        }}
         className={cn(
-          'relative rounded-2xl transition',
-          isSel && 'ring-2 ring-foreground ring-offset-2 ring-offset-background'
+          'relative scroll-m-4 rounded-2xl transition',
+          isSel && 'ring-2 ring-foreground ring-offset-2 ring-offset-background',
+          isActive && !isSel && 'ring-2 ring-blue-600 ring-offset-2 ring-offset-background'
         )}
       >
         <SelectCheckbox selected={isSel} onToggle={() => toggle(key)} />
-        {p.id && p.lat != null && p.lng != null && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              router.push(`/map?focus=${encodeURIComponent(p.id!)}`)
-            }}
-            aria-label="Ver en el mapa"
-            title="Ver en el mapa"
-            className="absolute right-2 top-2 z-20 flex size-6 items-center justify-center rounded-md border border-border bg-background/90 text-foreground shadow-sm backdrop-blur-sm transition hover:border-foreground/40 hover:bg-muted"
+        {!ubicada && (
+          <span
+            title="Sin ubicación: no aparece en el mapa"
+            className="absolute bottom-2 right-2 z-20 flex size-6 items-center justify-center rounded-md border border-border bg-background/90 text-muted-foreground backdrop-blur-sm"
           >
-            <MapPin className="size-3.5" />
-          </button>
+            <MapPinOff className="size-3.5" />
+          </span>
         )}
-        <PropertyCard p={p} />
+        <PropertyCard p={p} onSelect={ubicada ? () => selectFromList(p.id!) : undefined} />
       </div>
     )
   }
@@ -166,6 +210,7 @@ function PropertiesPage() {
   useEffect(() => {
     setPage(0)
     setSelected(new Set())
+    setActiveId(null)
     // Debounced so typing in the free-text/numeric filters doesn't fire a
     // request per keystroke.
     const t = setTimeout(() => void load(0), 350)
@@ -220,8 +265,15 @@ function PropertiesPage() {
         </div>
       </header>
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto p-6">
+      {/* Content: listado | mapa en la misma pantalla. En mobile el mapa va
+          arriba con altura fija y la lista scrollea debajo. */}
+      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+      {showMap && (
+        <div className="relative isolate h-[40vh] shrink-0 border-b border-border lg:order-2 lg:h-auto lg:w-[45%] lg:border-b-0 lg:border-l">
+          <ResultsMap propiedades={ubicadas} activeId={activeId} onSelect={selectFromMap} />
+        </div>
+      )}
+      <div className="min-h-0 flex-1 overflow-y-auto p-6 lg:order-1">
         {loading && properties.length === 0 ? (
           <div className="flex h-full items-center justify-center">
             <Loader2 className="size-6 animate-spin text-muted-foreground" />
@@ -253,7 +305,7 @@ function PropertiesPage() {
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            <div className={cn('grid grid-cols-1 gap-4 sm:grid-cols-2', showMap ? '2xl:grid-cols-3' : 'lg:grid-cols-3 xl:grid-cols-4')}>
               {coinciden.map(({ p, i }) => renderCard(p, i))}
             </div>
 
@@ -262,20 +314,25 @@ function PropertiesPage() {
                 puede haberlo mandado acá por error — pero cerrado, para que no
                 compita con lo que el usuario realmente pidió. */}
             {fuera.length > 0 && (
-              <details className="mt-6 rounded-2xl border border-border bg-card">
+              <details
+                open={fueraOpen}
+                onToggle={(e) => setFueraOpen(e.currentTarget.open)}
+                className="mt-6 rounded-2xl border border-border bg-card"
+              >
                 <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium text-foreground marker:text-muted-foreground">
                   Otras {fuera.length} {fuera.length === 1 ? 'propiedad encontrada' : 'propiedades encontradas'} fuera de tus criterios
                   <span className="ml-2 font-normal text-muted-foreground">
                     (otra zona o precio fuera de rango)
                   </span>
                 </summary>
-                <div className="grid grid-cols-1 gap-4 border-t border-border p-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                <div className={cn('grid grid-cols-1 gap-4 border-t border-border p-4 sm:grid-cols-2', showMap ? '2xl:grid-cols-3' : 'lg:grid-cols-3 xl:grid-cols-4')}>
                   {fuera.map(({ p, i }) => renderCard(p, i))}
                 </div>
               </details>
             )}
           </>
         )}
+      </div>
       </div>
 
       {/* Action bar — selección → borrar / enviar fichas (con paso de perfil) */}

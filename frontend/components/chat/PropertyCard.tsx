@@ -1,5 +1,5 @@
 'use client'
-import { CheckCircle2, MapPin } from 'lucide-react'
+import { CheckCircle2, ExternalLink, MapPin } from 'lucide-react'
 import { PropertyPhoto } from '@/components/property/PropertyPhoto'
 import type { Property } from '@/hooks/useSSEStream'
 import { operacionLabel } from '@/lib/operacion'
@@ -83,13 +83,24 @@ function fmtEnviada(iso: string): string {
   return new Intl.DateTimeFormat('es-AR', { day: 'numeric', month: 'short' }).format(d)
 }
 
-export function PropertyCard({ p }: { p: Property }) {
+export function PropertyCard({
+  p,
+  onSelect,
+}: {
+  p: Property
+  /** Si viene, el click en la tarjeta SELECCIONA (p. ej. para marcarla en el
+   *  mapa) y la publicación original pasa a un botón propio. Sin él, el click
+   *  abre la publicación como siempre. */
+  onSelect?: () => void
+}) {
   const fuente = p.fuente ?? ''
   const conf = p.confianza_extraccion ?? 0
   const enviadaEl = p.enviada_at ? fmtEnviada(p.enviada_at) : ''
+  const openOrigen = () => p.url_origen && window.open(p.url_origen, '_blank', 'noopener')
+  const clickable = Boolean(onSelect || p.url_origen)
 
   return (
-    <div className="group relative overflow-hidden rounded-2xl border border-border bg-card transition-all duration-200 hover:border-foreground/20 hover:bg-muted/30 hover:shadow-lg hover:shadow-black/5" onClick={() => p.url_origen && window.open(p.url_origen, '_blank', 'noopener')} style={p.url_origen ? {cursor: 'pointer'} : undefined}>
+    <div className="group relative overflow-hidden rounded-2xl border border-border bg-card transition-all duration-200 hover:border-foreground/20 hover:bg-muted/30 hover:shadow-lg hover:shadow-black/5" onClick={onSelect ?? openOrigen} style={clickable ? {cursor: 'pointer'} : undefined}>
 
       {/* Ya se le mandó al cliente — la señal más importante al volver a una búsqueda */}
       {p.enviada_at && (
@@ -144,7 +155,22 @@ export function PropertyCard({ p }: { p: Property }) {
       {/* Content */}
       <div className="p-3">
         {/* Price */}
-        <p className="text-base font-semibold tracking-tight text-foreground">{fmtPrice(p)}</p>
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-base font-semibold tracking-tight text-foreground">{fmtPrice(p)}</p>
+          {onSelect && p.url_origen && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                openOrigen()
+              }}
+              aria-label="Ver publicación original"
+              title="Ver publicación original"
+              className="flex size-6 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition hover:border-foreground/40 hover:text-foreground"
+            >
+              <ExternalLink className="size-3.5" />
+            </button>
+          )}
+        </div>
 
         {/* Address */}
         {p.direccion && (
