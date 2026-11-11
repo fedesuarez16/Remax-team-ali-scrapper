@@ -1,20 +1,22 @@
 'use client'
 import 'leaflet/dist/leaflet.css'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { CircleMarker as LeafletCircleMarker } from 'leaflet'
-import { Loader2 } from 'lucide-react'
+import { latLng, latLngBounds, type CircleMarker as LeafletCircleMarker } from 'leaflet'
+import { Loader2, MapPin, X } from 'lucide-react'
 import {
+  Circle,
   CircleMarker,
   MapContainer,
   Polygon,
   Polyline,
   Popup,
+  ZoomControl,
   useMap,
   useMapEvents,
 } from 'react-leaflet'
 import { BaseTiles } from '@/components/map/BaseTiles'
 import { useResolvedTheme } from '@/lib/theme'
-import { pointInPolygon } from '@/lib/geo'
+import { distanceMeters, distanceToLinesMeters, formatDistance, pointInPolygon } from '@/lib/geo'
 import { operacionLabel, sortVentaFirst } from '@/lib/operacion'
 import { EMPTY_FILTER, matchesFilter, type Filter } from '@/lib/propertyFilters'
 import { AgencySelector } from '@/components/chat/AgencySelector'
@@ -26,6 +28,9 @@ import { SavedZonesPanel } from '@/components/map/SavedZonesPanel'
 import { ApifyCostChip } from '@/components/cost/ApifyCostChip'
 import { useZoneSearch } from '@/hooks/useZoneSearch'
 import { useSavedZones, type SavedZone } from '@/hooks/useSavedZones'
+import { useBarriosCerrados } from '@/hooks/useBarriosCerrados'
+import { fetchPlaceGeometry } from '@/hooks/usePlaceSearch'
+import { MapSearchBar, type SearchPick } from '@/components/map/MapSearchBar'
 import {
   DEFAULT_SELECTION,
   describeSelection,
@@ -156,18 +161,58 @@ function FitPolygonHandler({
   return null
 }
 
+/** Fits the map to the active place (circle or street) whenever `nonce` bumps. */
+function FitPlaceHandler({ place, radiusM, nonce }: { place: ActivePlace; radiusM: number; nonce: number }) {
+  const map = useMap()
+  useEffect(() => {
+    const bounds = place.lines
+      ? latLngBounds(place.lines.flat())
+      : latLng(place.point).toBounds(radiusM * 2)
+    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 17 })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map, nonce])
+  return null
+}
+
+/** One-shot "elegí un punto": the next map click becomes the search center. */
+function PointPickHandler({ enabled, onPick }: { enabled: boolean; onPick: (p: [number, number]) => void }) {
+  const map = useMapEvents({
+    click(e) {
+      if (enabled) onPick([e.latlng.lat, e.latlng.lng])
+    },
+  })
+  useEffect(() => {
+    if (enabled) map.getContainer().style.cursor = 'crosshair'
+    return () => {
+      map.getContainer().style.cursor = ''
+    }
+  }, [enabled, map])
+  return null
+}
+
 type DrawState = 'idle' | 'drawing' | 'closed'
+
+/** A search center: a point (address, my location, clicked spot, barrio
+ *  without boundary) or a street. Properties match within `radiusM` of it. */
+type ActivePlace = { label: string; point: [number, number]; lines?: [number, number][][] }
+
+const POINT_RADII = [300, 500, 1000, 2000, 5000]
+const STREET_RADII = [50, 100, 200, 400]
+const DEFAULT_POINT_RADIUS = 1000
+const DEFAULT_STREET_RADIUS = 100
 
 export default function PropertyMap({
   properties,
   cartera = [],
   focusId,
   filter = EMPTY_FILTER,
+  onFilterChange,
 }: {
   properties: MapProperty[]
   cartera?: CarteraProperty[]
   focusId?: string
   filter?: Filter
+  onFilterChange?: (next: Filter) => void
 }) {
   const [drawState, setDrawState] = useState<DrawState>('idle')
   const [vertices, setVertices] = useState<[number, number][]>([])
@@ -202,14 +247,41 @@ export default function PropertyMap({
   const zoneActive = drawState === 'closed' && vertices.length >= 3
   const jobOverlayActive = zone.phase !== 'idle'
 
-  const insideProps = useMemo(
-    () => (zoneActive ? visibleProperties.filter((p) => pointInPolygon(p.lat, p.lng, vertices)) : []),
-    [zoneActive, visibleProperties, vertices]
-  )
-  const insideCartera = useMemo(
-    () => (zoneActive ? cartera.filter((c) => pointInPolygon(c.lat, c.lng, vertices)) : []),
-    [zoneActive, cartera, vertices]
-  )
+  const barrios = useBarriosCerrados()
+  const [place, setPlace] = useState<ActivePlace | null>(null)
+  const [radiusM, setRadiusM] = useState(DEFAULT_POINT_RADIUS)
+  const [placeNonce, setPlaceNonce] = useState(0)
+  const [pickingPoint, setPickingPoint] = useState(false)
+  const [placeLoading, setPlaceLoading] = useState(false)
+  const [placeNotice, setPlaceNotice] = useState<string | null>(null)
+
+  // Place and drawn zone are alternative ways to say "where": the place is
+  // only applied when no polygon is on the map.
+  const placeActive = place !== null && !zoneActive
+  const areaActive = zoneActive || placeActive
+
+  const distanceTo = useMemo(() => {
+    if (!place) return null
+    return (lat: number, lng: number) =>
+      place.lines ? distanceToLinesMeters([lat, lng], place.lines) : distanceMeters([lat, lng], place.point)
+  }, [place])
+
+  const insideProps = useMemo(() => {
+    if (zoneActive) return visibleProperties.filter((p) => pointInPolygon(p.lat, p.lng, vertices))
+    if (placeActive && distanceTo) {
+      return visibleProperties
+        .map((p) => ({ p, d: distanceTo(p.lat, p.lng) }))
+        .filter(({ d }) => d <= radiusM)
+        .sort((a, b) => a.d - b.d)
+        .map(({ p }) => p)
+    }
+    return []
+  }, [zoneActive, placeActive, distanceTo, radiusM, visibleProperties, vertices])
+  const insideCartera = useMemo(() => {
+    if (zoneActive) return cartera.filter((c) => pointInPolygon(c.lat, c.lng, vertices))
+    if (placeActive && distanceTo) return cartera.filter((c) => distanceTo(c.lat, c.lng) <= radiusM)
+    return []
+  }, [zoneActive, placeActive, distanceTo, radiusM, cartera, vertices])
   const insideIds = useMemo(() => new Set(insideProps.map((p) => p.id)), [insideProps])
   const insideCarteraIds = useMemo(() => new Set(insideCartera.map((c) => c.id)), [insideCartera])
 
@@ -222,7 +294,106 @@ export default function PropertyMap({
     )
   }, [zone.phase, visibleJobProperties])
 
+  const clearPlace = () => {
+    setPlace(null)
+    setPickingPoint(false)
+    setPlaceNotice(null)
+  }
+
+  const showPlace = (next: ActivePlace, radius: number) => {
+    setPlace(next)
+    setRadiusM(radius)
+    setPlaceNonce((n) => n + 1)
+  }
+
+  const showPolygon = (polygon: [number, number][]) => {
+    zone.cancel()
+    clearPlace()
+    setVertices(polygon)
+    setDrawState('closed')
+    setActiveZoneId(null)
+    setFitNonce((n) => n + 1)
+  }
+
+  // A polygon or place pick replaces whatever "where" was active (drawn zone
+  // or previous place); attribute picks (zona, inmobiliaria, palabra) merge
+  // into the filter and compose with it.
+  const handleSearchPick = async (pick: SearchPick) => {
+    setPlaceNotice(null)
+    setPickingPoint(false)
+    switch (pick.type) {
+      case 'zona':
+      case 'fuente':
+        onFilterChange?.({ ...filter, [pick.type]: pick.value })
+        return
+      case 'palabra':
+        onFilterChange?.({ ...filter, q: pick.value })
+        return
+      case 'polygon':
+        if (pick.savedZone) {
+          clearPlace()
+          selectSavedZone(pick.savedZone)
+        } else {
+          showPolygon(pick.polygon)
+        }
+        return
+      case 'pick-on-map':
+        setPickingPoint(true)
+        return
+      case 'my-location':
+        if (!navigator.geolocation) {
+          setPlaceNotice('El navegador no permite obtener tu ubicación')
+          return
+        }
+        setPlaceLoading(true)
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            setPlaceLoading(false)
+            leaveZone()
+            showPlace({ label: 'Mi ubicación', point: [pos.coords.latitude, pos.coords.longitude] }, DEFAULT_POINT_RADIUS)
+          },
+          () => {
+            setPlaceLoading(false)
+            setPlaceNotice('No se pudo obtener tu ubicación (¿permiso denegado?)')
+          },
+          { enableHighAccuracy: true, timeout: 10_000 }
+        )
+        return
+      case 'place': {
+        const p = pick.place
+        const point: [number, number] = [p.lat, p.lng]
+        setPlaceLoading(true)
+        const geom = await fetchPlaceGeometry(p)
+        setPlaceLoading(false)
+        if (p.kind === 'area' && geom.polygon && geom.polygon.length >= 3) {
+          showPolygon(geom.polygon)
+          return
+        }
+        leaveZone()
+        if (p.kind === 'street' && geom.lines?.length) {
+          showPlace({ label: p.label, point, lines: geom.lines }, DEFAULT_STREET_RADIUS)
+          return
+        }
+        if (p.kind === 'area' || p.kind === 'street') {
+          setPlaceNotice(`No encontramos el contorno de ${p.name}: buscamos por radio`)
+        }
+        showPlace({ label: p.label, point }, p.kind === 'area' ? 2000 : DEFAULT_POINT_RADIUS)
+        return
+      }
+    }
+  }
+
+  // Drops a drawn/selected polygon so a place takes over as the "where".
+  const leaveZone = () => {
+    if (drawState === 'idle') return
+    setVertices([])
+    setActiveZoneId(null)
+    setDrawState('idle')
+    zone.cancel()
+  }
+
   const startDrawing = () => {
+    clearPlace()
     setVertices([])
     setActiveZoneId(null)
     setDrawState('drawing')
@@ -267,8 +438,31 @@ export default function PropertyMap({
       zoom={INITIAL_ZOOM}
       className="h-full w-full"
       scrollWheelZoom
+      zoomControl={false}
     >
       <BaseTiles />
+      <ZoomControl position="bottomright" />
+      <PointPickHandler
+        enabled={pickingPoint}
+        onPick={(point) => {
+          setPickingPoint(false)
+          leaveZone()
+          showPlace({ label: 'Punto elegido', point }, DEFAULT_POINT_RADIUS)
+        }}
+      />
+      {placeActive && place && (
+        <>
+          {place.lines ? (
+            place.lines.map((line, i) => (
+              <Polyline key={`street-${i}`} positions={line} pathOptions={{ ...ZONE_STYLE, dashArray: undefined, weight: 4 }} />
+            ))
+          ) : (
+            <Circle center={place.point} radius={radiusM} pathOptions={ZONE_STYLE} />
+          )}
+          {!place.lines && <CircleMarker center={place.point} radius={5} pathOptions={VERTEX_STYLE} />}
+          <FitPlaceHandler place={place} radiusM={radiusM} nonce={placeNonce} />
+        </>
+      )}
       <DrawClickHandler
         enabled={drawState === 'drawing'}
         onAddVertex={(v) => setVertices((prev) => [...prev, v])}
@@ -291,7 +485,7 @@ export default function PropertyMap({
           ref={p.id === focusId ? focusMarkerRef : undefined}
           center={[p.lat, p.lng]}
           radius={p.id === focusId ? 9 : 6}
-          pathOptions={zoneActive && !insideIds.has(p.id) ? DIMMED_STYLE : markerStyleFor(p)}
+          pathOptions={areaActive && !insideIds.has(p.id) ? DIMMED_STYLE : markerStyleFor(p)}
         >
           <Popup>
             <div className="w-48">
@@ -327,7 +521,7 @@ export default function PropertyMap({
           center={[c.lat, c.lng]}
           radius={6}
           pathOptions={
-            zoneActive && !insideCarteraIds.has(c.id) ? CARTERA_DIMMED_STYLE : CARTERA_STYLE
+            areaActive && !insideCarteraIds.has(c.id) ? CARTERA_DIMMED_STYLE : CARTERA_STYLE
           }
         >
           <Popup>
@@ -392,6 +586,57 @@ export default function PropertyMap({
           </CircleMarker>
         ))}
     </MapContainer>
+
+    <div className="absolute left-4 top-4 z-[1001] flex w-[22rem] max-w-[calc(100%-2rem)] flex-col gap-2 md:max-w-[calc(100%-22rem)]">
+      <MapSearchBar savedZones={savedZones.zones} barrios={barrios.barrios} onPick={(pick) => void handleSearchPick(pick)} />
+      {placeLoading && (
+        <p className="flex items-center gap-2 rounded-lg border border-border bg-background/95 px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
+          <Loader2 className="size-3.5 animate-spin" /> Buscando...
+        </p>
+      )}
+      {pickingPoint && (
+        <p className="flex items-center justify-between gap-2 rounded-lg border border-border bg-background/95 px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
+          Hacé clic en el mapa para elegir el punto
+          <button onClick={() => setPickingPoint(false)} className="font-medium text-foreground underline">
+            Cancelar
+          </button>
+        </p>
+      )}
+      {placeNotice && (
+        <p className="rounded-lg border border-border bg-background/95 px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
+          {placeNotice}
+        </p>
+      )}
+      {placeActive && place && (
+        <div className="flex items-center gap-2 rounded-lg border border-border bg-background/95 px-3 py-1.5 text-xs shadow-sm">
+          <MapPin className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate text-foreground" title={place.label}>
+            {place.label}
+          </span>
+          <label className="flex shrink-0 items-center gap-1 text-muted-foreground">
+            {place.lines ? 'a' : 'radio'}
+            <select
+              value={radiusM}
+              onChange={(e) => setRadiusM(Number(e.target.value))}
+              className="rounded border border-border bg-card px-1 py-0.5 text-xs text-foreground"
+            >
+              {(place.lines ? STREET_RADII : POINT_RADII).map((r) => (
+                <option key={r} value={r}>
+                  {formatDistance(r)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            aria-label="Quitar ubicación"
+            onClick={clearPlace}
+            className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      )}
+    </div>
 
     <div className="absolute right-4 top-4 z-[1000] flex flex-col items-end gap-2">
       <div className="flex gap-2">
@@ -461,10 +706,11 @@ export default function PropertyMap({
           {zone.error}
         </p>
       )}
-      {zoneActive && (
+      {areaActive && (
         <div className="flex max-h-[60vh] w-72 flex-col overflow-hidden rounded-lg border border-border bg-background/95 shadow-sm">
           <p className="border-b border-border px-3 py-2 text-xs font-semibold text-foreground">
-            {insideProps.length + insideCartera.length} propiedades en la zona
+            {insideProps.length + insideCartera.length} propiedades{' '}
+            {placeActive ? `a menos de ${formatDistance(radiusM)}` : 'en la zona'}
           </p>
           <div className="overflow-y-auto">
             {insideProps.map((p) => (
@@ -475,7 +721,14 @@ export default function PropertyMap({
                 rel="noopener noreferrer"
                 className="block border-b border-border px-3 py-2 hover:bg-muted"
               >
-                <p className="text-xs font-semibold text-foreground">{fmtPrice(p)}</p>
+                <p className="flex items-baseline justify-between gap-2 text-xs font-semibold text-foreground">
+                  {fmtPrice(p)}
+                  {placeActive && distanceTo && (
+                    <span className="shrink-0 font-normal text-muted-foreground">
+                      {formatDistance(distanceTo(p.lat, p.lng))}
+                    </span>
+                  )}
+                </p>
                 <p className="line-clamp-1 text-xs text-muted-foreground">
                   {p.titulo ?? p.direccion}
                 </p>
@@ -497,7 +750,7 @@ export default function PropertyMap({
             ))}
             {insideProps.length + insideCartera.length === 0 && (
               <p className="px-3 py-3 text-xs text-muted-foreground">
-                No hay propiedades dentro de la zona marcada.
+                {placeActive ? 'No hay propiedades en ese radio.' : 'No hay propiedades dentro de la zona marcada.'}
               </p>
             )}
           </div>

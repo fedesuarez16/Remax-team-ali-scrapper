@@ -100,7 +100,13 @@ function MapPage() {
             <Loader2 className="size-6 animate-spin text-muted-foreground" />
           </div>
         ) : (
-          <PropertyMap properties={properties} cartera={cartera} focusId={focusId ?? undefined} filter={filter} />
+          <PropertyMap
+            properties={properties}
+            cartera={cartera}
+            focusId={focusId ?? undefined}
+            filter={filter}
+            onFilterChange={setFilter}
+          />
         )}
       </div>
     </div>

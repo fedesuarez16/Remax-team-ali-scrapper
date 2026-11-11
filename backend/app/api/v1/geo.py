@@ -1,17 +1,59 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Annotated, Literal
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services.geocode import (
     RATE_LIMIT_SECONDS, TransientGeocodeError, reverse_geocode, reverse_geocode_pair,
 )
+from app.services.place_search import (
+    Place, PlaceGeometry, PlaceSearchError, place_geometry, search_places,
+)
 from app.services.zona import normalize_zona
 
 router = APIRouter()
+
+
+class PlaceSearchResponse(BaseModel):
+    places: list[Place]
+
+
+@router.get('/search')
+async def search(
+    q: Annotated[str, Query(min_length=2, max_length=120)],
+) -> PlaceSearchResponse:
+    """Search-as-you-type suggestions for the /map search bar (Photon)."""
+    try:
+        async with httpx.AsyncClient() as client:
+            places = await search_places(q, client=client)
+    except PlaceSearchError:
+        raise HTTPException(status_code=503, detail='place search temporarily unavailable')
+    return PlaceSearchResponse(places=places)
+
+
+@router.get('/place-geometry')
+async def get_place_geometry(
+    kind: Literal['area', 'street'],
+    osm_type: Annotated[str, Query(pattern='^[NWR]$')],
+    osm_id: int,
+    name: Annotated[str, Query(min_length=1, max_length=120)],
+    city: Annotated[str | None, Query(max_length=120)] = None,
+    lat: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    lng: Annotated[float | None, Query(ge=-180, le=180)] = None,
+) -> PlaceGeometry:
+    """Boundary polygon (area) or every way of a street, fetched once per pick."""
+    try:
+        async with httpx.AsyncClient() as client:
+            return await place_geometry(
+                kind, osm_type=osm_type, osm_id=osm_id, name=name,
+                city=city, lat=lat, lng=lng, client=client,
+            )
+    except PlaceSearchError:
+        raise HTTPException(status_code=503, detail='place geometry temporarily unavailable')
 
 # Defense-in-depth cap — the frontend already caps `samplePolygon` output at 8
 # points, but a malicious/buggy client could send more; bound the cost here too.

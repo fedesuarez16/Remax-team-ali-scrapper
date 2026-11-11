@@ -105,3 +105,44 @@ export type Ubicada = Property & { id: string; lat: number; lng: number }
 
 export const estaUbicada = (p: Property): p is Ubicada =>
   !!p.id && typeof p.lat === 'number' && typeof p.lng === 'number'
+
+type LatLng = [number, number]
+
+// Equirectangular projection around the point — exact enough at city scale
+// and much cheaper than haversine when run over every marker on each render.
+const M_PER_DEG_LAT = 110_540
+const mPerDegLng = (lat: number) => 111_320 * Math.cos((lat * Math.PI) / 180)
+
+/** Distance in meters between two [lat, lng] points. */
+export function distanceMeters(a: LatLng, b: LatLng): number {
+  const kx = mPerDegLng((a[0] + b[0]) / 2)
+  return Math.hypot((a[0] - b[0]) * M_PER_DEG_LAT, (a[1] - b[1]) * kx)
+}
+
+function segmentMeters(p: LatLng, a: LatLng, b: LatLng): number {
+  const kx = mPerDegLng(p[0])
+  const ax = (a[1] - p[1]) * kx
+  const ay = (a[0] - p[0]) * M_PER_DEG_LAT
+  const dx = (b[1] - p[1]) * kx - ax
+  const dy = (b[0] - p[0]) * M_PER_DEG_LAT - ay
+  const len2 = dx * dx + dy * dy
+  const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2))
+  return Math.hypot(ax + t * dx, ay + t * dy)
+}
+
+/** Shortest distance in meters from a point to any segment of any polyline. */
+export function distanceToLinesMeters(p: LatLng, lines: LatLng[][]): number {
+  let best = Infinity
+  for (const line of lines) {
+    for (let i = 0; i < line.length - 1; i++) {
+      best = Math.min(best, segmentMeters(p, line[i], line[i + 1]))
+    }
+  }
+  return best
+}
+
+/** "350 m" / "1,2 km". */
+export function formatDistance(m: number): string {
+  if (m < 1000) return `${Math.round(m / 10) * 10} m`
+  return `${(m / 1000).toLocaleString('es-AR', { maximumFractionDigits: 1 })} km`
+}
