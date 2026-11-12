@@ -56,6 +56,11 @@ class _Query:
         self._filters.append(('in', column, list(values)))
         return self
 
+    def is_(self, column: str, value: str) -> '_Query':
+        # Sólo modela `is null`, que es lo que usa el router.
+        self._filters.append(('eq', column, None if value == 'null' else value))
+        return self
+
     def order(self, column: str, desc: bool = False) -> '_Query':
         self._order = (column, desc)
         return self
@@ -342,7 +347,9 @@ async def test_mark_sent_sets_and_clears_the_timestamp() -> None:
     assert cleared['coleccion']['enviada_at'] is None
 
 
-async def test_delete_removes_the_collection_but_not_the_properties() -> None:
+async def test_delete_archives_instead_of_removing_the_row() -> None:
+    """Borrar desde /ficha-propio la saca de la UI, pero el link que ya tiene
+    el cliente tiene que seguir andando: es un borrado lógico."""
     sb = _MemSupabase({'properties': _props('a')})
 
     async with _client(sb) as c:
@@ -350,8 +357,40 @@ async def test_delete_removes_the_collection_but_not_the_properties() -> None:
         body = (await c.delete(f"/ficha-colecciones/{col['id']}")).json()
 
     assert body['deleted'] is True
-    assert sb.tables['ficha_colecciones'] == []
+    (row,) = sb.tables['ficha_colecciones']
+    assert row['archivada_at']
+    assert len(sb.tables['ficha_coleccion_items']) == 1
     assert len(sb.tables['properties']) == 1
+
+
+async def test_archived_selection_is_hidden_from_the_list() -> None:
+    sb = _MemSupabase({'properties': _props('a', 'b')})
+
+    async with _client(sb) as c:
+        borrada = await _crear(c, ['a'])
+        viva = await _crear(c, ['b'])
+        await c.delete(f"/ficha-colecciones/{borrada['id']}")
+        body = (await c.get('/ficha-colecciones')).json()
+
+    assert [x['id'] for x in body['colecciones']] == [viva['id']]
+    assert body['total'] == 1
+
+
+async def test_archived_selection_link_still_works_for_the_client() -> None:
+    sb = _MemSupabase({'properties': _props('a')})
+
+    async with _client(sb) as c:
+        col = await _crear(c, ['a'])
+        await c.delete(f"/ficha-colecciones/{col['id']}")
+        detalle = await c.get(f"/ficha-colecciones/{col['id']}")
+        voto = await c.post(
+            f"/ficha-colecciones/{col['id']}/items/a/calificacion",
+            json={'calificacion': 'interesa'},
+        )
+
+    assert detalle.status_code == 200
+    assert [i['property']['id'] for i in detalle.json()['items']] == ['a']
+    assert voto.status_code == 200
 
 
 # ── degradación ─────────────────────────────────────────────────────────────

@@ -53,7 +53,7 @@ export function SeleccionesLista() {
               <button
                 type="button"
                 onClick={() => setConfirmando(c.id)}
-                title="Borrar selección (las fichas no se borran)"
+                title="Quitar de la lista (el link del cliente sigue funcionando)"
                 className="relative z-10 rounded-md p-1.5 text-muted-foreground opacity-0 transition hover:bg-muted hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100"
               >
                 <Trash2 className="size-3.5" />

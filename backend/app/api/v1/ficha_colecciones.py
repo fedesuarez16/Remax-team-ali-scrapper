@@ -89,7 +89,12 @@ async def list_colecciones(request: Request) -> dict[str, Any]:
         return {'colecciones': [], 'total': 0, 'error': 'Supabase no configurado'}
 
     try:
-        res = await sb.table(COLECCIONES).select('*').order('created_at', desc=True).execute()
+        # Las archivadas (borradas desde la UI) no se listan; su link sigue vivo.
+        res = await (
+            sb.table(COLECCIONES).select('*')
+            .is_('archivada_at', 'null')
+            .order('created_at', desc=True).execute()
+        )
         colecciones = [dict(c) for c in res.data or []]
         ids = [c['id'] for c in colecciones]
 
@@ -297,8 +302,14 @@ async def marcar_enviada(request: Request, coleccion_id: str, body: dict) -> dic
 
 @router.delete('/{coleccion_id}')
 async def delete_coleccion(request: Request, coleccion_id: str) -> dict[str, Any]:
-    """Borra la selección. Sus items caen por la FK `on delete cascade`; las
-    fichas propias quedan intactas. Idempotente."""
+    """Borrado LÓGICO: sella `archivada_at` y la selección desaparece de la
+    lista del agente, pero la fila y sus items quedan, así el link `/s/{id}`
+    que ya tiene el cliente sigue andando. Idempotente: re-borrar no pisa la
+    fecha original."""
     sb = _require_sb(request)
-    await sb.table(COLECCIONES).delete().eq('id', coleccion_id).execute()
+    await (
+        sb.table(COLECCIONES)
+        .update({'archivada_at': _now()})
+        .eq('id', coleccion_id).is_('archivada_at', 'null').execute()
+    )
     return {'deleted': True}
