@@ -179,6 +179,41 @@ function ComentarioAgente({ inicial, onSave }: { inicial: string; onSave: (t: st
   )
 }
 
+/** Botón visible para sacar la propiedad de la selección, con un paso de
+ *  confirmación: un click suelto no se puede llevar una propiedad del link
+ *  que ya tiene el cliente. */
+function QuitarItem({ onQuitar }: { onQuitar: () => void }) {
+  const [confirmando, setConfirmando] = useState(false)
+  const base = 'rounded-lg px-2.5 py-1.5 text-xs font-medium transition'
+
+  if (confirmando) {
+    return (
+      <div className="flex items-center justify-between gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-2.5 py-1.5">
+        <span className="text-xs text-foreground">¿Quitar de la selección?</span>
+        <div className="flex items-center gap-1">
+          <button type="button" onClick={() => setConfirmando(false)} className={`${base} text-muted-foreground hover:text-foreground`}>
+            No
+          </button>
+          <button type="button" onClick={onQuitar} className={`${base} bg-destructive text-white hover:bg-destructive/90`}>
+            Quitar
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setConfirmando(true)}
+      className={`${base} flex w-full items-center justify-center gap-1.5 border border-border text-muted-foreground hover:border-destructive/50 hover:bg-destructive/5 hover:text-destructive`}
+    >
+      <Trash2 className="size-3.5" />
+      Quitar de la selección
+    </button>
+  )
+}
+
 export function PropiedadCard({
   item,
   numero,
@@ -224,16 +259,7 @@ export function PropiedadCard({
           {modo === 'agente' ? (
             <>
               {onComentar && <ComentarioAgente inicial={item.comentario ?? ''} onSave={onComentar} />}
-              {onQuitar && (
-                <button
-                  type="button"
-                  onClick={onQuitar}
-                  className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground transition hover:text-destructive"
-                >
-                  <Trash2 className="size-3" />
-                  Quitar de la selección
-                </button>
-              )}
+              {onQuitar && <QuitarItem onQuitar={onQuitar} />}
             </>
           ) : (
             <>
