@@ -3,6 +3,7 @@ import { useMemo, useState, type ReactNode } from 'react'
 import dynamic from 'next/dynamic'
 import { ArrowUpDown, Building2, Check, Inbox, Pencil, ThumbsDown, ThumbsUp } from 'lucide-react'
 import { agenteByEmail } from '@/lib/ficha'
+import { TIPOS_PROPIEDAD } from '@/lib/propertyFilters'
 import { estaUbicada } from '@/lib/geo'
 import type { Calificacion, Coleccion, ColeccionDetalle } from '@/lib/colecciones'
 import { AgentAvatar } from '@/components/ficha/AgentAvatar'
@@ -17,6 +18,12 @@ const ColeccionMap = dynamic(() => import('./ColeccionMap'), {
 
 export type Modo = 'agente' | 'cliente'
 type Solapa = 'todas' | 'pendientes' | 'interesa' | 'no_interesa'
+
+/** Clave de tipo de una propiedad; sin tipo cae en "otro". */
+const tipoDe = (tipo: string | null | undefined): string => (tipo ?? '').trim().toLowerCase() || 'otro'
+
+const tipoLabel = (tipo: string): string =>
+  TIPOS_PROPIEDAD.find((t) => t.value === tipo)?.label ?? tipo.charAt(0).toUpperCase() + tipo.slice(1)
 
 export type ColeccionHandlers = {
   onEditar?: (patch: Partial<Pick<Coleccion, 'titulo' | 'subtitulo' | 'mostrar_mapa'>>) => Promise<boolean>
@@ -113,25 +120,55 @@ export function ColeccionView({
   const [solapa, setSolapa] = useState<Solapa>(modo === 'agente' ? 'todas' : 'pendientes')
   const [abierta, setAbierta] = useState<string | null>(null)
   const [ordenando, setOrdenando] = useState(false)
+  const [tipos, setTipos] = useState<string[]>([])
 
   const numero = useMemo(() => new Map(items.map((it, i) => [it.property_id, i + 1])), [items])
-  const ubicadas = useMemo(() => items.map((i) => i.property).filter(estaUbicada), [items])
+
+  // Tipos presentes, en el orden del catálogo, con cuántas propiedades hay de
+  // cada uno. El filtro sólo se ofrece si hay más de un tipo para elegir.
+  const tiposDisponibles = useMemo(() => {
+    const cuenta = new Map<string, number>()
+    for (const it of items) {
+      const t = tipoDe(it.property.tipo_propiedad)
+      cuenta.set(t, (cuenta.get(t) ?? 0) + 1)
+    }
+    const orden = TIPOS_PROPIEDAD.map((t) => t.value)
+    return [...cuenta.entries()]
+      .sort(([a], [b]) => (orden.indexOf(a) + 1 || 99) - (orden.indexOf(b) + 1 || 99))
+      .map(([value, n]) => ({ value, n }))
+  }, [items])
+  // Un tipo que ya no está (p. ej. el agente quitó su única propiedad) no filtra.
+  const { tiposActivos, filtrados } = useMemo(() => {
+    const activos = tipos.filter((t) => tiposDisponibles.some((d) => d.value === t))
+    return {
+      tiposActivos: activos,
+      filtrados: activos.length === 0
+        ? items
+        : items.filter((i) => activos.includes(tipoDe(i.property.tipo_propiedad))),
+    }
+  }, [items, tipos, tiposDisponibles])
+  const toggleTipo = (t: string) =>
+    setTipos((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]))
+
+  const ubicadas = useMemo(() => filtrados.map((i) => i.property).filter(estaUbicada), [filtrados])
 
   const counts: Record<Solapa, number> = {
-    todas: items.length,
-    pendientes: items.filter((i) => !i.calificacion).length,
-    interesa: items.filter((i) => i.calificacion === 'interesa').length,
-    no_interesa: items.filter((i) => i.calificacion === 'no_interesa').length,
+    todas: filtrados.length,
+    pendientes: filtrados.filter((i) => !i.calificacion).length,
+    interesa: filtrados.filter((i) => i.calificacion === 'interesa').length,
+    no_interesa: filtrados.filter((i) => i.calificacion === 'no_interesa').length,
   }
+  // El progreso del cliente es sobre TODA la selección, no sobre el filtro.
+  const pendientesTotal = items.filter((i) => !i.calificacion).length
 
   // El cliente arranca en "Para calificar"; cuando la vacía no lo dejamos
   // mirando una solapa en blanco — salta a lo que le interesó.
   const solapaEfectiva: Solapa =
-    modo === 'cliente' && solapa === 'pendientes' && counts.pendientes === 0 && items.length > 0
+    modo === 'cliente' && solapa === 'pendientes' && counts.pendientes === 0 && filtrados.length > 0
       ? counts.interesa > 0 ? 'interesa' : 'no_interesa'
       : solapa
 
-  const visibles = items.filter((i) =>
+  const visibles = filtrados.filter((i) =>
     solapaEfectiva === 'todas' ? true
       : solapaEfectiva === 'pendientes' ? !i.calificacion
         : i.calificacion === solapaEfectiva,
@@ -145,7 +182,7 @@ export function ColeccionView({
   ]
 
   const mostrarMapa = ubicadas.length > 0 && (modo === 'agente' || coleccion.mostrar_mapa)
-  const calificadas = items.length - counts.pendientes
+  const calificadas = items.length - pendientesTotal
   const itemAbierto = items.find((i) => i.property_id === abierta) ?? null
 
   return (
@@ -191,7 +228,7 @@ export function ColeccionView({
           <div className="mt-5">
             <div className="mb-1.5 flex justify-between text-xs text-muted-foreground">
               <span>{calificadas === 0 ? 'Comenzá calificando propiedades' : `Calificaste ${calificadas} de ${items.length}`}</span>
-              <span className="font-mono">{counts.pendientes === 0 ? '¡Listo!' : `${counts.pendientes} restante${counts.pendientes === 1 ? '' : 's'}`}</span>
+              <span className="font-mono">{pendientesTotal === 0 ? '¡Listo!' : `${pendientesTotal} restante${pendientesTotal === 1 ? '' : 's'}`}</span>
             </div>
             <div className="h-1.5 overflow-hidden rounded-full bg-muted">
               <div className="h-full rounded-full bg-foreground transition-all" style={{ width: `${(calificadas / items.length) * 100}%` }} />
@@ -215,10 +252,38 @@ export function ColeccionView({
             )}
           </div>
         )}
-        {modo === 'agente' && ubicadas.length < items.length && (
+        {modo === 'agente' && ubicadas.length < filtrados.length && (
           <p className="mt-2 text-[11px] text-muted-foreground">
-            {items.length - ubicadas.length} propiedad{items.length - ubicadas.length === 1 ? '' : 'es'} sin ubicación no aparece{items.length - ubicadas.length === 1 ? '' : 'n'} en el mapa.
+            {filtrados.length - ubicadas.length} propiedad{filtrados.length - ubicadas.length === 1 ? '' : 'es'} sin ubicación no aparece{filtrados.length - ubicadas.length === 1 ? '' : 'n'} en el mapa.
           </p>
+        )}
+
+        {tiposDisponibles.length > 1 && (
+          <div className="mt-5 flex flex-wrap items-center gap-1.5" role="group" aria-label="Filtrar por tipo">
+            <span className="mr-1 text-xs text-muted-foreground">Tipo:</span>
+            <button
+              type="button"
+              onClick={() => setTipos([])}
+              aria-pressed={tiposActivos.length === 0}
+              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${tiposActivos.length === 0 ? 'border-foreground bg-foreground text-background' : 'border-border text-muted-foreground hover:text-foreground'}`}
+            >
+              Todos · {items.length}
+            </button>
+            {tiposDisponibles.map((t) => {
+              const on = tiposActivos.includes(t.value)
+              return (
+                <button
+                  key={t.value}
+                  type="button"
+                  onClick={() => toggleTipo(t.value)}
+                  aria-pressed={on}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium transition ${on ? 'border-foreground bg-foreground text-background' : 'border-border text-muted-foreground hover:text-foreground'}`}
+                >
+                  {tipoLabel(t.value)} · {t.n}
+                </button>
+              )
+            })}
+          </div>
         )}
 
         <div className="mt-5 flex flex-wrap items-end justify-between gap-2 border-b border-border">
@@ -258,7 +323,11 @@ export function ColeccionView({
           <div className="flex flex-col items-center gap-2 rounded-2xl border border-dashed border-border py-12 text-center">
             <Check className="size-8 text-muted-foreground/40" />
             <p className="text-sm text-muted-foreground">
-              {items.length === 0 ? 'Esta selección no tiene propiedades.' : 'No hay propiedades en esta solapa.'}
+              {items.length === 0
+                ? 'Esta selección no tiene propiedades.'
+                : tiposActivos.length > 0
+                  ? 'No hay propiedades de este tipo en esta solapa.'
+                  : 'No hay propiedades en esta solapa.'}
             </p>
           </div>
         ) : (
