@@ -8,11 +8,13 @@ import { AgenteSelector } from '@/components/ficha/AgenteSelector'
 
 /** Botón de la barra de selección: junta las fichas marcadas en UNA ficha de
  *  selección para un cliente y abre el editor para personalizarla. */
-export function CrearSeleccion({ ids }: { ids: string[] }) {
+export function CrearSeleccion({ ids, agenteInicial }: { ids: string[]; agenteInicial?: string | null }) {
   const router = useRouter()
   const [abierto, setAbierto] = useState(false)
   const [cliente, setCliente] = useState('')
-  const [agenteEmail, setAgenteEmail] = useState<string>(AGENTES[0].email)
+  const [agenteEmail, setAgenteEmail] = useState<string>(
+    AGENTES.find((a) => a.email === agenteInicial)?.email ?? AGENTES[0].email,
+  )
   const [creando, setCreando] = useState(false)
   const [error, setError] = useState<string | null>(null)
 

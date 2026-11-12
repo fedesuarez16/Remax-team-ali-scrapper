@@ -6,6 +6,7 @@ import type { Property } from '@/hooks/useSSEStream'
 import { agenteByEmail, fichaUrl, guardarSeleccion, leerSeleccion } from '@/lib/ficha'
 import { PropertyFicha, fmtPrice } from '@/components/ficha/PropertyFicha'
 import { FichaEditor } from '@/components/ficha/FichaEditor'
+import { CrearSeleccion } from '@/components/ficha/coleccion/CrearSeleccion'
 
 function FichaLinkBar({ p, onEdit }: { p: Property; onEdit: () => void }) {
   const url = fichaUrl(p.id)
@@ -124,7 +125,13 @@ export default function FichaPage() {
           </div>
         </div>
         {props.length > 0 && (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {props.some((p) => p.id) && (
+              <CrearSeleccion
+                ids={props.flatMap((p) => (p.id ? [p.id] : []))}
+                agenteInicial={props[0]?.agente_email}
+              />
+            )}
             <button
               onClick={() => window.print()}
               className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground transition hover:bg-muted"
