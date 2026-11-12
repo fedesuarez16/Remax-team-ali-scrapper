@@ -21,6 +21,31 @@ from app.services.zona import zona_filter as _zona_filter
 router = APIRouter()
 
 
+def _split_list(raw: str | None) -> list[str]:
+    """`"casa, ph,"` → `["casa", "ph"]`. The UI sends multi-select filters as a
+    comma-separated value; a single value is just a one-item list."""
+    return [v.strip() for v in (raw or '').split(',') if v.strip()]
+
+
+def _zona_group(match: tuple[str, ...], exclude: tuple[str, ...]) -> str:
+    """One zona as a PostgREST logic-tree item for a top-level `or=(...)`.
+
+    Exclusions live INSIDE the zona's own `and(...)` group, so picking
+    La Plata + City Bell keeps City Bell listings: La Plata's "not city bell"
+    only narrows La Plata's branch. `direccion_norm` is derived from
+    `direccion`, so negating the raw column alone already covers both.
+    """
+    hits = ','.join(
+        f'{column}.ilike.*{term}*'
+        for term in match
+        for column in ('direccion', 'direccion_norm')
+    )
+    if not exclude:
+        return f'or({hits})'
+    nots = ','.join(f'direccion.not.ilike.*{term}*' for term in exclude)
+    return f'and(or({hits}),{nots})'
+
+
 @router.get('')
 async def list_properties(
     request: Request,
@@ -58,9 +83,16 @@ async def list_properties(
     if sb is None:
         return {'properties': [], 'total': 0, 'message': 'Supabase no configurado'}
 
-    zona_spec = _zona_filter(zona) if zona else None
-    if zona and zona_spec is None:
-        return {'properties': [], 'total': 0, 'error': f'zona desconocida: {zona}'}
+    zona_expr: str | None = None
+    zonas = _split_list(zona)
+    if zonas:
+        groups: list[str] = []
+        for slug in zonas:
+            spec = _zona_filter(slug)
+            if spec is None:
+                return {'properties': [], 'total': 0, 'error': f'zona desconocida: {slug}'}
+            groups.append(_zona_group(*spec))
+        zona_expr = ','.join(groups)
 
     try:
         query = (
@@ -68,14 +100,17 @@ async def list_properties(
             .select('*', count='exact')
             .order('created_at', desc=True)
         )
-        for column, value in (
+        for column, raw in (
             ('fuente', fuente),
             ('tipo_operacion', tipo_operacion),
             ('tipo_propiedad', tipo_propiedad),
             ('moneda', moneda),
         ):
-            if value:
-                query = query.eq(column, value)
+            values = _split_list(raw)
+            if len(values) == 1:
+                query = query.eq(column, values[0])
+            elif values:
+                query = query.in_(column, values)
         for column, value in (
             ('precio', precio_min),
             ('ambientes', ambientes_min),
@@ -101,19 +136,10 @@ async def list_properties(
                     f'direccion.ilike.*{term}*,'
                     f'direccion_norm.ilike.*{term}*'
                 )
-        if zona_spec is not None:
-            match, exclude = zona_spec
+        if zona_expr is not None:
             # PostgREST ANDs repeated top-level filters, so this `or` composes
             # with the `q` one above instead of replacing it.
-            query = query.or_(','.join(
-                f'{column}.ilike.*{term}*'
-                for term in match
-                for column in ('direccion', 'direccion_norm')
-            ))
-            # `direccion_norm` is derived from `direccion`, so negating the raw
-            # column alone already covers both.
-            for term in exclude:
-                query = query.not_.ilike('direccion', f'*{term}*')
+            query = query.or_(zona_expr)
         result = await query.range(offset, offset + limit - 1).execute()
         return {'properties': result.data, 'total': result.count or 0}
     except Exception as e:

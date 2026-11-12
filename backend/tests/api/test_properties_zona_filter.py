@@ -143,12 +143,13 @@ async def test_la_plata_excludes_its_sibling_localities() -> None:
         resp = await client.get('/properties', params={'zona': 'la_plata'})
 
     assert resp.status_code == 200
-    assert 'direccion.ilike.*la plata*' in _ors(fake_sb)[0]
-    excluded = {c[2] for c in _not_ilikes(fake_sb)}
-    assert excluded == {
-        '*city bell*', '*citybell*', '*gonnet*', '*villa elisa*', '*hudson*',
-    }
-    assert all(c[1] == 'direccion' for c in _not_ilikes(fake_sb))
+    clause = _ors(fake_sb)[0]
+    assert 'direccion.ilike.*la plata*' in clause
+    # Exclusions live inside La Plata's own and(...) group (so a multi-zona
+    # pick like La Plata + City Bell still returns City Bell listings).
+    for term in ('city bell', 'citybell', 'gonnet', 'villa elisa', 'hudson'):
+        assert f'direccion.not.ilike.*{term}*' in clause
+    assert _not_ilikes(fake_sb) == []
 
 
 async def test_every_offered_zona_is_accepted() -> None:

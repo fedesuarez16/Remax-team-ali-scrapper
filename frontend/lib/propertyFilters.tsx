@@ -5,6 +5,12 @@
 //   - /map                     → filtered client-side to show/hide markers
 // The `matchesFilter` predicate mirrors the backend semantics in
 // backend/app/api/v1/properties.py::list_properties so client and server agree.
+//
+// Multi-select fields (zona, fuente, tipo_operacion, tipo_propiedad) stay
+// strings: several picks are joined with commas ("casa,ph"), which is exactly
+// what the backend accepts as a query param. '' still means "todas".
+import { useEffect, useRef, useState } from 'react'
+import { Check, ChevronDown } from 'lucide-react'
 
 export type Filter = {
   fuente: string
@@ -161,8 +167,14 @@ const num = (s: string): number | null => {
   return Number.isFinite(v) ? v : null
 }
 
-const eqStr = (val: string | null | undefined, want: string): boolean =>
-  !want || String(val ?? '').toLowerCase() === want.toLowerCase()
+/** "casa, ph," → ["casa", "ph"]. Mirrors `_split_list` in the backend. */
+export const splitList = (raw: string): string[] =>
+  raw.split(',').map((v) => v.trim()).filter(Boolean)
+
+const eqStr = (val: string | null | undefined, want: string): boolean => {
+  const wanted = splitList(want).map((w) => w.toLowerCase())
+  return wanted.length === 0 || wanted.includes(String(val ?? '').toLowerCase())
+}
 
 // Range bounds mirror PostgREST gte/lte: a null column value never satisfies a
 // bound (SQL NULL comparisons are false), so it drops out once a bound is set.
@@ -174,12 +186,17 @@ const lte = (val: number | null | undefined, max: number | null): boolean =>
 // Mirrors the backend clause. It only reads `direccion` — `direccion_norm` is
 // derived from it (lowercase + accent-strip) and no zona term carries an
 // accent, so the lowercased raw address is an equivalent haystack.
+// Several zonas are ORed, each keeping its own exclusions (La Plata + City Bell
+// still shows City Bell) — same shape as the backend's per-zona and(...) group.
 const matchesZona = (p: FilterableProperty, zona: string): boolean => {
-  const terms = ZONA_TERMS[zona]
-  if (!terms) return true
+  const slugs = splitList(zona).filter((z) => ZONA_TERMS[z])
+  if (slugs.length === 0) return true
   const hay = (p.direccion ?? '').toLowerCase()
-  if (!terms.some((t) => hay.includes(t))) return false
-  return !(ZONA_EXCLUDES[zona] ?? []).some((t) => hay.includes(t))
+  return slugs.some(
+    (z) =>
+      ZONA_TERMS[z].some((t) => hay.includes(t)) &&
+      !(ZONA_EXCLUDES[z] ?? []).some((t) => hay.includes(t)),
+  )
 }
 
 /** True when the property satisfies every active filter clause. */
@@ -230,6 +247,105 @@ function FilterSelect({
           <option key={o.value} value={o.value}>{o.label}</option>
         ))}
       </select>
+    </div>
+  )
+}
+
+/** Dropdown with checkboxes. `value` is the comma-joined selection; the
+ *  options' '' entry ("Todas") is rendered as the clear-all row. */
+function MultiSelect({
+  label, value, options, onChange,
+}: {
+  label: string
+  value: string
+  options: { value: string; label: string }[]
+  onChange: (v: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const selected = splitList(value)
+  const choices = options.filter((o) => o.value)
+  const todas = options.find((o) => !o.value)?.label ?? 'Todas'
+
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent ? e.key === 'Escape' : !ref.current?.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', close)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', close)
+    }
+  }, [open])
+
+  const toggle = (v: string) => {
+    const next = selected.includes(v) ? selected.filter((s) => s !== v) : [...selected, v]
+    // Keep the catalogue order so the query string is stable.
+    onChange(choices.map((o) => o.value).filter((o) => next.includes(o)).join(','))
+  }
+
+  const summary =
+    selected.length === 0
+      ? todas
+      : selected.length <= 2
+        ? selected.map((s) => choices.find((o) => o.value === s)?.label ?? s).join(', ')
+        : `${selected.length} seleccionados`
+
+  const rowCls =
+    'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-foreground transition hover:bg-muted'
+
+  return (
+    <div ref={ref} className="relative flex items-center gap-2">
+      <span className="text-xs text-muted-foreground">{label}:</span>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className="flex max-w-44 items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
+      >
+        <span className="truncate">{summary}</span>
+        <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+      </button>
+      {open && (
+        <div
+          role="listbox"
+          aria-multiselectable="true"
+          aria-label={label}
+          className="absolute left-0 top-full z-50 mt-1 max-h-72 w-52 overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-lg"
+        >
+          <button type="button" onClick={() => onChange('')} className={rowCls}>
+            <span className="flex size-3.5 items-center justify-center rounded border border-border">
+              {selected.length === 0 && <Check className="size-3" />}
+            </span>
+            {todas}
+          </button>
+          {choices.map((o) => {
+            const on = selected.includes(o.value)
+            return (
+              <button
+                key={o.value}
+                type="button"
+                role="option"
+                aria-selected={on}
+                onClick={() => toggle(o.value)}
+                className={rowCls}
+              >
+                <span
+                  className={`flex size-3.5 items-center justify-center rounded border ${on ? 'border-foreground bg-foreground text-background' : 'border-border'}`}
+                >
+                  {on && <Check className="size-3" />}
+                </span>
+                {o.label}
+              </button>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -287,10 +403,10 @@ export function FilterBar({
           placeholder="Buscar por ubicación o título..."
           className="w-56 rounded-lg border border-border bg-card px-2.5 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
         />
-        <FilterSelect label="Zona" value={filter.zona} options={ZONAS} onChange={set('zona')} />
-        <FilterSelect label="Fuente" value={filter.fuente} options={FUENTES} onChange={set('fuente')} />
-        <FilterSelect label="Operación" value={filter.tipo_operacion} options={OPERACIONES} onChange={set('tipo_operacion')} />
-        <FilterSelect label="Tipo" value={filter.tipo_propiedad} options={TIPOS_PROPIEDAD} onChange={set('tipo_propiedad')} />
+        <MultiSelect label="Zona" value={filter.zona} options={ZONAS} onChange={set('zona')} />
+        <MultiSelect label="Fuente" value={filter.fuente} options={FUENTES} onChange={set('fuente')} />
+        <MultiSelect label="Operación" value={filter.tipo_operacion} options={OPERACIONES} onChange={set('tipo_operacion')} />
+        <MultiSelect label="Tipo" value={filter.tipo_propiedad} options={TIPOS_PROPIEDAD} onChange={set('tipo_propiedad')} />
         <FilterSelect label="Ambientes" value={filter.ambientes_min} options={AMBIENTES} onChange={set('ambientes_min')} />
         <FilterSelect label="Baños" value={filter.banos_min} options={BANOS} onChange={set('banos_min')} />
         <FilterSelect label="Cocheras" value={filter.cocheras_min} options={COCHERAS} onChange={set('cocheras_min')} />
